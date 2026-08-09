@@ -23,9 +23,8 @@ from dagua.layout.ops.pipelines.native_cost_model import (
     estimate_v3_referee_cost,
 )
 from dagua.layout.ops.pipelines.native_shadow_champion import (
-    is_new_arm_candidate,
     new_arms_disabled,
-    record_new_arm_displacement,
+    resolve_contest_winner,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -6091,14 +6090,22 @@ def layout_native_directed_portfolio(
         if score_telemetry is not None:
             cluster_score_telemetry[name] = score_telemetry
     best_name = _select_directed_winner(scores, cluster_score_telemetry)
+    # Shadow-champion legacy-track contest (W2-4a / C10, review F1): a
+    # new-arm winner (whose displacement arms the outermost invocation to
+    # re-run the ENTIRE solve with new arms disabled -- including the
+    # dominance-gated tail arms below and the directed terminal seams) is
+    # admitted only when the complete legacy-track shadow package reserves
+    # all-or-nothing on the entry ledger; on a veto the contest fails closed
+    # to the legacy-family champion and no shadow runs.
+    best_name = resolve_contest_winner(
+        config,
+        route="directed",
+        best_name=best_name,
+        scores=scores,
+        telemetry=cluster_score_telemetry,
+        select_winner=_select_directed_winner,
+    )
     best_position = positions[best_name]
-    # Shadow-champion legacy-track contest (W2-4a / C10): a new-arm contest
-    # win arms the outermost pipeline invocation to re-run the ENTIRE solve
-    # with new arms disabled -- including the dominance-gated tail arms below
-    # and the directed terminal seams -- and emit the referee-higher FINAL
-    # drawing.
-    if is_new_arm_candidate(best_name):
-        record_new_arm_displacement(config, route="directed", winner_name=best_name)
     if best_name != "incumbent" and _portfolio_has_budget(config, min_remaining_s=2.0):
         edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
         best_cpu = best_position.detach().to(device="cpu", dtype=torch.float32)

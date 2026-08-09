@@ -7907,11 +7907,15 @@ def layout_dagua_native_pipeline(
     torch.Tensor
         Detached position tensor with shape ``[N, 2]``.
     """
+    from dagua.layout.ops.pipelines.native_budget import charge, release_tail_reservation
     from dagua.layout.ops.pipelines.native_shadow_champion import (
+        DISABLE_NEW_ARMS_ATTR,
         NEW_ARM_DISPLACEMENTS_ATTR,
         SHADOW_CONTEST_TELEMETRY_ATTR,
         build_legacy_shadow_config,
+        install_shadow_reservation_state,
         new_arms_disabled,
+        price_shadow_package,
         snapshot_ledger_plan,
     )
 
@@ -7966,27 +7970,80 @@ def layout_dagua_native_pipeline(
         and getattr(config, "fidelity_mode", None) is None
     )
     if not orchestrate:
+        if (
+            is_owner_invocation
+            and not new_arms_disabled(config)
+            and bool(getattr(config, "_dagua_scale_anytime_native", False))
+        ):
+            # The scale-anytime caller runs under a hard wall deadline and
+            # cannot afford a legacy-track shadow re-run, so it must never
+            # see a new-arm contest win either: fail-closed to the legacy
+            # track by gate-closing every new-arm generation site (F1).
+            anytime_config = copy.copy(config)
+            setattr(anytime_config, DISABLE_NEW_ARMS_ATTR, True)
+            return run_single_track(anytime_config)
         return run_single_track(config)
 
     # The displacement log is a shared mutable list: shallow config copies
     # inside the solve (per-component problems, contest seams) alias it, so a
     # new-arm contest win recorded anywhere in the solve reaches this seam.
     displacements: list[dict[str, Any]] = []
-    # Snapshot the entry budget plan BEFORE the primary solve spends from the
-    # shared ledger: the legacy track receives this complete plan as its own
-    # fresh ledger, never the primary run's remainder (all-or-nothing, F1).
+    # Snapshot the entry budget plan and price the complete shadow package
+    # BEFORE the primary solve spends from the shared ledger. A new arm may
+    # win a contest only if this package reserves all-or-nothing on the entry
+    # ledger at that argmax (try_reserve_shadow_package); otherwise the
+    # contest fails closed to the legacy champion. Primary and shadow
+    # therefore always fit the one entry budget together (F1).
     ledger_plan = snapshot_ledger_plan(config)
+    edge_count = int(edge_index.shape[1]) if edge_index.numel() else 0
+    shadow_plan = price_shadow_package(
+        config,
+        num_nodes=int(num_nodes),
+        num_edges=edge_count,
+        has_clusters=bool(clusters),
+        has_weights=edge_weights is not None,
+    )
     primary_config = copy.copy(config) if config is not None else LayoutConfig()
     setattr(primary_config, NEW_ARM_DISPLACEMENTS_ATTR, displacements)
+    reservation_state = install_shadow_reservation_state(primary_config, shadow_plan)
     primary_pos = run_single_track(primary_config)
     if not displacements:
+        if bool(reservation_state.get("reserved")) and shadow_plan is not None:
+            release_tail_reservation(
+                primary_config,
+                shadow_plan.package_dwu,
+                "shadow_champion_no_displacement",
+            )
+        if reservation_state["vetoes"] and config is not None:
+            # Fail-closed rows: a new arm would have won at least one contest
+            # but the shadow package was unaffordable, so the legacy champion
+            # was emitted instead (forensics + regression coverage).
+            setattr(
+                config,
+                SHADOW_CONTEST_TELEMETRY_ATTR,
+                {
+                    "displacements": [],
+                    "emitted": "primary",
+                    "reservation_vetoes": list(reservation_state["vetoes"]),
+                },
+            )
         return primary_pos
 
     public_direction = str(getattr(config, "direction", "TB")) if config is not None else "TB"
     if public_direction not in {"TB", "BT", "LR", "RL"}:
         public_direction = "TB"
+    if shadow_plan is not None:
+        # Fund the shadow track from the held reservation: the released
+        # package becomes the shadow's fresh ledger plus the final referee
+        # charge, so the two tracks together never exceed the entry plan.
+        release_tail_reservation(
+            primary_config,
+            shadow_plan.package_dwu,
+            "shadow_champion_fund_shadow_track",
+        )
+        charge(primary_config, shadow_plan.referee_dwu, "shadow_champion_final_referee")
     try:
-        shadow_config = build_legacy_shadow_config(config, ledger_plan)
+        shadow_config = build_legacy_shadow_config(config, ledger_plan, shadow_plan)
         shadow_pos = run_single_track(shadow_config)
         if int(shadow_pos.shape[0]) != int(primary_pos.shape[0]) or not bool(
             torch.isfinite(shadow_pos).all().item()
@@ -8030,16 +8087,19 @@ def layout_dagua_native_pipeline(
                     "emitted": "shadow" if emit_shadow else "primary",
                     "primary_pos": primary_pos.detach().to(device="cpu"),
                     "shadow_pos": shadow_pos.detach().to(device="cpu"),
+                    "shadow_plan": shadow_plan,
                 },
             )
         if emit_shadow:
             return shadow_pos.to(device=primary_pos.device, dtype=primary_pos.dtype)
         return primary_pos
-    except Exception as exc:  # noqa: BLE001 -- the shadow track cannot sink the primary
-        if is_worker_timeout_like_exception(exc):
-            raise
-        _LOGGER.warning(
-            "shadow-champion legacy-track re-run failed; emitting the primary track",
+    except Exception as exc:
+        # After a displacement the primary is never silently emitted: an
+        # ordinary shadow failure means the monotonicity contract cannot be
+        # certified for this solve, so it propagates to the caller (F1).
+        _LOGGER.error(
+            "shadow-champion legacy-track re-run failed after a displacement; "
+            "propagating (the displaced primary is never emitted unverified)",
             exc_info=True,
         )
         if config is not None:
@@ -8048,11 +8108,11 @@ def layout_dagua_native_pipeline(
                 SHADOW_CONTEST_TELEMETRY_ATTR,
                 {
                     "displacements": list(displacements),
-                    "emitted": "primary",
+                    "emitted": "error",
                     "error": repr(exc),
                 },
             )
-        return primary_pos
+        raise
 
 
 __all__ = [

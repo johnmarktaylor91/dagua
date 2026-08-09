@@ -10,19 +10,26 @@ emit a final drawing worse than what the displaced legacy-family winner would
 have produced (rome/grafo1000.14 regression, 90.74 -> 84.82,
 DIAG_GRAFO1000.md).
 
-Fix (review W2-4a F1-F3 shape): whenever a NEW-ARM family wins any contest
-argmax, the contest records the displacement here; the outermost native
-pipeline invocation then re-runs the ENTIRE pipeline once with every new-arm
-family disabled -- an isolated legacy track with its own fresh deterministic
-DWU ledger and no wall-clock deadline -- scores both FINAL drawings with the
+Fix (review W2-4a F1-F3 shape): a new-arm family may win a contest argmax
+ONLY when the complete legacy-track shadow package -- one full pipeline
+re-run with every new-arm family disabled, plus the final two-track referee
+contest -- is reserved all-or-nothing on the solve's entry ledger at that
+instant (:func:`try_reserve_shadow_package`). When the reservation is vetoed
+the contest falls back to the legacy-family champion (fail-closed to the
+legacy track; the weaker new-arm drawing is never emitted and no shadow runs).
+When it is granted, the displacement is recorded and the outermost native
+pipeline invocation re-runs the ENTIRE pipeline once with every new-arm
+family disabled -- funded by exactly the reserved deterministic budget, never
+a second copy of the entry plan -- scores both FINAL drawings with the
 runtime referee, and emits the higher (ties go to the legacy track). The
 legacy track is therefore the byte-identical output of the actual pipeline
-with all new arms absent: finalist selection, contest-local tails, seed
-banks, budget consumption, and the complete terminal chain all replay from
-legacy state. The safety track can never be skipped by budget or load: it
-does not draw on the primary run's ledger and carries no wall-clock veto.
-The gate fires only when a new-arm family actually won a contest, so every
-other row is byte-inert.
+with all new arms absent AT THE RESERVED BUDGET: finalist selection,
+contest-local tails, seed banks, budget consumption, and the complete
+terminal chain all replay from legacy state. Both tracks together fit the
+one fixed entry budget by construction. An ordinary shadow failure after a
+displacement propagates: the primary is never silently emitted once a
+new-arm displacement occurred. The gate fires only when a new-arm family
+actually won a contest, so every other row is byte-inert.
 """
 
 from __future__ import annotations
@@ -30,7 +37,7 @@ from __future__ import annotations
 import copy
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Dict, Optional
 
 from dagua.config import LayoutConfig
 
@@ -56,6 +63,18 @@ DISABLE_NEW_ARMS_ATTR = "_dagua_native_disable_new_arms"
 # Terminal-contest telemetry written to the caller's config for tests and
 # benchmark forensics.
 SHADOW_CONTEST_TELEMETRY_ATTR = "_dagua_native_shadow_contest_telemetry"
+# Shared mutable reservation state installed by the outermost invocation
+# (same aliasing contract as the displacement log): the priced shadow
+# package, whether it has been reserved on the entry ledger, and any
+# reservation vetoes (each veto is a fail-closed-to-legacy contest event).
+SHADOW_RESERVATION_STATE_ATTR = "_dagua_native_shadow_reservation_state"
+
+# The legacy-track shadow re-run's share of the entry ledger's free capacity.
+# The shadow is the same anytime pipeline as the primary minus the new arms,
+# so the equal split is the canonical two-tracks-in-one-budget partition: the
+# primary's optional admissions after the reservation and the whole shadow
+# re-run each fit their half, and their sum can never exceed the entry plan.
+SHADOW_TRACK_SHARE = 0.5
 
 
 @dataclass(frozen=True)
@@ -78,6 +97,34 @@ class LedgerPlanSnapshot:
     safety: float
     reserved_tail_dwu: float
     return_reserve_dwu: float
+
+
+@dataclass(frozen=True)
+class ShadowPackagePlan:
+    """Priced legacy-track shadow package of one pipeline invocation.
+
+    Parameters
+    ----------
+    shadow_track_dwu : float
+        Deterministic budget granted to the shadow re-run's own fresh ledger
+        (:data:`SHADOW_TRACK_SHARE` of the entry ledger's free capacity net
+        of the final referee cost).
+    referee_dwu : float
+        Modeled cost of the final two-track referee contest, charged to the
+        entry ledger when a displacement occurs.
+    package_dwu : float
+        Complete reservation (``shadow_track_dwu + referee_dwu``) that must
+        fit the entry ledger all-or-nothing before a new arm may win.
+    viable : bool
+        Whether the priced package is large enough to be worth reserving
+        (the shadow track must at least afford its own final scoring);
+        a non-viable package fail-closes every new-arm win to legacy.
+    """
+
+    shadow_track_dwu: float
+    referee_dwu: float
+    package_dwu: float
+    viable: bool
 
 
 def is_new_arm_candidate(name: str) -> bool:
@@ -154,10 +201,9 @@ def snapshot_ledger_plan(config: Optional[LayoutConfig]) -> Optional[LedgerPlanS
     """Capture the entry-state deterministic budget plan of one invocation.
 
     Must run BEFORE the primary solve spends from the shared mutable ledger:
-    the snapshot is the complete fixed budget plan that the legacy-track
-    shadow re-run receives as its own fresh ledger (all-or-nothing by
-    construction -- the safety track never bids against the primary run's
-    remaining budget and can never be vetoed).
+    the snapshot fixes the envelope from which the shadow package is priced
+    (:func:`price_shadow_package`) and carries the sizing-heuristic total the
+    shadow re-run inherits.
 
     Parameters
     ----------
@@ -183,17 +229,241 @@ def snapshot_ledger_plan(config: Optional[LayoutConfig]) -> Optional[LedgerPlanS
     )
 
 
+def price_shadow_package(
+    config: Optional[LayoutConfig],
+    *,
+    num_nodes: int,
+    num_edges: int,
+    has_clusters: bool,
+    has_weights: bool,
+) -> Optional[ShadowPackagePlan]:
+    """Price the complete legacy-track shadow package from entry state.
+
+    Must run BEFORE the primary solve spends from the shared ledger: the
+    package is priced against the entry free capacity so the same solve
+    always produces the same plan.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Prepared layout configuration possibly carrying an installed ledger.
+    num_nodes : int
+        Number of graph nodes (final referee cost model input).
+    num_edges : int
+        Number of graph edges (final referee cost model input).
+    has_clusters : bool
+        Whether runtime-visible clusters affect the referee cost.
+    has_weights : bool
+        Whether runtime-visible edge weights affect the referee cost.
+
+    Returns
+    -------
+    ShadowPackagePlan or None
+        Priced package, or ``None`` when no deterministic ledger is active
+        (an unbudgeted row funds an equally unbudgeted shadow, so there is
+        nothing to reserve).
+    """
+    from dagua.layout.ops.pipelines.native_budget import LEDGER_ATTR, NativeBudgetLedger
+    from dagua.layout.ops.pipelines.native_cost_model import estimate_v3_referee_cost
+
+    ledger = getattr(config, LEDGER_ATTR, None) if config is not None else None
+    if not isinstance(ledger, NativeBudgetLedger):
+        return None
+    device = str(getattr(config, "device", "cpu")) if config is not None else "cpu"
+    referee_cost = estimate_v3_referee_cost(
+        int(num_nodes),
+        int(num_edges),
+        has_clusters=bool(has_clusters),
+        has_weights=bool(has_weights),
+        device_class="cuda" if device.startswith("cuda") else "cpu",
+    )
+    referee_dwu = 2.0 * float(referee_cost.reserved_score_dwu)
+    free_entry = max(0.0, ledger.capacity_dwu() - ledger.committed_dwu())
+    shadow_track_dwu = SHADOW_TRACK_SHARE * max(0.0, free_entry - referee_dwu)
+    return ShadowPackagePlan(
+        shadow_track_dwu=shadow_track_dwu,
+        referee_dwu=referee_dwu,
+        package_dwu=shadow_track_dwu + referee_dwu,
+        viable=shadow_track_dwu >= referee_dwu and shadow_track_dwu > 0.0,
+    )
+
+
+def install_shadow_reservation_state(
+    config: Optional[LayoutConfig],
+    plan: Optional[ShadowPackagePlan],
+) -> Dict[str, Any]:
+    """Install the shared mutable reservation state on one invocation.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Outermost-invocation configuration; shallow copies inside the solve
+        alias the installed dict, so a contest-level reservation reaches the
+        orchestrator.
+    plan : ShadowPackagePlan, optional
+        Entry-priced shadow package (``None`` on unbudgeted rows).
+
+    Returns
+    -------
+    dict[str, Any]
+        The installed state (``plan`` / ``reserved`` / ``vetoes``).
+    """
+    state: Dict[str, Any] = {"plan": plan, "reserved": False, "vetoes": []}
+    if config is not None:
+        setattr(config, SHADOW_RESERVATION_STATE_ATTR, state)
+    return state
+
+
+def try_reserve_shadow_package(
+    config: Optional[LayoutConfig],
+    *,
+    route: str,
+    winner_name: str,
+) -> bool:
+    """Reserve the complete shadow package all-or-nothing on the entry ledger.
+
+    Called at the contest argmax the moment a new-arm candidate would win.
+    The reservation is idempotent (one package funds the single whole-solve
+    shadow re-run however many contests displace) and all-or-nothing: it
+    either fits the live ledger in full or the caller must fall back to the
+    legacy-family champion.
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Contest-level configuration aliasing the orchestrator's reservation
+        state and shared ledger.
+    route : str
+        Contest route requesting the reservation (veto telemetry).
+    winner_name : str
+        New-arm candidate that would win (veto telemetry).
+
+    Returns
+    -------
+    bool
+        ``True`` when the package is reserved (or the row is unbudgeted, or
+        no orchestrator installed reservation state). ``False`` means the
+        package was vetoed and the new arm must not win.
+    """
+    from dagua.layout.ops.pipelines.native_budget import (
+        LEDGER_ATTR,
+        NativeBudgetLedger,
+        reserve_tail,
+    )
+
+    state = getattr(config, SHADOW_RESERVATION_STATE_ATTR, None) if config is not None else None
+    if not isinstance(state, dict):
+        # No orchestrator (direct single-track callers): nothing to reserve
+        # and no shadow will run; preserve the pre-existing contest outcome.
+        return True
+    if bool(state.get("reserved")):
+        return True
+    plan = state.get("plan")
+    if plan is None:
+        # Unbudgeted row: the shadow re-run is equally unbudgeted.
+        state["reserved"] = True
+        return True
+    ledger = getattr(config, LEDGER_ATTR, None) if config is not None else None
+    veto_reason: Optional[str] = None
+    if not isinstance(ledger, NativeBudgetLedger):
+        veto_reason = "ledger_missing_at_argmax"
+    elif not plan.viable:
+        veto_reason = "package_not_viable"
+    elif ledger.committed_dwu() + plan.package_dwu > ledger.capacity_dwu():
+        veto_reason = "package_does_not_fit"
+    if veto_reason is not None:
+        state["vetoes"].append({"route": route, "winner_name": winner_name, "reason": veto_reason})
+        _LOGGER.info(
+            "Shadow package reservation vetoed route=%s winner=%s reason=%s",
+            route,
+            winner_name,
+            veto_reason,
+        )
+        return False
+    reserve_tail(config, plan.package_dwu, "shadow_champion_package")
+    state["reserved"] = True
+    return True
+
+
+def resolve_contest_winner(
+    config: Optional[LayoutConfig],
+    *,
+    route: str,
+    best_name: str,
+    scores: Dict[str, float],
+    telemetry: Dict[str, Any],
+    select_winner: Callable[[Dict[str, float], Dict[str, Any]], str],
+) -> str:
+    """Resolve one contest argmax through the shadow-package admission gate.
+
+    A legacy-family winner passes through untouched (byte-inert hot path).
+    A new-arm winner is admitted only when :func:`try_reserve_shadow_package`
+    commits the complete legacy-track shadow package; on a veto the contest
+    fails closed to the legacy-family champion, re-selected by the contest's
+    OWN selection function on the legacy-restricted score set (tie semantics
+    identical by construction).
+
+    Parameters
+    ----------
+    config : LayoutConfig, optional
+        Contest-level configuration.
+    route : str
+        Contest route (displacement and veto telemetry).
+    best_name : str
+        Unrestricted contest argmax.
+    scores : dict[str, float]
+        Contest score per finalist.
+    telemetry : dict[str, Any]
+        Contest score telemetry per finalist (selector input).
+    select_winner : Callable
+        The contest's own ``(scores, telemetry) -> name`` selector.
+
+    Returns
+    -------
+    str
+        The emitted contest winner: ``best_name`` when it is legacy or its
+        displacement was admitted, else the legacy-family champion.
+    """
+    if not is_new_arm_candidate(best_name):
+        return best_name
+    if try_reserve_shadow_package(config, route=route, winner_name=best_name):
+        record_new_arm_displacement(config, route=route, winner_name=best_name)
+        return best_name
+    legacy_scores = {
+        name: score for name, score in scores.items() if not is_new_arm_candidate(name)
+    }
+    legacy_telemetry = {
+        name: value for name, value in telemetry.items() if not is_new_arm_candidate(name)
+    }
+    fallback = select_winner(legacy_scores, legacy_telemetry)
+    _LOGGER.info(
+        "Shadow package vetoed: contest fails closed to legacy champion "
+        "route=%s displaced_winner=%s legacy_winner=%s",
+        route,
+        best_name,
+        fallback,
+    )
+    return fallback
+
+
 def build_legacy_shadow_config(
     config: Optional[LayoutConfig],
     ledger_plan: Optional[LedgerPlanSnapshot],
+    package_plan: Optional[ShadowPackagePlan],
 ) -> LayoutConfig:
     """Build the isolated legacy-track configuration for the shadow re-run.
 
     The returned config reproduces the caller's entry state with every
-    new-arm family disabled: a FRESH deterministic ledger carrying the entry
-    budget plan (never the primary run's depleted ledger), and no wall-clock
-    or process deadline (the safety track is ledger-only; machine load can
-    never decide whether it executes -- review W2-4a F1).
+    new-arm family disabled. Its FRESH deterministic ledger carries exactly
+    the reserved shadow-track budget (never a second copy of the entry plan
+    and never the primary run's depleted ledger), so primary and shadow
+    together fit the one entry budget. It carries no wall-clock or process
+    deadline (the safety track is ledger-only; machine load can never decide
+    whether it executes -- review W2-4a F1). Budget-FRACTION sizing
+    heuristics (for example the W5 finisher spend cap) read the row's entry
+    envelope, not the reservation, so the shadow's terminal chain is sized
+    exactly like the legacy run it must reproduce; spend authority stays the
+    reserved ledger.
 
     Parameters
     ----------
@@ -202,6 +472,9 @@ def build_legacy_shadow_config(
     ledger_plan : LedgerPlanSnapshot, optional
         Entry budget plan captured by :func:`snapshot_ledger_plan` before
         the primary solve spent anything.
+    package_plan : ShadowPackagePlan, optional
+        Entry-priced shadow package whose ``shadow_track_dwu`` funds the
+        fresh ledger.
 
     Returns
     -------
@@ -209,7 +482,9 @@ def build_legacy_shadow_config(
         Isolated legacy-track configuration.
     """
     from dagua.layout.ops.pipelines.native_budget import (
+        DETERMINISTIC_BUDGET_ATTR,
         PROCESS_DEADLINE_ATTR,
+        TOTAL_BUDGET_ATTR,
         WALL_DEADLINE_ATTR,
         install_budget_ledger,
     )
@@ -221,6 +496,7 @@ def build_legacy_shadow_config(
         PROCESS_DEADLINE_ATTR,
         NEW_ARM_DISPLACEMENTS_ATTR,
         SHADOW_CONTEST_TELEMETRY_ATTR,
+        SHADOW_RESERVATION_STATE_ATTR,
         "_dagua_native_terminal_w5_owner",
         "_dagua_native_terminal_w5_done",
     ):
@@ -229,14 +505,19 @@ def build_legacy_shadow_config(
                 delattr(shadow, stale_attr)
             except AttributeError:
                 pass
-    if ledger_plan is not None:
+    if ledger_plan is not None and package_plan is not None:
         install_budget_ledger(
             shadow,
-            timeout_s=ledger_plan.total_dwu,
+            timeout_s=package_plan.shadow_track_dwu,
             safety=ledger_plan.safety,
-            reserved_tail_dwu=ledger_plan.reserved_tail_dwu,
-            return_reserve_dwu=ledger_plan.return_reserve_dwu,
+            reserved_tail_dwu=0.0,
+            return_reserve_dwu=0.0,
         )
+        # Sizing heuristics keyed to the row's total envelope (W5 spend cap)
+        # must match the legacy run being reproduced; the reserved ledger
+        # above remains the only spend authority.
+        setattr(shadow, TOTAL_BUDGET_ATTR, ledger_plan.total_dwu)
+        setattr(shadow, DETERMINISTIC_BUDGET_ATTR, ledger_plan.total_dwu)
     return shadow
 
 
@@ -269,11 +550,18 @@ __all__ = [
     "NEW_ARM_DISPLACEMENTS_ATTR",
     "NEW_ARM_FAMILY_PREFIXES",
     "SHADOW_CONTEST_TELEMETRY_ATTR",
+    "SHADOW_RESERVATION_STATE_ATTR",
+    "SHADOW_TRACK_SHARE",
     "LedgerPlanSnapshot",
+    "ShadowPackagePlan",
     "build_legacy_shadow_config",
+    "install_shadow_reservation_state",
     "is_new_arm_candidate",
     "new_arms_disabled",
     "pop_new_arm_displacements",
+    "price_shadow_package",
     "record_new_arm_displacement",
+    "resolve_contest_winner",
     "snapshot_ledger_plan",
+    "try_reserve_shadow_package",
 ]

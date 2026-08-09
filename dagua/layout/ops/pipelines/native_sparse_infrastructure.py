@@ -49,8 +49,7 @@ from dagua.layout.ops.pipelines.native_contest_cascade import select_finalists
 from dagua.layout.ops.pipelines.native_cost_model import estimate_native_work_cost
 from dagua.layout.ops.pipelines.native_seed_replication import replicated_work_cost
 from dagua.layout.ops.pipelines.native_shadow_champion import (
-    is_new_arm_candidate,
-    record_new_arm_displacement,
+    resolve_contest_winner,
 )
 from dagua.layout.ops.state import LayoutProblem
 
@@ -636,6 +635,20 @@ def sparse_band_mini_contest(
         if score_telemetry is not None:
             telemetry[name] = score_telemetry
     best_name = _select_undirected_winner(scores, telemetry, "incumbent")
+    # Shadow-champion legacy-track contest (W2-4a / C10, review F1): a t-FDP
+    # band win (which displaces the pre-W1-A early-return incumbent and arms
+    # the outermost invocation to re-run the solve with new arms disabled,
+    # gate-closing this whole band path) is admitted only when the complete
+    # legacy-track shadow package reserves all-or-nothing on the entry
+    # ledger; on a veto the contest fails closed to the legacy champion.
+    best_name = resolve_contest_winner(
+        config,
+        route="undirected_sparse_band",
+        best_name=best_name,
+        scores=scores,
+        telemetry=telemetry,
+        select_winner=_select_undirected_winner,
+    )
     _log_marketplace_telemetry(
         route="undirected_sparse_band",
         structural_gate="sparse_infrastructure",
@@ -657,16 +670,6 @@ def sparse_band_mini_contest(
     if best_name == "incumbent":
         # Byte-inertness: a no-win contest returns the exact incumbent tensor.
         return incumbent_pos
-    # Shadow-champion legacy-track contest (W2-4a / C10): a t-FDP band win
-    # displaces the pre-W1-A early-return incumbent; the outermost pipeline
-    # invocation re-runs the solve with new arms disabled (which gate-closes
-    # this whole band path) and emits the referee-higher FINAL drawing.
-    if is_new_arm_candidate(best_name):
-        record_new_arm_displacement(
-            config,
-            route="undirected_sparse_band",
-            winner_name=best_name,
-        )
     return _never_nan_winner(positions[best_name], problem, node_sep, seed)
 
 

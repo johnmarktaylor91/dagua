@@ -77,9 +77,8 @@ from dagua.layout.ops.pipelines.native_cost_model import (
     estimate_v3_referee_cost,
 )
 from dagua.layout.ops.pipelines.native_shadow_champion import (
-    is_new_arm_candidate,
     new_arms_disabled,
-    record_new_arm_displacement,
+    resolve_contest_winner,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
@@ -3022,7 +3021,21 @@ def _router_v2_large_mini_contest(
         scores[name] = score
         if score_telemetry is not None:
             cluster_score_telemetry[name] = score_telemetry
+    mini_incumbent_name = best_name
     best_name = _select_undirected_winner(scores, cluster_score_telemetry, best_name)
+    # Shadow-champion legacy-track contest (W2-4a / C10, review F1): a
+    # new-arm win in the large fast-path mini-contest is admitted only when
+    # the shadow package reserves; a veto fails closed to the legacy champion.
+    best_name = resolve_contest_winner(
+        config,
+        route="undirected_large_mini",
+        best_name=best_name,
+        scores=scores,
+        telemetry=cluster_score_telemetry,
+        select_winner=lambda legacy_scores, legacy_telemetry: _select_undirected_winner(
+            legacy_scores, legacy_telemetry, mini_incumbent_name
+        ),
+    )
     try:
         projected_winner = _project_candidate_prism(positions[best_name], problem)
     except Exception as exc:  # noqa: BLE001 -- the terminal W5 seed is optional
@@ -3049,14 +3062,6 @@ def _router_v2_large_mini_contest(
         ", ".join(f"{name}:{score:.3f}" for name, score in scores.items()),
         best_name,
     )
-    # Shadow-champion legacy-track contest (W2-4a / C10): a new-arm win in
-    # the large fast-path mini-contest is a displacement like any other.
-    if is_new_arm_candidate(best_name):
-        record_new_arm_displacement(
-            config,
-            route="undirected_large_mini",
-            winner_name=best_name,
-        )
     return positions[best_name]
 
 
@@ -4475,6 +4480,18 @@ def layout_native_undirected_portfolio(
 
     # Argmax selection; strict inequality means ties go to the incumbent.
     best_name = _select_undirected_winner(scores, cluster_score_telemetry)
+    # Shadow-champion legacy-track contest (W2-4a / C10, review F1): a
+    # new-arm winner is admitted only when the complete legacy-track shadow
+    # package reserves all-or-nothing on the entry ledger; on a veto the
+    # contest fails closed to the legacy-family champion and no shadow runs.
+    best_name = resolve_contest_winner(
+        config,
+        route="undirected",
+        best_name=best_name,
+        scores=scores,
+        telemetry=cluster_score_telemetry,
+        select_winner=_select_undirected_winner,
+    )
     _log_marketplace_telemetry(
         route="undirected",
         structural_gate=(
@@ -4513,11 +4530,6 @@ def layout_native_undirected_portfolio(
                 best_name,
             )
             winner_pos = positions[best_name]
-    # Shadow-champion legacy-track contest (W2-4a / C10): a new-arm contest
-    # win arms the outermost pipeline invocation to re-run the ENTIRE solve
-    # with new arms disabled and emit the referee-higher FINAL drawing.
-    if is_new_arm_candidate(best_name):
-        record_new_arm_displacement(config, route="undirected", winner_name=best_name)
     return _never_nan_winner(winner_pos, problem, challenger_node_sep, seed)
 
 

@@ -2,12 +2,25 @@
 
 Every displacement test drives the REAL selection seams: candidates are
 injected or biased at the generation/selection boundary only, and everything
-downstream -- displacement recording, the legacy-track shadow re-run, the
-final referee contest, and the emission -- is production code end-to-end.
+downstream -- the shadow-package reservation, displacement recording, the
+legacy-track shadow re-run, the final referee contest, and the emission -- is
+production code end-to-end.
+
+Contract under test (the packet spec):
+
+- A new arm may win a contest only when the complete legacy-track shadow
+  package (re-run + final referee) reserves all-or-nothing on the entry
+  ledger; a veto fails closed to the legacy-family champion (F1).
+- On a displacement the emitted drawing is the max of the two FINAL referee
+  keys, ties to the legacy track (F4).
+- The shadow track byte-equals the source-gated no-new-arm pipeline at the
+  reserved budget (the legacy-track oracle, F3).
+- After a displacement an ordinary shadow failure propagates; the displaced
+  primary is never silently emitted (F1).
 
 Top-level imports are restricted to APIs that already exist on the pre-fix
-commit so the per-finding regression tests fail BEHAVIORALLY there (a lost
-legacy drawing), not at collection.
+commit so the per-finding regression tests fail BEHAVIORALLY there, not at
+collection; the reservation APIs are imported inside test bodies.
 """
 
 from __future__ import annotations
@@ -28,22 +41,36 @@ from dagua.layout.ops.pipelines import (
 )
 from dagua.layout.ops.pipelines.dagua_native import layout_dagua_native_pipeline
 from dagua.layout.ops.pipelines.native_budget import (
+    LEDGER_ATTR,
     PROCESS_DEADLINE_ATTR,
     WALL_DEADLINE_ATTR,
     NativeBudgetLedger,
     install_budget_ledger,
 )
-from dagua.layout.ops.pipelines.native_shadow_champion import is_new_arm_candidate
+from dagua.layout.ops.pipelines.native_shadow_champion import (
+    DISABLE_NEW_ARMS_ATTR,
+    SHADOW_CONTEST_TELEMETRY_ATTR,
+    is_new_arm_candidate,
+    new_arms_disabled,
+)
 from dagua.layout.ops.state import LayoutProblem
 
 _CONFIG_KWARGS: Dict[str, Any] = {"seed": 42}
 _LEDGER_DWU = 600.0
+# Small enough that the priced shadow package is non-viable (the shadow track
+# cannot even afford its own final referee pass), so every new-arm win must
+# fail closed to the legacy champion.
+_UNAFFORDABLE_LEDGER_DWU = 0.1
 
 
-def _fresh_config(**overrides: Any) -> LayoutConfig:
+class _ShadowTrackFailure(RuntimeError):
+    """Synthetic ordinary shadow-track failure (an OOM-like non-timeout)."""
+
+
+def _fresh_config(ledger_dwu: float = _LEDGER_DWU, **overrides: Any) -> LayoutConfig:
     """Return a fresh test config with a fresh deterministic ledger."""
     config = LayoutConfig(**{**_CONFIG_KWARGS, **overrides})
-    install_budget_ledger(config, _LEDGER_DWU)
+    install_budget_ledger(config, ledger_dwu)
     return config
 
 
@@ -65,14 +92,33 @@ def _k5_graph() -> tuple[torch.Tensor, int, torch.Tensor]:
     return edge_index, 5, torch.full((5, 2), 20.0)
 
 
-def _k5_tail_graph(tail: int = 15) -> tuple[torch.Tensor, int, torch.Tensor]:
-    """Return K5 plus a path tail (non-planar, n large enough for band tests)."""
+def _k5_ring_graph(tail: int = 15) -> tuple[torch.Tensor, int, torch.Tensor]:
+    """Return K5 plus a cycle tail (non-planar, big enough for the t-FDP routes)."""
     edges = [(u, v) for u in range(5) for v in range(u + 1, 5)]
     for i in range(tail):
         edges.append((4 + i, 5 + i))
+    edges.append((4 + tail, 0))
     edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
     num_nodes = 5 + tail
     return edge_index, num_nodes, torch.full((num_nodes, 2), 20.0)
+
+
+def _declared_undirected_structure(edge_index: torch.Tensor, num_nodes: int) -> Any:
+    """Classify a graph and declare it undirected (the benchmark corpus shape).
+
+    The undirected-portfolio router (and with it the t-FDP contest seams)
+    requires high-confidence undirectedness: a declaration or reciprocal
+    edge storage. Declaring on the pre-classified structure reproduces how
+    corpus undirected rows enter the pipeline.
+    """
+    import dataclasses
+
+    structure = classify_graph(edge_index, num_nodes)
+    return dataclasses.replace(
+        structure,
+        is_semantically_directed=False,
+        direction_is_declared=True,
+    )
 
 
 def _grid_dag_graph(width: int = 3, height: int = 3) -> tuple[torch.Tensor, int, torch.Tensor]:
@@ -142,7 +188,8 @@ def _prefer_new_arm_undirected(
     Simulates an honest new-arm contest win (the grafo1000.14 class) while
     keeping every downstream seam real. The wrapper falls through to the
     real selector when no new-arm candidate is present, so the legacy-track
-    re-run selects exactly as an unbiased legacy contest would.
+    re-run and the veto fallback both select exactly as an unbiased legacy
+    contest would.
     """
     real_select = native_undirected._select_undirected_winner
 
@@ -168,28 +215,6 @@ def _prefer_new_arm_directed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(native_directed, "_select_directed_winner", prefer)
 
 
-def _veto_legacy_shadow_admission(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Veto the pre-fix in-terminal shadow admission (review F1 failure class).
-
-    The pre-fix design asked ``admit_native_work`` for permission to run the
-    safety track at the terminal seam and emitted the (weaker) primary on a
-    veto. Denying exactly that reason reproduces the budget/wall veto
-    deterministically on the pre-fix commit; the fixed design never requests
-    it (the legacy track runs unconditionally on its own fresh ledger), so
-    this patch is inert after the fix.
-    """
-    from dagua.layout.ops.pipelines import native_budget
-
-    real_admit = native_budget.admit_native_work
-
-    def admit(config: Any, cost: Any, reserve_reason: str) -> bool:
-        if reserve_reason == "shadow_champion_terminal_contest":
-            return False
-        return real_admit(config, cost, reserve_reason)
-
-    monkeypatch.setattr(native_budget, "admit_native_work", admit)
-
-
 def _run_pipeline(
     edge_index: torch.Tensor,
     num_nodes: int,
@@ -213,20 +238,119 @@ def _legacy_reference(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: torch.Tensor,
+    config: Optional[LayoutConfig] = None,
     **kwargs: Any,
 ) -> torch.Tensor:
-    """Run the true no-new-arm pipeline via pre-existing gates.
+    """Run the true no-new-arm pipeline via pre-existing SOURCE gates.
 
     Closes the planar-arm structural gate, the t-FDP normal-contest
     admission, and the band eligibility at their sources (all exist on the
-    pre-fix commit), so this reference is computable identically before and
-    after the fix.
+    pre-fix commit and are independent of the shadow mechanism's disable
+    flag), so this reference is computable identically before and after the
+    fix and remains an independent oracle for the shadow track.
     """
     with monkeypatch.context() as ctx:
         ctx.setattr(native_planar_arm, "planar_arm_admitted", lambda problem: False)
-        ctx.setattr(native_undirected, "_sparse_contest_arm_admitted", lambda *a, **k: False)
+        ctx.setattr(
+            native_undirected,
+            "_sparse_contest_arm_admitted",
+            lambda problem, config, seeds: (),
+        )
         ctx.setattr(native_sparse_infrastructure, "sparse_band_contest_eligible", lambda p: False)
-        return _run_pipeline(edge_index, num_nodes, node_sizes, _fresh_config(), **kwargs)
+        return _run_pipeline(
+            edge_index,
+            num_nodes,
+            node_sizes,
+            config if config is not None else _fresh_config(),
+            **kwargs,
+        )
+
+
+def _shadow_reference_config(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    *,
+    has_clusters: bool = False,
+    has_weights: bool = False,
+) -> LayoutConfig:
+    """Build the shadow-budget legacy config exactly as production does.
+
+    Prices the shadow package from an identical fresh entry ledger and hands
+    it to the production shadow-config builder, so the reference run carries
+    the same reserved ledger, the same entry sizing envelope, and no
+    deadlines -- the budget the emitted shadow track actually had.
+    """
+    from dagua.layout.ops.pipelines.native_shadow_champion import (
+        build_legacy_shadow_config,
+        price_shadow_package,
+        snapshot_ledger_plan,
+    )
+
+    entry = _fresh_config()
+    plan = price_shadow_package(
+        entry,
+        num_nodes=num_nodes,
+        num_edges=int(edge_index.shape[1]),
+        has_clusters=has_clusters,
+        has_weights=has_weights,
+    )
+    assert plan is not None and plan.viable
+    return build_legacy_shadow_config(entry, snapshot_ledger_plan(entry), plan)
+
+
+def _assert_displacement_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    config: LayoutConfig,
+    emitted: torch.Tensor,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    *,
+    edge_weights: Optional[torch.Tensor] = None,
+    clusters: Optional[dict[str, Any]] = None,
+    graph_structure: Any = None,
+) -> Dict[str, Any]:
+    """Assert the full displacement contract on one solved row.
+
+    (1) A displacement was recorded and both final referee keys exist.
+    (2) The emitted drawing is the max of the two FINAL referee keys, ties
+        to the legacy track (the spec's final-choice semantics, review F4).
+    (3) The shadow track byte-equals the source-gated no-new-arm pipeline at
+        the reserved shadow budget (the legacy-track oracle, review F3).
+    """
+    telemetry = getattr(config, SHADOW_CONTEST_TELEMETRY_ATTR, None)
+    assert telemetry is not None, "a displacement row must record contest telemetry"
+    assert telemetry["displacements"], telemetry
+    if telemetry["shadow_key"] >= telemetry["primary_key"]:
+        assert telemetry["emitted"] == "shadow", telemetry
+        assert torch.equal(emitted.cpu(), telemetry["shadow_pos"])
+    else:
+        assert telemetry["emitted"] == "primary", telemetry
+        assert torch.equal(emitted.cpu(), telemetry["primary_pos"])
+
+    reference_config = _shadow_reference_config(
+        edge_index,
+        num_nodes,
+        has_clusters=clusters is not None and bool(clusters),
+        has_weights=edge_weights is not None,
+    )
+    run_kwargs: Dict[str, Any] = {}
+    if edge_weights is not None:
+        run_kwargs["edge_weights"] = edge_weights
+    if clusters is not None:
+        run_kwargs["clusters"] = clusters
+    if graph_structure is not None:
+        run_kwargs["graph_structure"] = graph_structure
+    legacy_pos = _legacy_reference(
+        monkeypatch,
+        edge_index,
+        num_nodes,
+        node_sizes,
+        config=reference_config,
+        **run_kwargs,
+    )
+    assert torch.equal(telemetry["shadow_pos"], legacy_pos.cpu())
+    return dict(telemetry)
 
 
 # ---------------------------------------------------------------------------
@@ -251,26 +375,20 @@ def test_new_arm_family_covers_tfdp_and_planar() -> None:
 
 # ---------------------------------------------------------------------------
 # F1 + F3: undirected planar displacement through the real selection seam.
-# A budget veto must retain the legacy track, never the weaker primary.
 # ---------------------------------------------------------------------------
 
 
 def test_undirected_planar_displacement_recovers_legacy_track(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A vetoed shadow must still emit the legacy final drawing (F1/F3)."""
+    """A planar displacement runs the funded shadow and emits the max (F1/F3)."""
     edge_index, num_nodes, node_sizes = _wheel_graph()
-    legacy_pos = _legacy_reference(monkeypatch, edge_index, num_nodes, node_sizes)
-
     _inject_bad_planar_candidate(monkeypatch)
     _prefer_new_arm_undirected(monkeypatch)
-    _veto_legacy_shadow_admission(monkeypatch)
-    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, _fresh_config())
 
-    emitted_key = _final_referee_key(emitted, edge_index, num_nodes, node_sizes)
-    legacy_key = _final_referee_key(legacy_pos, edge_index, num_nodes, node_sizes)
-    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
-    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
+    config = _fresh_config()
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, config)
+    _assert_displacement_contract(monkeypatch, config, emitted, edge_index, num_nodes, node_sizes)
 
 
 # ---------------------------------------------------------------------------
@@ -292,11 +410,15 @@ def _admit_tfdp_into_normal_contest(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
     monkeypatch.setattr(dagua_native, "_undirected_route_shortlist", shortlist_with_tfdp)
-    monkeypatch.setattr(native_undirected, "_sparse_contest_arm_admitted", lambda *a, **k: True)
+    monkeypatch.setattr(
+        native_undirected,
+        "_sparse_contest_arm_admitted",
+        lambda problem, config, seeds: seeds,
+    )
     monkeypatch.setattr(
         native_sparse_infrastructure,
         "tfdp_sparse_positions",
-        lambda problem, gamma, node_sep: _bad_positions(problem.num_nodes),
+        lambda problem, *, gamma, seed=None, node_sep=0.0: _bad_positions(problem.num_nodes),
     )
 
 
@@ -304,17 +426,22 @@ def test_undirected_tfdp_displacement_recovers_legacy_track(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A t-FDP normal-contest win is a protected displacement (F2)."""
-    edge_index, num_nodes, node_sizes = _k5_graph()
-    legacy_pos = _legacy_reference(monkeypatch, edge_index, num_nodes, node_sizes)
-
+    edge_index, num_nodes, node_sizes = _k5_ring_graph()
+    structure = _declared_undirected_structure(edge_index, num_nodes)
     _admit_tfdp_into_normal_contest(monkeypatch)
     _prefer_new_arm_undirected(monkeypatch, prefix=("tfdp",))
-    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, _fresh_config())
 
-    emitted_key = _final_referee_key(emitted, edge_index, num_nodes, node_sizes)
-    legacy_key = _final_referee_key(legacy_pos, edge_index, num_nodes, node_sizes)
-    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
-    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
+    config = _fresh_config()
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, config, graph_structure=structure)
+    _assert_displacement_contract(
+        monkeypatch,
+        config,
+        emitted,
+        edge_index,
+        num_nodes,
+        node_sizes,
+        graph_structure=structure,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -326,13 +453,12 @@ def test_sparse_band_tfdp_displacement_recovers_legacy_track(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A t-FDP band win must keep the legacy early-return reachable (F2)."""
-    edge_index, num_nodes, node_sizes = _k5_tail_graph()
+    edge_index, num_nodes, node_sizes = _k5_ring_graph()
+    structure = _declared_undirected_structure(edge_index, num_nodes)
     # Shrink the contest ceiling so this row takes the band early-return
     # path; the legacy reference closes band eligibility, exactly the
     # pre-W1-A bare-incumbent behavior the invariant protects.
     monkeypatch.setattr(native_undirected, "MAX_CONTEST_NODES", 10)
-    legacy_pos = _legacy_reference(monkeypatch, edge_index, num_nodes, node_sizes)
-
     monkeypatch.setattr(
         native_sparse_infrastructure,
         "sparse_band_contest_eligible",
@@ -341,38 +467,41 @@ def test_sparse_band_tfdp_displacement_recovers_legacy_track(
     monkeypatch.setattr(
         native_sparse_infrastructure,
         "tfdp_sparse_positions",
-        lambda problem, gamma, node_sep: _bad_positions(problem.num_nodes),
+        lambda problem, *, gamma, seed=None, node_sep=0.0: _bad_positions(problem.num_nodes),
     )
     _prefer_new_arm_undirected(monkeypatch, prefix=("tfdp",))
-    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, _fresh_config())
 
-    emitted_key = _final_referee_key(emitted, edge_index, num_nodes, node_sizes)
-    legacy_key = _final_referee_key(legacy_pos, edge_index, num_nodes, node_sizes)
-    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
-    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
+    config = _fresh_config()
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, config, graph_structure=structure)
+    _assert_displacement_contract(
+        monkeypatch,
+        config,
+        emitted,
+        edge_index,
+        num_nodes,
+        node_sizes,
+        graph_structure=structure,
+    )
 
 
 # ---------------------------------------------------------------------------
-# F3: directed displacement with the post-argmax late stages live.
+# F3 + F4: directed displacement with the post-argmax late stages live.
+# The final choice is the max of the two FINAL referee keys, ties to legacy;
+# a stronger primary is correctly kept (the reviewed af2ee897 measurement).
 # ---------------------------------------------------------------------------
 
 
 def test_directed_planar_displacement_recovers_legacy_track(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The directed legacy track replays late ordering/nested-stress seams (F3)."""
+    """The directed legacy track replays late ordering/nested-stress seams (F3/F4)."""
     edge_index, num_nodes, node_sizes = _grid_dag_graph()
-    legacy_pos = _legacy_reference(monkeypatch, edge_index, num_nodes, node_sizes)
-
     _inject_bad_planar_candidate(monkeypatch)
     _prefer_new_arm_directed(monkeypatch)
-    _veto_legacy_shadow_admission(monkeypatch)
-    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, _fresh_config())
 
-    emitted_key = _final_referee_key(emitted, edge_index, num_nodes, node_sizes)
-    legacy_key = _final_referee_key(legacy_pos, edge_index, num_nodes, node_sizes)
-    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
-    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
+    config = _fresh_config()
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, config)
+    _assert_displacement_contract(monkeypatch, config, emitted, edge_index, num_nodes, node_sizes)
 
 
 # ---------------------------------------------------------------------------
@@ -386,32 +515,26 @@ def test_weighted_planar_displacement_recovers_legacy_track(
     """Declared-weighted rows traverse the weighted terminal pre-stages (F4.5)."""
     edge_index, num_nodes, node_sizes = _wheel_graph()
     edge_weights = torch.full((edge_index.shape[1],), 3.0)
-    legacy_pos = _legacy_reference(
-        monkeypatch,
-        edge_index,
-        num_nodes,
-        node_sizes,
-        edge_weights=edge_weights,
-    )
-
     _inject_bad_planar_candidate(monkeypatch)
     _prefer_new_arm_undirected(monkeypatch)
+
+    config = _fresh_config()
     emitted = _run_pipeline(
         edge_index,
         num_nodes,
         node_sizes,
-        _fresh_config(),
+        config,
         edge_weights=edge_weights,
     )
-
-    emitted_key = _final_referee_key(
-        emitted, edge_index, num_nodes, node_sizes, edge_weights=edge_weights
+    _assert_displacement_contract(
+        monkeypatch,
+        config,
+        emitted,
+        edge_index,
+        num_nodes,
+        node_sizes,
+        edge_weights=edge_weights,
     )
-    legacy_key = _final_referee_key(
-        legacy_pos, edge_index, num_nodes, node_sizes, edge_weights=edge_weights
-    )
-    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
-    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
 
 
 def test_clustered_planar_displacement_recovers_legacy_track(
@@ -423,63 +546,32 @@ def test_clustered_planar_displacement_recovers_legacy_track(
         "hub": [0, 1, 2, 3, 4],
         "rim": [5, 6, 7, 8],
     }
-    legacy_pos = _legacy_reference(
-        monkeypatch,
-        edge_index,
-        num_nodes,
-        node_sizes,
-        clusters=clusters,
-    )
-
-    _inject_bad_planar_candidate(monkeypatch)
-    _prefer_new_arm_undirected(monkeypatch)
-    emitted = _run_pipeline(
-        edge_index,
-        num_nodes,
-        node_sizes,
-        _fresh_config(),
-        clusters=clusters,
-    )
-
-    emitted_key = _final_referee_key(emitted, edge_index, num_nodes, node_sizes, clusters=clusters)
-    legacy_key = _final_referee_key(
-        legacy_pos, edge_index, num_nodes, node_sizes, clusters=clusters
-    )
-    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
-
-
-# ---------------------------------------------------------------------------
-# F3 + F4.6 + F4.7: byte-equality oracle against a true new-arms-disabled run,
-# plus a shortlist-composition change the old finalist-mapping restriction
-# could not represent.
-# ---------------------------------------------------------------------------
-
-
-def test_shadow_track_byte_equals_true_disabled_run(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The legacy shadow track IS a new-arms-disabled run, byte-for-byte (F4.7)."""
-    from dagua.layout.ops.pipelines.native_shadow_champion import (
-        DISABLE_NEW_ARMS_ATTR,
-        SHADOW_CONTEST_TELEMETRY_ATTR,
-    )
-
-    edge_index, num_nodes, node_sizes = _wheel_graph()
     _inject_bad_planar_candidate(monkeypatch)
     _prefer_new_arm_undirected(monkeypatch)
 
     config = _fresh_config()
-    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, config)
-    telemetry = getattr(config, SHADOW_CONTEST_TELEMETRY_ATTR, None)
-    assert telemetry is not None
-    assert telemetry["displacements"], telemetry
-    assert telemetry["emitted"] == "shadow"
-    assert torch.equal(emitted.cpu(), telemetry["shadow_pos"])
+    emitted = _run_pipeline(
+        edge_index,
+        num_nodes,
+        node_sizes,
+        config,
+        clusters=clusters,
+    )
+    _assert_displacement_contract(
+        monkeypatch,
+        config,
+        emitted,
+        edge_index,
+        num_nodes,
+        node_sizes,
+        clusters=clusters,
+    )
 
-    disabled_config = _fresh_config()
-    setattr(disabled_config, DISABLE_NEW_ARMS_ATTR, True)
-    disabled_pos = _run_pipeline(edge_index, num_nodes, node_sizes, disabled_config)
-    assert torch.equal(telemetry["shadow_pos"], disabled_pos.cpu())
+
+# ---------------------------------------------------------------------------
+# F4.6: a shortlist-composition change the old finalist-mapping restriction
+# could not represent.
+# ---------------------------------------------------------------------------
 
 
 def test_shortlist_composition_change_still_recovers_legacy(
@@ -489,16 +581,13 @@ def test_shortlist_composition_change_still_recovers_legacy(
 
     The finalist cascade is patched so that whenever a new-arm candidate is
     present, NO legacy challenger reaches the referee: the with-arms scored
-    mapping contains no legacy champion at all (the case the old
-    finalist-mapping restriction could not represent). The legacy re-run
-    performs its own untampered finalist selection and must still recover
-    the true legacy final drawing.
+    mapping contains no legacy champion at all. The legacy re-run performs
+    its own untampered finalist selection and must still recover the true
+    legacy final drawing.
     """
     from dagua.layout.ops.pipelines import native_contest_cascade
 
     edge_index, num_nodes, node_sizes = _wheel_graph()
-    legacy_pos = _legacy_reference(monkeypatch, edge_index, num_nodes, node_sizes)
-
     _inject_bad_planar_candidate(monkeypatch)
     _prefer_new_arm_undirected(monkeypatch)
     real_select_finalists = native_contest_cascade.select_finalists
@@ -518,86 +607,269 @@ def test_shortlist_composition_change_still_recovers_legacy(
         )
 
     monkeypatch.setattr(native_contest_cascade, "select_finalists", squeeze_legacy_out)
-    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, _fresh_config())
 
-    emitted_key = _final_referee_key(emitted, edge_index, num_nodes, node_sizes)
-    legacy_key = _final_referee_key(legacy_pos, edge_index, num_nodes, node_sizes)
-    assert emitted_key >= legacy_key, (emitted_key, legacy_key)
-    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
+    config = _fresh_config()
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, config)
+    _assert_displacement_contract(monkeypatch, config, emitted, edge_index, num_nodes, node_sizes)
 
 
 # ---------------------------------------------------------------------------
-# F1: reservation wiring -- the legacy track's budget plan is fixed at entry,
-# never the primary's remainder, and carries no wall-clock deadline.
+# F3 + F4.7: byte-equality oracle against a true disabled run at the shadow
+# budget, plus honest reservation accounting on the entry ledger.
 # ---------------------------------------------------------------------------
+
+
+def test_shadow_track_byte_equals_true_disabled_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy shadow track IS a disabled run at the reserved budget (F4.7)."""
+    edge_index, num_nodes, node_sizes = _wheel_graph()
+    _inject_bad_planar_candidate(monkeypatch)
+    _prefer_new_arm_undirected(monkeypatch)
+
+    config = _fresh_config()
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, config)
+    telemetry = _assert_displacement_contract(
+        monkeypatch, config, emitted, edge_index, num_nodes, node_sizes
+    )
+
+    # Flag-oracle: a fresh disabled-flag run on the production shadow config
+    # (reserved ledger, entry sizing envelope) reproduces the shadow bytes.
+    disabled_config = _shadow_reference_config(edge_index, num_nodes)
+    assert getattr(disabled_config, DISABLE_NEW_ARMS_ATTR) is True
+    disabled_pos = _run_pipeline(edge_index, num_nodes, node_sizes, disabled_config)
+    assert torch.equal(telemetry["shadow_pos"], disabled_pos.cpu())
+
+    # Honest accounting on the entry ledger: the package was reserved at the
+    # argmax, released to fund the shadow, and the final referee was charged.
+    ledger = getattr(config, LEDGER_ATTR)
+    assert isinstance(ledger, NativeBudgetLedger)
+    reasons = [event["reason"] for event in ledger.event_log]
+    assert "shadow_champion_package" in reasons
+    assert "shadow_champion_fund_shadow_track" in reasons
+    assert "shadow_champion_final_referee" in reasons
+    plan = telemetry["shadow_plan"]
+    assert plan is not None and plan.viable
+    assert ledger.reserved_tail_dwu == pytest.approx(0.0)
+    assert ledger.spent_dwu >= plan.referee_dwu
+
+
+# ---------------------------------------------------------------------------
+# F1: reservation mechanics -- priced from entry state, reserved
+# all-or-nothing on the live ledger, idempotent, honest vetoes.
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_package_reservation_is_all_or_nothing() -> None:
+    """The package reserves in full on the entry ledger or not at all (F1)."""
+    from dagua.layout.ops.pipelines.native_shadow_champion import (
+        install_shadow_reservation_state,
+        price_shadow_package,
+        try_reserve_shadow_package,
+    )
+
+    config = LayoutConfig(**_CONFIG_KWARGS)
+    install_budget_ledger(config, 50.0, reserved_tail_dwu=2.0, return_reserve_dwu=1.0)
+    plan = price_shadow_package(
+        config, num_nodes=9, num_edges=16, has_clusters=False, has_weights=False
+    )
+    assert plan is not None and plan.viable
+    # Half the free entry capacity plus the two-track final referee pass.
+    free_entry = 0.9 * 50.0 - 3.0
+    assert plan.shadow_track_dwu == pytest.approx(0.5 * (free_entry - plan.referee_dwu))
+    assert plan.package_dwu == pytest.approx(plan.shadow_track_dwu + plan.referee_dwu)
+
+    state = install_shadow_reservation_state(config, plan)
+    ledger = getattr(config, LEDGER_ATTR)
+    assert try_reserve_shadow_package(config, route="undirected", winner_name="planar_x")
+    assert state["reserved"] is True
+    assert ledger.reserved_tail_dwu == pytest.approx(2.0 + plan.package_dwu)
+    # Idempotent: one package funds the single whole-solve shadow re-run.
+    assert try_reserve_shadow_package(config, route="directed", winner_name="tfdp_g2")
+    assert ledger.reserved_tail_dwu == pytest.approx(2.0 + plan.package_dwu)
+
+    # All-or-nothing: a ledger too spent at the argmax vetoes the package.
+    spent_config = LayoutConfig(**_CONFIG_KWARGS)
+    install_budget_ledger(spent_config, 50.0)
+    spent_plan = price_shadow_package(
+        spent_config, num_nodes=9, num_edges=16, has_clusters=False, has_weights=False
+    )
+    spent_state = install_shadow_reservation_state(spent_config, spent_plan)
+    spent_ledger = getattr(spent_config, LEDGER_ATTR)
+    spent_ledger.spent_dwu = 44.0
+    assert not try_reserve_shadow_package(spent_config, route="undirected", winner_name="planar_x")
+    assert spent_state["reserved"] is False
+    assert spent_ledger.reserved_tail_dwu == pytest.approx(0.0)
+    assert spent_state["vetoes"][0]["reason"] == "package_does_not_fit"
+
+    # Non-viable package (the shadow track cannot afford its own referee).
+    tiny_config = LayoutConfig(**_CONFIG_KWARGS)
+    install_budget_ledger(tiny_config, _UNAFFORDABLE_LEDGER_DWU)
+    tiny_plan = price_shadow_package(
+        tiny_config, num_nodes=9, num_edges=16, has_clusters=False, has_weights=False
+    )
+    assert tiny_plan is not None and not tiny_plan.viable
+    tiny_state = install_shadow_reservation_state(tiny_config, tiny_plan)
+    assert not try_reserve_shadow_package(tiny_config, route="undirected", winner_name="planar_x")
+    assert tiny_state["vetoes"][0]["reason"] == "package_not_viable"
 
 
 def test_legacy_shadow_config_is_isolated_and_ledger_only() -> None:
-    """The shadow config gets the full entry plan and no wall deadline (F1)."""
-    from dagua.layout.ops.pipelines.native_budget import LEDGER_ATTR
+    """The shadow config gets the reserved budget and no wall deadline (F1)."""
+    from dagua.layout.ops.pipelines.native_budget import (
+        DETERMINISTIC_BUDGET_ATTR,
+        TOTAL_BUDGET_ATTR,
+    )
     from dagua.layout.ops.pipelines.native_shadow_champion import (
-        DISABLE_NEW_ARMS_ATTR,
+        SHADOW_RESERVATION_STATE_ATTR,
         build_legacy_shadow_config,
+        install_shadow_reservation_state,
+        price_shadow_package,
         snapshot_ledger_plan,
     )
 
     config = LayoutConfig(**_CONFIG_KWARGS)
     install_budget_ledger(config, 50.0, reserved_tail_dwu=2.0, return_reserve_dwu=1.0)
-    plan = snapshot_ledger_plan(config)
-    assert plan is not None
+    ledger_plan = snapshot_ledger_plan(config)
+    package_plan = price_shadow_package(
+        config, num_nodes=9, num_edges=16, has_clusters=False, has_weights=False
+    )
+    assert ledger_plan is not None and package_plan is not None
+    install_shadow_reservation_state(config, package_plan)
 
     # Simulate the primary run: the shared ledger is spent, the wall/process
     # deadlines are installed and long expired.
     ledger = getattr(config, LEDGER_ATTR)
-    ledger.spent_dwu = 44.0
+    ledger.spent_dwu = 30.0
     setattr(config, WALL_DEADLINE_ATTR, 0.0)
     setattr(config, PROCESS_DEADLINE_ATTR, 0.0)
 
-    shadow = build_legacy_shadow_config(config, plan)
+    shadow = build_legacy_shadow_config(config, ledger_plan, package_plan)
     assert getattr(shadow, DISABLE_NEW_ARMS_ATTR) is True
     assert getattr(shadow, WALL_DEADLINE_ATTR, None) is None
     assert getattr(shadow, PROCESS_DEADLINE_ATTR, None) is None
+    assert getattr(shadow, SHADOW_RESERVATION_STATE_ATTR, None) is None
     shadow_ledger = getattr(shadow, LEDGER_ATTR)
     assert isinstance(shadow_ledger, NativeBudgetLedger)
     assert shadow_ledger is not ledger
     assert shadow_ledger.spent_dwu == 0.0
-    assert shadow_ledger.total_dwu == pytest.approx(50.0)
-    assert shadow_ledger.reserved_tail_dwu == pytest.approx(2.0)
-    assert shadow_ledger.return_reserve_dwu == pytest.approx(1.0)
+    # The fresh ledger is the RESERVED track budget, never the entry plan.
+    assert shadow_ledger.total_dwu == pytest.approx(package_plan.shadow_track_dwu)
+    assert shadow_ledger.safety == pytest.approx(ledger_plan.safety)
+    assert shadow_ledger.reserved_tail_dwu == pytest.approx(0.0)
+    assert shadow_ledger.return_reserve_dwu == pytest.approx(0.0)
+    # Sizing heuristics keyed to the row's total envelope see the entry plan.
+    assert getattr(shadow, TOTAL_BUDGET_ATTR) == pytest.approx(50.0)
+    assert getattr(shadow, DETERMINISTIC_BUDGET_ATTR) == pytest.approx(50.0)
     # The primary's ledger and deadlines are untouched.
-    assert ledger.spent_dwu == pytest.approx(44.0)
+    assert ledger.spent_dwu == pytest.approx(30.0)
     assert getattr(config, WALL_DEADLINE_ATTR) == 0.0
 
 
-def test_exhausted_primary_ledger_cannot_starve_the_legacy_track(
+# ---------------------------------------------------------------------------
+# F1 regression: an unaffordable shadow package fails closed to the legacy
+# champion (no displacement, no shadow, never the weaker new-arm drawing).
+# ---------------------------------------------------------------------------
+
+
+def test_unaffordable_shadow_package_fails_closed_to_legacy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Even a fully spent primary ledger never skips the safety track (F1)."""
+    """Budget pressure disarms the new arm, not the safety track (F1)."""
+    edge_index, num_nodes, node_sizes = _wheel_graph()
+    _inject_bad_planar_candidate(monkeypatch)
+    _prefer_new_arm_undirected(monkeypatch)
+    # Generation admission is opened so the arm is generated and would win;
+    # the reservation gate itself stays real and must veto the win.
+    monkeypatch.setattr(
+        native_undirected,
+        "admit_native_work",
+        lambda config, cost, reason: True,
+    )
+    monkeypatch.setattr(native_undirected, "_portfolio_has_budget", lambda *a, **k: True)
+
+    config = LayoutConfig(**_CONFIG_KWARGS)
+    install_budget_ledger(config, _UNAFFORDABLE_LEDGER_DWU)
+    emitted = _run_pipeline(edge_index, num_nodes, node_sizes, config)
+
+    telemetry = getattr(config, SHADOW_CONTEST_TELEMETRY_ATTR, None)
+    assert telemetry is not None, "a vetoed displacement must record telemetry"
+    assert telemetry["emitted"] == "primary"
+    assert telemetry["displacements"] == []
+    assert telemetry["reservation_vetoes"], telemetry
+    assert "shadow_key" not in telemetry, "no shadow may run on a vetoed row"
+
+    # The emitted drawing IS the legacy track: byte-equal to the source-gated
+    # no-new-arm pipeline on an identical entry ledger.
+    reference = LayoutConfig(**_CONFIG_KWARGS)
+    install_budget_ledger(reference, _UNAFFORDABLE_LEDGER_DWU)
+    legacy_pos = _legacy_reference(monkeypatch, edge_index, num_nodes, node_sizes, config=reference)
+    assert torch.equal(emitted.cpu(), legacy_pos.cpu())
+
+
+# ---------------------------------------------------------------------------
+# F1 regression: after a displacement, an ordinary shadow failure propagates;
+# the displaced primary is never silently emitted.
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_failure_raises_never_emits_displaced_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An OOM-like shadow-track failure must not fall back to the primary (F1)."""
+    edge_index, num_nodes, node_sizes = _wheel_graph()
+    _inject_bad_planar_candidate(monkeypatch)
+    _prefer_new_arm_undirected(monkeypatch)
+
+    real_single_track = dagua_native._layout_dagua_native_single_track
+
+    def failing_shadow_track(*args: Any, **kwargs: Any) -> torch.Tensor:
+        if new_arms_disabled(kwargs.get("config")):
+            raise _ShadowTrackFailure("synthetic shadow-track resource failure")
+        return real_single_track(*args, **kwargs)
+
+    monkeypatch.setattr(dagua_native, "_layout_dagua_native_single_track", failing_shadow_track)
+
+    config = _fresh_config()
+    with pytest.raises(_ShadowTrackFailure):
+        _run_pipeline(edge_index, num_nodes, node_sizes, config)
+    telemetry = getattr(config, SHADOW_CONTEST_TELEMETRY_ATTR, None)
+    assert telemetry is not None
+    assert telemetry["emitted"] == "error"
+    assert telemetry["displacements"], telemetry
+
+
+# ---------------------------------------------------------------------------
+# F1 regression: the scale-anytime caller (layout_native_at_coarsest_scale
+# installs `_dagua_scale_anytime_native` and skips orchestration) must never
+# see a new-arm contest win -- fail-closed to the legacy track.
+# ---------------------------------------------------------------------------
+
+
+def test_scale_anytime_caller_never_runs_new_arms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scale-anytime path gate-closes every new-arm family (F1)."""
     from dagua.layout.ops.pipelines.native_shadow_champion import (
-        SHADOW_CONTEST_TELEMETRY_ATTR,
+        NEW_ARM_DISPLACEMENTS_ATTR,
     )
 
     edge_index, num_nodes, node_sizes = _wheel_graph()
     _inject_bad_planar_candidate(monkeypatch)
     _prefer_new_arm_undirected(monkeypatch)
 
-    # A tiny primary ledger: optional admissions starve, but the planar arm
-    # admission is patched open so the displacement still occurs.
-    monkeypatch.setattr(
-        native_undirected,
-        "admit_native_work",
-        lambda config, cost, reason: True,
-    )
-    config = LayoutConfig(**_CONFIG_KWARGS)
-    install_budget_ledger(config, 0.5)
+    config = _fresh_config()
+    setattr(config, "_dagua_scale_anytime_native", True)
     emitted = _run_pipeline(edge_index, num_nodes, node_sizes, config)
 
-    telemetry = getattr(config, SHADOW_CONTEST_TELEMETRY_ATTR, None)
-    assert telemetry is not None, "the legacy-track shadow contest must have run"
-    assert "error" not in telemetry, telemetry
-    assert telemetry["shadow_key"] >= telemetry["primary_key"]
-    assert telemetry["emitted"] == "shadow"
-    assert torch.equal(emitted.cpu(), telemetry["shadow_pos"])
+    assert getattr(config, SHADOW_CONTEST_TELEMETRY_ATTR, None) is None
+    assert not getattr(config, NEW_ARM_DISPLACEMENTS_ATTR, [])
+
+    reference = _fresh_config()
+    setattr(reference, "_dagua_scale_anytime_native", True)
+    setattr(reference, DISABLE_NEW_ARMS_ATTR, True)
+    disabled_pos = _run_pipeline(edge_index, num_nodes, node_sizes, reference)
+    assert torch.equal(emitted.cpu(), disabled_pos.cpu())
 
 
 # ---------------------------------------------------------------------------
@@ -608,9 +880,6 @@ def test_exhausted_primary_ledger_cannot_starve_the_legacy_track(
 def test_no_new_arm_win_is_byte_inert() -> None:
     """Rows without a new-arm contest win never reach the shadow branch."""
     from dagua.layout.ops.pipelines.dagua_native import _layout_dagua_native_single_track
-    from dagua.layout.ops.pipelines.native_shadow_champion import (
-        SHADOW_CONTEST_TELEMETRY_ATTR,
-    )
 
     edge_index, num_nodes, node_sizes = _k5_graph()
     config = _fresh_config()
