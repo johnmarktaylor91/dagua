@@ -513,7 +513,7 @@ def _dot_flat_preprocess_edges(
     flat_rep_ids: list[int] = []
 
     has_ranks = layer_assignments is not None and int(layer_assignments.numel()) == num_nodes
-    ranks = layer_assignments.to(device=device, dtype=torch.long) if has_ranks else None
+    ranks = layer_assignments.to(device=device, dtype=torch.long) if has_ranks else None  # type: ignore[union-attr]
     for edge_id in range(edge_count):
         tail = int(src[edge_id].item())
         head = int(tgt[edge_id].item())
@@ -1637,6 +1637,17 @@ def _undirected_route_shortlist(
     if _community_features_strong(structure, num_nodes):
         classes.append("community")
         candidates.append("community_scaffold")
+    # W1-A (sprint2): sparse hub-free long-diameter infrastructure rows admit
+    # the t-FDP long-range-repulsion challenger. Gate and thresholds live in
+    # native_sparse_infrastructure (import stays lazy: that module imports
+    # contest helpers from native_undirected, which imports this module).
+    from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
+        sparse_infrastructure_gate,
+    )
+
+    if sparse_infrastructure_gate(structure, num_nodes):
+        classes.append("sparse_infrastructure")
+        candidates.append("tfdp_sparse")
     return NativeShortlist(classes=tuple(classes), candidates=tuple(candidates))
 
 
@@ -2046,7 +2057,7 @@ def _run_native_problem(
     structure = problem.structure or getattr(config, "_dagua_native_structure", None)
     if structure is None:
         structure = classify_graph(problem.edge_index, problem.num_nodes)
-        problem.structure = structure
+        problem.structure = structure  # type: ignore[assignment]
     if (
         bool(getattr(config, "_dagua_native_enable_hybrid_v2_auto", False))
         and not bool(getattr(structure, "is_directed_acyclic", True))
@@ -2058,7 +2069,7 @@ def _run_native_problem(
             compute_scc_predicate_stats(problem.edge_index, problem.num_nodes),
         )
 
-    selected = _choose_native_pipeline(structure=structure, config=config)
+    selected = _choose_native_pipeline(structure=structure, config=config)  # type: ignore[arg-type]
     last_finite_pos: Optional[torch.Tensor] = None
     if state.pos is not None and bool(torch.isfinite(state.pos).all().item()):
         last_finite_pos = state.pos.detach().clone()
@@ -2119,7 +2130,7 @@ def _run_native_problem(
         fallback_config = copy.copy(config)
         fallback_config.try_planar_first = False
         final_state = build_dagua_pipeline(fallback_config).apply(problem, state, ctx)
-        selected = _choose_native_pipeline(structure=structure, config=fallback_config)
+        selected = _choose_native_pipeline(structure=structure, config=fallback_config)  # type: ignore[arg-type]
     if final_state.pos is None:
         raise RuntimeError(f"native {selected} pipeline did not produce final positions.")
     result = final_state.pos.detach()
@@ -2143,7 +2154,7 @@ def _run_native_problem(
         and problem.node_sizes is not None
     ):
         cluster_ids = _problem_cluster_ids(problem)
-        is_semantically_directed, declared_hierarchical = _honest_ruler_flags(structure)
+        is_semantically_directed, declared_hierarchical = _honest_ruler_flags(structure)  # type: ignore[arg-type]
         result = _best_of_polish(
             result,
             problem.edge_index,
@@ -2986,7 +2997,7 @@ def _graphviz_dot_x_position_network_simplex(
     if not result.success:
         return _fallback_rank_order_x_positions(rank_ordering, node_widths, node_sep, center)
 
-    x_values = np.asarray(result.x[:num_nodes], dtype=np.float64)
+    x_values = np.asarray(result.x[:num_nodes], dtype=np.float64)  # type: ignore[index]
     rounded = np.rint(x_values)
     if np.max(np.abs(x_values - rounded)) <= 1.0e-7:
         x_values = rounded
@@ -3053,7 +3064,7 @@ def _dot_rank_assignment_lp(edge_index: torch.Tensor, num_nodes: int) -> Optiona
         return None
     if not result.success:
         return None
-    ranks = [int(round(float(value))) for value in result.x]
+    ranks = [int(round(float(value))) for value in result.x]  # type: ignore[union-attr]
     min_rank = min(ranks)
     return [rank - min_rank for rank in ranks]
 
@@ -3419,7 +3430,7 @@ def _dot_lattice_lp(
         rhs.append(-1.0)
     bounds_rank = [(0, None)] * n
     try:
-        rank_matrix = sparse.csr_matrix((rank_data, (rank_row, rank_col)), shape=(e, n))
+        rank_matrix = sparse.csr_matrix((rank_data, (rank_row, rank_col)), shape=(e, n))  # type: ignore[var-annotated]
         res = linprog(
             c=c_rank,
             A_ub=rank_matrix,
@@ -3431,7 +3442,7 @@ def _dot_lattice_lp(
         return cand
     if not res.success:
         return cand
-    rank_int = [int(round(r)) for r in res.x]
+    rank_int = [int(round(r)) for r in res.x]  # type: ignore[union-attr]
     rmin = min(rank_int)
     rank_int = [r - rmin for r in rank_int]
 
@@ -3560,8 +3571,8 @@ def _dot_lattice_lp(
             x_data.extend((1.0, -1.0))
             b_ub.append(-nodesep)
             row_index += 1
-    A_ub = sparse.csr_matrix((x_data, (x_row, x_col)), shape=(row_index, n_vars))
-    A_eq = sparse.csr_matrix(([1.0], ([0], [0])), shape=(1, n_vars))
+    A_ub = sparse.csr_matrix((x_data, (x_row, x_col)), shape=(row_index, n_vars))  # type: ignore[var-annotated]
+    A_eq = sparse.csr_matrix(([1.0], ([0], [0])), shape=(1, n_vars))  # type: ignore[var-annotated]
     b_eq = np.array([0.0])
     bounds_x = [(None, None)] * n_total + [(0, None)] * e_count
     try:
@@ -3578,7 +3589,7 @@ def _dot_lattice_lp(
         return cand
     if not res_x.success:
         return cand
-    x_vals = res_x.x[:n_total]
+    x_vals = res_x.x[:n_total]  # type: ignore[index]
     x_vals = x_vals - x_vals.min()
     out = torch.zeros((n, 2), dtype=cand.dtype, device=cand.device)
     for v in range(n):
@@ -4269,11 +4280,11 @@ def _tutte_cyclic_planar(
             diag_rows = list(range(n_int))
             diag_cols = list(range(n_int))
             diag_vals = [deg[v] for v in interior]
-            l_ii = sp.csr_matrix(
+            l_ii = sp.csr_matrix(  # type: ignore[var-annotated]
                 (vals_ii + diag_vals, (rows_ii + diag_rows, cols_ii + diag_cols)),
                 shape=(n_int, n_int),
             )
-            l_ib = sp.csr_matrix(
+            l_ib = sp.csr_matrix(  # type: ignore[var-annotated]
                 (vals_ib, (rows_ib, cols_ib)),
                 shape=(n_int, n_sub),
             )
@@ -5061,7 +5072,7 @@ def _w5_referee_key_fn(
         node_sizes=node_sizes,
         edge_weights=edge_weights,
         direction=direction,
-        structure=classify_graph(edge_index, int(num_nodes)),
+        structure=classify_graph(edge_index, int(num_nodes)),  # type: ignore[arg-type]
     )
 
     def referee_key(pos: torch.Tensor) -> tuple[int, float]:
@@ -5321,7 +5332,7 @@ def _best_of_polish(
         num_nodes=int(base_pos.shape[0]),
         node_sizes=cpu_node_sizes,
         direction=direction,
-        structure=classify_graph(cpu_edge_index, int(base_pos.shape[0])),
+        structure=classify_graph(cpu_edge_index, int(base_pos.shape[0])),  # type: ignore[arg-type]
         edge_weights=None if edge_weights is None else edge_weights.detach().to(device="cpu"),
     )
     offsets, targets = _build_csr(cpu_edge_index, int(base_pos.shape[0]))
@@ -5517,7 +5528,7 @@ def _best_of_polish(
         else [
             (
                 f"edge_equalize_{iters}_{step:g}",
-                lambda pos, edges, sizes, iters=iters, step=step: _equalize_edges(
+                lambda pos, edges, sizes, iters=iters, step=step: _equalize_edges(  # type: ignore[misc]
                     pos,
                     edges,
                     iters,
@@ -5692,7 +5703,7 @@ def _best_of_polish(
             [
                 (
                     f"y_layer_snap_after_{edge_name}",
-                    lambda pos, edges, sizes, seed_pos=seed_pos: _y_layer_snap(
+                    lambda pos, edges, sizes, seed_pos=seed_pos: _y_layer_snap(  # type: ignore[misc]
                         seed_pos,
                         edges,
                         sizes,
@@ -5700,7 +5711,7 @@ def _best_of_polish(
                 ),
                 (
                     f"orthogonal_align_after_{edge_name}",
-                    lambda pos, edges, sizes, seed_pos=seed_pos: _orthogonal_align(
+                    lambda pos, edges, sizes, seed_pos=seed_pos: _orthogonal_align(  # type: ignore[misc]
                         seed_pos,
                         edges,
                         sizes,
@@ -5708,7 +5719,7 @@ def _best_of_polish(
                 ),
                 (
                     f"orthogonal_align_overlap_jitter_after_{edge_name}",
-                    lambda pos, edges, sizes, seed_pos=seed_pos: _overlap_jitter(
+                    lambda pos, edges, sizes, seed_pos=seed_pos: _overlap_jitter(  # type: ignore[misc]
                         _orthogonal_align(seed_pos, edges, sizes),
                         edges,
                         sizes,
@@ -5720,7 +5731,7 @@ def _best_of_polish(
         if not polish_generation_admitted:
             continue
         try:
-            cand = make_polish_candidate(best_pos, edge_index, node_sizes)
+            cand = make_polish_candidate(best_pos, edge_index, node_sizes)  # type: ignore[assignment]
         except Exception as exc:  # noqa: BLE001 -- polish failures must not sink the solve
             if is_worker_timeout_like_exception(exc):
                 raise
@@ -6148,7 +6159,7 @@ def _terminal_w5_polish(
             direction=direction,
             clusters=clusters,
             cluster_parents=cluster_parents,
-            structure=terminal_structure,
+            structure=terminal_structure,  # type: ignore[arg-type]
             edge_weights=None if edge_weights is None else edge_weights.detach().to(device="cpu"),
         )
         offsets, targets = _build_csr(cpu_edge_index, int(final_pos.shape[0]))
@@ -6881,7 +6892,7 @@ def layout_dagua_native_pipeline(
             optimizer_type=optimizer_type,
             init_pos=init_pos,
             clusters=clusters,
-            cluster_parents=cluster_parents,
+            cluster_parents=cluster_parents,  # type: ignore[arg-type]
             layer_assignments=layer_assignments,
             prebuilt_layer_index=prebuilt_layer_index,
             graph_structure=graph_structure,
@@ -7296,7 +7307,7 @@ def layout_dagua_native_pipeline(
                 prepared_edge_index,
                 num_nodes,
                 normalized_node_sizes,
-                problem.structure,
+                problem.structure,  # type: ignore[arg-type]
                 target_device,
             ),
             "prelayout_fallback",
@@ -7348,7 +7359,7 @@ def layout_dagua_native_pipeline(
             component_state = DetectComponents().apply(problem, SolveState(), ctx)
             component_ids = component_state.component_ids
 
-        full_graph_route = _choose_native_pipeline(problem.structure, prepared_config)
+        full_graph_route = _choose_native_pipeline(problem.structure, prepared_config)  # type: ignore[arg-type]
         # Portfolio routes own component handling for graphs WITH edges: their
         # dot/sugiyama-family candidates pack components internally and the
         # frozen-ruler referee penalizes overlap. An edgeless multi-node graph
@@ -7401,7 +7412,7 @@ def layout_dagua_native_pipeline(
                         optimizer_type=optimizer_type,
                         layer_assignments=child_layers,
                         prebuilt_layer_index=None,
-                        graph_structure=child_problem.structure,
+                        graph_structure=child_problem.structure,  # type: ignore[arg-type]
                         skip_classification=False,
                     )
                     # component packing is a protected win for cyclic
@@ -7456,7 +7467,7 @@ def layout_dagua_native_pipeline(
                     prepared_edge_index, problem.num_nodes
                 )
                 is_semantically_directed, declared_hierarchical = _honest_ruler_flags(
-                    contest_structure
+                    contest_structure  # type: ignore[arg-type]
                 )
                 result = ensure_finite_boundary(
                     _best_of_polish(
@@ -7510,7 +7521,7 @@ def layout_dagua_native_pipeline(
                         node_sizes=normalized_node_sizes,
                         edge_weights=prepared_edge_weights,
                         config=prepared_config,
-                        structure=problem.structure,
+                        structure=problem.structure,  # type: ignore[arg-type]
                         direction=prepared_config.direction,
                         clusters=clusters,
                         cluster_parents=cluster_parents,
@@ -7594,7 +7605,7 @@ def layout_dagua_native_pipeline(
                     node_sizes=normalized_node_sizes,
                     edge_weights=prepared_edge_weights,
                     config=prepared_config,
-                    structure=problem.structure,
+                    structure=problem.structure,  # type: ignore[arg-type]
                     direction=prepared_config.direction,
                     clusters=clusters,
                     cluster_parents=cluster_parents,
