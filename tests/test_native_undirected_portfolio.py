@@ -1061,7 +1061,7 @@ def test_contest_registers_both_cleanup_variants() -> None:
         config = LayoutConfig(seed=42, device="cpu")
         # This regression isolates cleanup registration. Multi-seed families
         # are intentionally proxy-culled before the honest referee, so force
-        # their byte-inert k=1 path while asserting the legacy cleanup ladder.
+        # their replication-off k=1 path while asserting the cleanup ladder.
         setattr(config, "_dagua_native_stochastic_seed_count", 1)
         layout(graph, config)
     finally:

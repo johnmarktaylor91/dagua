@@ -533,9 +533,9 @@ def _portfolio_has_budget(
 def _sparse_contest_arm_admitted(
     problem: LayoutProblem,
     config: Optional[LayoutConfig],
-    seed_count: int = 1,
-) -> bool:
-    """Admit the normal-contest t-FDP challenger through the DWU ledger only.
+    seeds: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Admit an affordable normal-contest t-FDP frozen seed prefix.
 
     W1-A arms are never wall/process-time conditional (review F2): the
     admitted challenger set must be identical under any machine load, so this
@@ -548,24 +548,24 @@ def _sparse_contest_arm_admitted(
         Prepared undirected layout problem.
     config : LayoutConfig, optional
         Prepared native configuration carrying the optional budget ledger.
-    seed_count : int, default=1
-        Frozen seed replicas admitted as one family package.
+    seeds : tuple[int, ...]
+        Frozen absolute seeds in deterministic prefix order.
 
     Returns
     -------
-    bool
-        ``True`` when the arm was admitted (or no ledger is active).
+    tuple[int, ...]
+        Largest admitted prefix, or an empty tuple if the base arm is rejected.
     """
     from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
-        sparse_arm_cost_admitted,
+        sparse_arm_seed_prefix_admitted,
     )
 
-    return sparse_arm_cost_admitted(
+    return sparse_arm_seed_prefix_admitted(
         problem,
         config,
         _native_device_class(config),
         "contest_tfdp",
-        seed_count=seed_count,
+        seeds,
     )
 
 
@@ -3407,7 +3407,8 @@ def layout_native_undirected_portfolio(
                     {"steps": sfdp_steps, "samples": None},
                     _native_device_class(config),
                 )
-                if admit_seed_family(config, sfdp_cost, "sfdp", sfdp_seeds):
+                sfdp_seeds = admit_seed_family(config, sfdp_cost, "sfdp", sfdp_seeds)
+                if sfdp_seeds:
                     replicated_family = "sfdp" if len(sfdp_seeds) > 1 else None
                     for seed_index, seed_value in enumerate(sfdp_seeds):
                         sfdp_pos = layout_sfdp_pipeline(
@@ -3722,11 +3723,18 @@ def layout_native_undirected_portfolio(
             fcose_package_s = fcose_cost.generation_dwu * len(
                 fcose_seeds
             ) + fcose_cost.reserved_score_dwu * min(2, len(fcose_seeds))
-            if _predicted_arm_budget_preserving_arm_s_score(
+            fcose_seeds = admit_seed_family(
                 config,
-                fcose_package_s,
-                arm_s_pending=bool(arm_s_candidate_names),
-            ) and admit_seed_family(config, fcose_cost, "fcose", fcose_seeds):
+                fcose_cost,
+                "fcose",
+                fcose_seeds,
+                package_gate=lambda package: _predicted_arm_budget_preserving_arm_s_score(
+                    config,
+                    package.generation_dwu + package.reserved_score_dwu,
+                    arm_s_pending=bool(arm_s_candidate_names),
+                ),
+            )
+            if fcose_seeds:
                 replicated_family = "fcose" if len(fcose_seeds) > 1 else None
                 for seed_offset, seed_value in enumerate(fcose_seeds):
                     candidate_started_process = time.process_time()
@@ -3776,7 +3784,6 @@ def layout_native_undirected_portfolio(
             from dagua.layout.ops.pipelines.native_seed_replication import (
                 admit_seed_family,
                 frozen_seed_bank,
-                replicated_work_cost,
             )
             from dagua.layout.ops.pipelines.tsnet import layout_tsnet_pipeline
 
@@ -3788,19 +3795,23 @@ def layout_native_undirected_portfolio(
             )
             tsnet_seeds = frozen_seed_bank(config, seed)
             tsnet_run_count = len(tsnet_seeds) * len(TSNET_PERPLEXITIES)
-            tsnet_package = replicated_work_cost(tsnet_cost, tsnet_run_count)
-            tsnet_package_s = tsnet_package.generation_dwu + tsnet_package.reserved_score_dwu
-            if _predicted_arm_budget_preserving_arm_s_score(
-                config,
-                tsnet_package_s,
-                arm_s_pending=bool(arm_s_candidate_names),
-            ) and admit_seed_family(
+            tsnet_package_s = (
+                tsnet_cost.generation_dwu * tsnet_run_count
+                + tsnet_cost.reserved_score_dwu * min(2, tsnet_run_count)
+            )
+            tsnet_seeds = admit_seed_family(
                 config,
                 tsnet_cost,
                 "tsnet",
                 tsnet_seeds,
                 work_count=tsnet_run_count,
-            ):
+                package_gate=lambda package: _predicted_arm_budget_preserving_arm_s_score(
+                    config,
+                    package.generation_dwu + package.reserved_score_dwu,
+                    arm_s_pending=bool(arm_s_candidate_names),
+                ),
+            )
+            if tsnet_seeds:
                 replicated_family = "tsnet" if len(tsnet_seeds) > 1 else None
                 for perplexity in TSNET_PERPLEXITIES:
                     for seed_offset, seed_value in enumerate(tsnet_seeds):
@@ -3978,7 +3989,8 @@ def layout_native_undirected_portfolio(
             )
 
             tfdp_seeds = frozen_seed_bank(config, seed)
-            if _sparse_contest_arm_admitted(problem, config, len(tfdp_seeds)):
+            tfdp_seeds = _sparse_contest_arm_admitted(problem, config, tfdp_seeds)
+            if tfdp_seeds:
                 replicated_family = "tfdp" if len(tfdp_seeds) > 1 else None
                 for seed_index, seed_value in enumerate(tfdp_seeds):
                     tfdp_name = "tfdp" if seed_index == 0 else f"tfdp_seed{seed_index}"
