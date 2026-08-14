@@ -8,6 +8,7 @@ from typing import Tuple
 
 import torch
 
+from dagua.eval.ruler_v4._util import resolved_routes
 from dagua.eval.ruler_v4.scene import Scene
 
 N_SMALL = 50
@@ -349,8 +350,55 @@ def overflow_defect(scene: Scene, frame: RobustFrame) -> Tuple[float, float, flo
     escaped_area = sum(
         box_outside_area(box.center, box.half_extents, frame) for box in scene.node_boxes
     )
+    stroke_width = scene.style.route_stroke_width * scene.style.coordinate_scale
+    for route in resolved_routes(scene):
+        for start, end in zip(route.points[:-1], route.points[1:]):
+            segment_length = float(torch.linalg.vector_norm(end - start).item())
+            inside_length = _segment_length_inside_frame(start, end, frame)
+            escaped_area += max(0.0, segment_length - inside_length) * stroke_width
     mass_out = escaped_area / frame.area
     anchor = overflow_anchor(scene, frame)
     excess = max(0.0, mass_out - anchor)
     smooth = 0.0 if excess <= 0.0 else excess**2 / (excess + 0.05)
     return mass_out, anchor, smooth / (1.0 + smooth)
+
+
+def _segment_length_inside_frame(
+    start: torch.Tensor, end: torch.Tensor, frame: RobustFrame
+) -> float:
+    """Clip a segment to a robust frame and return its retained length.
+
+    Parameters
+    ----------
+    start, end : torch.Tensor
+        Segment endpoints with shape ``[2]``.
+    frame : RobustFrame
+        Axis-aligned clipping frame.
+
+    Returns
+    -------
+    float
+        Segment length lying inside the frame rectangle.
+    """
+
+    direction = end - start
+    lower = 0.0
+    upper = 1.0
+    frame_low = frame.center - frame.half_extents
+    frame_high = frame.center + frame.half_extents
+    for axis in range(2):
+        delta = float(direction[axis])
+        origin = float(start[axis])
+        low = float(frame_low[axis])
+        high = float(frame_high[axis])
+        if delta == 0.0:
+            if origin < low or origin > high:
+                return 0.0
+            continue
+        first = (low - origin) / delta
+        second = (high - origin) / delta
+        lower = max(lower, min(first, second))
+        upper = min(upper, max(first, second))
+        if lower >= upper:
+            return 0.0
+    return (upper - lower) * float(torch.linalg.vector_norm(direction).item())

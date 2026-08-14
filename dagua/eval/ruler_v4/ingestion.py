@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import fields
+from dataclasses import fields, is_dataclass, replace
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 import torch
@@ -18,6 +18,7 @@ from dagua.eval.ruler_v4.scene import (
     IngestionResult,
     InvalidScene,
     ObservationProfile,
+    PortDeclaration,
     Route,
     Scene,
     StyleContract,
@@ -33,9 +34,16 @@ _FORBIDDEN_DRAWING_FIELDS = frozenset(
     {"half_extents", "node_boxes", "label_boxes", "stroke_widths", "marker_sizes", "glyph_metrics"}
 )
 _WEIGHT_SEMANTICS = frozenset(
-    {"distance_cost", "connection_strength", "generator_declared_edge_weights"}
+    {
+        "target_length",
+        "similarity",
+        "flow",
+        "distance_cost",
+        "connection_strength",
+        "generator_declared_edge_weights",
+    }
 )
-_PORT_DIRECTIONS = frozenset({"north", "east", "south", "west"})
+_PORT_DIRECTIONS = frozenset({"N", "E", "S", "W"})
 
 
 def _invalid(code: IngestionErrorCode, message: str, path: Optional[str] = None) -> InvalidScene:
@@ -90,8 +98,13 @@ def _validate_graph(graph: GraphSemantics) -> Optional[InvalidScene]:
         ("edge_labels", graph.edge_labels, len(graph.edges)),
         ("feedback", graph.feedback, len(graph.edges)),
         ("edge_weights", graph.edge_weights, len(graph.edges)),
+        ("edge_styles", graph.edge_styles, len(graph.edges)),
+        ("edge_bundles", graph.edge_bundles, len(graph.edges)),
         ("ranks", graph.ranks, node_count),
         ("temporal_ids", graph.temporal_ids, node_count),
+        ("tree_parents", graph.tree_parents, node_count),
+        ("tree_depths", graph.tree_depths, node_count),
+        ("node_masses", graph.node_masses, node_count),
     )
     for name, values, expected in optional_lengths:
         if values is not None and len(values) not in {0, expected}:
@@ -113,6 +126,33 @@ def _validate_graph(graph: GraphSemantics) -> Optional[InvalidScene]:
                 IngestionErrorCode.MALFORMED_METADATA,
                 "weighted graphs require a closed-enum weight_semantics value",
                 "graph.weight_semantics",
+            )
+    if graph.node_masses is not None:
+        node_masses = torch.tensor(graph.node_masses, dtype=torch.float64)
+        if not bool(torch.isfinite(node_masses).all()) or bool((node_masses <= 0.0).any()):
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "node masses must be finite and positive",
+                "graph.node_masses",
+            )
+    if graph.edge_styles is not None and any(
+        style not in {"straight", "polyline", "orthogonal", "curved"} for style in graph.edge_styles
+    ):
+        return _invalid(
+            IngestionErrorCode.MALFORMED_METADATA,
+            "edge styles must belong to the frozen style enum",
+            "graph.edge_styles",
+        )
+    if graph.edge_bundles is not None:
+        bundle_counts: Dict[str, int] = {}
+        for bundle in graph.edge_bundles:
+            if bundle is not None:
+                bundle_counts[bundle] = bundle_counts.get(bundle, 0) + 1
+        if any(not bundle or count < 2 for bundle, count in bundle_counts.items()):
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "declared bundles must be nonempty and contain at least two edges",
+                "graph.edge_bundles",
             )
     for name, members in graph.clusters.items():
         if not name or any(member < 0 or member >= node_count for member in members):
@@ -186,21 +226,49 @@ def _validate_graph(graph: GraphSemantics) -> Optional[InvalidScene]:
                 "encoding knots must be positive and monotone",
                 "graph.weight_encoding_knots",
             )
-    for edge_index, directions in graph.ports.items():
-        if (
-            edge_index < 0
-            or edge_index >= len(graph.edges)
-            or len(directions) != 2
-            or any(
-                direction is not None and direction not in _PORT_DIRECTIONS
-                for direction in directions
-            )
-        ):
+    port_ids = set()
+    side_orders = set()
+    for edge_index, declarations in graph.ports.items():
+        if edge_index < 0 or edge_index >= len(graph.edges) or len(declarations) != 2:
             return _invalid(
                 IngestionErrorCode.MALFORMED_METADATA,
-                "ports must reference an edge and use supported cardinal directions",
+                "ports must reference an edge and declare exactly two endpoints",
                 f"graph.ports.{edge_index}",
             )
+        for endpoint, declaration in enumerate(declarations):
+            if declaration is None:
+                continue
+            expected_node = graph.edges[edge_index][endpoint]
+            if not isinstance(declaration, PortDeclaration):
+                return _invalid(
+                    IngestionErrorCode.MALFORMED_METADATA,
+                    "port endpoints require complete PortDeclaration records",
+                    f"graph.ports.{edge_index}[{endpoint}]",
+                )
+            normal = torch.tensor(declaration.normal, dtype=torch.float64)
+            approach = torch.tensor(declaration.expected_approach, dtype=torch.float64)
+            key = (declaration.node_id, declaration.side, declaration.order)
+            if (
+                not declaration.port_id
+                or declaration.port_id in port_ids
+                or declaration.node_id != expected_node
+                or declaration.side not in _PORT_DIRECTIONS
+                or not 0.0 <= declaration.side_coordinate <= 1.0
+                or normal.shape != (2,)
+                or approach.shape != (2,)
+                or not bool(torch.isfinite(normal).all())
+                or not bool(torch.isfinite(approach).all())
+                or not math.isclose(float(torch.linalg.vector_norm(normal)), 1.0, abs_tol=1e-12)
+                or not math.isclose(float(torch.linalg.vector_norm(approach)), 1.0, abs_tol=1e-12)
+                or key in side_orders
+            ):
+                return _invalid(
+                    IngestionErrorCode.MALFORMED_METADATA,
+                    "port declaration is dangling, duplicate, or geometrically malformed",
+                    f"graph.ports.{edge_index}[{endpoint}]",
+                )
+            port_ids.add(declaration.port_id)
+            side_orders.add(key)
     return None
 
 
@@ -235,6 +303,7 @@ def _validate_style(style: StyleContract) -> Optional[InvalidScene]:
         style.route_stroke_width,
         style.coordinate_scale,
         style.flattening_tolerance,
+        style.minimum_feature_separation,
     )
     tensor = torch.tensor(numeric, dtype=torch.float64)
     if not bool(torch.isfinite(tensor).all()) or bool((tensor <= 0.0).any()):
@@ -249,6 +318,114 @@ def _validate_style(style: StyleContract) -> Optional[InvalidScene]:
             "label_gap must be finite and nonnegative",
             "style.label_gap",
         )
+    if style.physical_output is not None:
+        required = {"output_width", "output_height", "h_font", "h_floor"}
+        if set(style.physical_output) != required:
+            return _invalid(
+                IngestionErrorCode.IMPOSSIBLE_STYLE,
+                "physical_output must contain exactly output_width, output_height, h_font, h_floor",
+                "style.physical_output",
+            )
+        physical = torch.tensor(
+            [style.physical_output[name] for name in sorted(required)], dtype=torch.float64
+        )
+        if not bool(torch.isfinite(physical).all()) or bool((physical <= 0.0).any()):
+            return _invalid(
+                IngestionErrorCode.IMPOSSIBLE_STYLE,
+                "physical_output values must be finite and positive",
+                "style.physical_output",
+            )
+    background = torch.tensor(style.canvas_background, dtype=torch.float64)
+    if (
+        background.shape != (3,)
+        or not bool(torch.isfinite(background).all())
+        or bool(((background < 0.0) | (background > 1.0)).any())
+    ):
+        return _invalid(
+            IngestionErrorCode.IMPOSSIBLE_STYLE,
+            "canvas background must be finite sRGB in [0, 1]",
+            "style.canvas_background",
+        )
+    channel_ids = set()
+    for index, declaration in enumerate(style.channel_set):
+        if (
+            not declaration.channel_id
+            or declaration.channel_id in channel_ids
+            or declaration.primitive_kind not in {"node", "edge"}
+            or declaration.visual_property not in {"fill_color", "stroke_color"}
+            or not declaration.attribute
+            or not declaration.value_map
+        ):
+            return _invalid(
+                IngestionErrorCode.IMPOSSIBLE_STYLE,
+                "channel declarations must be unique, supported, and nonempty",
+                f"style.channel_set[{index}]",
+            )
+        for category, color in declaration.value_map.items():
+            rgb = torch.tensor(color, dtype=torch.float64)
+            if (
+                not category
+                or rgb.shape != (3,)
+                or not bool(torch.isfinite(rgb).all())
+                or bool(((rgb < 0.0) | (rgb > 1.0)).any())
+            ):
+                return _invalid(
+                    IngestionErrorCode.IMPOSSIBLE_STYLE,
+                    "channel values must be finite sRGB triples in [0, 1]",
+                    f"style.channel_set[{index}].value_map.{category}",
+                )
+        channel_ids.add(declaration.channel_id)
+    return None
+
+
+def _validate_channels(graph: GraphSemantics, style: StyleContract) -> Optional[InvalidScene]:
+    """Validate declared channel completeness against graph attributes and legends.
+
+    Parameters
+    ----------
+    graph : GraphSemantics
+        Corpus-owned categories and legends.
+    style : StyleContract
+        Corpus-owned channel value maps.
+
+    Returns
+    -------
+    InvalidScene or None
+        Typed completeness failure, if any.
+    """
+
+    for declaration in style.channel_set:
+        attributes = (
+            graph.node_attributes if declaration.primitive_kind == "node" else graph.edge_attributes
+        )
+        expected_count = (
+            len(graph.node_ids) if declaration.primitive_kind == "node" else len(graph.edges)
+        )
+        values = attributes.get(declaration.attribute)
+        required = declaration.channel_id in graph.required_primitives
+        if values is None:
+            if required:
+                return _invalid(
+                    IngestionErrorCode.MISSING_REQUIRED_PRIMITIVE,
+                    "required visual channel has no declared source attribute",
+                    f"graph.required_primitives.{declaration.channel_id}",
+                )
+            continue
+        if len(values) != expected_count or any(
+            value not in declaration.value_map for value in values
+        ):
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "channel categories must be complete and covered by the value map",
+                f"graph.{declaration.primitive_kind}_attributes.{declaration.attribute}",
+            )
+        legend = graph.legends.get(declaration.channel_id)
+        if legend is not None and dict(legend) != dict(declaration.value_map):
+            return _invalid(
+                IngestionErrorCode.MISSING_REQUIRED_PRIMITIVE,
+                "declared legend does not match the channel value map",
+                f"graph.legends.{declaration.channel_id}",
+            )
     return None
 
 
@@ -368,6 +545,50 @@ def _derive_boxes(
     return tuple(node_boxes), tuple(node_label_boxes), tuple(edge_label_boxes)
 
 
+def _derive_cluster_label_boxes(scene: Scene) -> Mapping[str, BoxGeometry]:
+    """Derive required cluster-label geometry from canonical cluster regions.
+
+    Parameters
+    ----------
+    scene : Scene
+        Validated scene with an empty cluster-label mapping.
+
+    Returns
+    -------
+    mapping[str, BoxGeometry]
+        Cluster id to immutable derived label box.
+    """
+
+    if "cluster_labels" not in scene.profile.visible_channels:
+        return {}
+    # The region contract lives with the cluster facets. Importing it here avoids
+    # duplicating that score-visible construction while keeping module import order acyclic.
+    from dagua.eval.ruler_v4.clusters import _regions
+
+    scale = scene.style.coordinate_scale
+    result: Dict[str, BoxGeometry] = {}
+    for owner, (name, region) in enumerate(_regions(scene).items()):
+        if len(set(scene.graph.clusters[name])) < 3:
+            continue
+        text_width, text_height = _text_extent(name, scene.style)
+        width = text_width + 2.0 * scene.style.padding_x * scale
+        height = text_height + 2.0 * scene.style.padding_y * scale
+        padding = 0.50 * scene.intrinsic_unit
+        top = region.bounds.center[1] + region.bounds.half_extents[1]
+        center = torch.stack(
+            (
+                region.bounds.center[0],
+                top - padding - torch.tensor(height / 2.0, dtype=torch.float64),
+            )
+        )
+        result[name] = BoxGeometry(
+            center,
+            torch.tensor([width / 2.0, height / 2.0], dtype=torch.float64),
+            owner,
+        )
+    return result
+
+
 def _profile_hash(graph: GraphSemantics, style: StyleContract, profile: ObservationProfile) -> str:
     """Hash canonical input-owned comparison identity.
 
@@ -398,12 +619,24 @@ def _profile_hash(graph: GraphSemantics, style: StyleContract, profile: Observat
         "roots": graph.roots,
         "feedback": graph.feedback,
         "edge_weights": graph.edge_weights,
+        "edge_styles": graph.edge_styles,
+        "edge_bundles": graph.edge_bundles,
+        "node_attributes": graph.node_attributes,
+        "edge_attributes": graph.edge_attributes,
+        "legends": graph.legends,
         "weight_semantics": graph.weight_semantics,
         "ports": sorted((key, value) for key, value in graph.ports.items()),
         "temporal_ids": graph.temporal_ids,
         "required_primitives": sorted(graph.required_primitives),
         "flow_axis": graph.flow_axis,
         "symmetry_generators": graph.symmetry_generators,
+        "node_masses": graph.node_masses,
+        "declared_graph_class": graph.declared_graph_class,
+        "lattice_dimensions": graph.lattice_dimensions,
+        "tree_parents": graph.tree_parents,
+        "tree_depths": graph.tree_depths,
+        "tree_layout": graph.tree_layout,
+        "ordered_children": graph.ordered_children,
         "weight_visual_channel": graph.weight_visual_channel,
         "weight_encoding_knots": graph.weight_encoding_knots,
         "style": {
@@ -415,7 +648,18 @@ def _profile_hash(graph: GraphSemantics, style: StyleContract, profile: Observat
     }
 
     def normalize(value: Any) -> Any:
-        """Normalize sets and mappings for canonical JSON serialization."""
+        """Normalize one value for canonical JSON serialization.
+
+        Parameters
+        ----------
+        value : Any
+            Nested profile-identity value.
+
+        Returns
+        -------
+        Any
+            JSON-compatible canonical value.
+        """
 
         if isinstance(value, (set, frozenset)):
             return sorted(normalize(item) for item in value)
@@ -424,8 +668,10 @@ def _profile_hash(graph: GraphSemantics, style: StyleContract, profile: Observat
                 str(key): normalize(item)
                 for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
             }
-        if isinstance(value, tuple):
+        if isinstance(value, (list, tuple)):
             return [normalize(item) for item in value]
+        if is_dataclass(value) and not isinstance(value, type):
+            return {item.name: normalize(getattr(value, item.name)) for item in fields(value)}
         return value
 
     encoded = json.dumps(normalize(payload), sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -463,6 +709,9 @@ def ingest(
     style_error = _validate_style(style)
     if style_error is not None:
         return style_error
+    channel_error = _validate_channels(graph, style)
+    if channel_error is not None:
+        return channel_error
     if graph.weight_visual_channel == "stroke_thickness":
         if len(style.edge_stroke_widths) != len(graph.edges):
             return _invalid(
@@ -490,6 +739,12 @@ def ingest(
             "position count does not match canonical node count",
             "drawing.positions",
         )
+    if positions.shape[0] == 0:
+        return _invalid(
+            IngestionErrorCode.MALFORMED_POSITIONS,
+            "at least one node position is required",
+            "drawing.positions",
+        )
     positions64 = _clone_float64(positions)
     if not bool(torch.isfinite(positions64).all()):
         return _invalid(
@@ -498,7 +753,7 @@ def ingest(
             "drawing.positions",
         )
     available = {"nodes"}
-    if drawing.routes:
+    if drawing.routes or graph.edges:
         available.add("routes")
     if (
         any(label is not None for label in graph.node_labels)
@@ -515,9 +770,6 @@ def ingest(
             f"missing required primitives: {', '.join(missing_required)}",
             "drawing",
         )
-    missing_optional = tuple(sorted(set(profile.optional_channels) - available))
-    if missing_optional:
-        return ValidAbsence(f"no_declared_{missing_optional[0]}", missing_optional)
     if drawing.node_label_offsets is not None:
         offsets = drawing.node_label_offsets
         if offsets.shape != positions.shape or not bool(
@@ -528,6 +780,17 @@ def ingest(
                 "node label offsets must be finite with shape [N, 2]",
                 "drawing.node_label_offsets",
             )
+    node_boxes, node_label_boxes, edge_label_boxes = _derive_boxes(graph, drawing, style, profile)
+    diagonals = torch.stack(
+        [2.0 * torch.linalg.vector_norm(box.half_extents) for box in node_boxes]
+    )
+    intrinsic_unit = float(torch.median(diagonals).item())
+    if intrinsic_unit <= 0.0 or not torch.isfinite(torch.tensor(intrinsic_unit)).item():
+        return _invalid(
+            IngestionErrorCode.IMPOSSIBLE_STYLE,
+            "derived primitive diagonal must be finite and positive",
+            "style",
+        )
     if drawing.edge_label_positions is not None:
         label_positions = drawing.edge_label_positions
         expected = (len(graph.edges), 2)
@@ -575,6 +838,20 @@ def ingest(
                 "route contains NaN or infinity",
                 f"drawing.routes[{route_index}].points",
             )
+        source, target = graph.edges[route.edge_index]
+        for endpoint_name, point, owner in (
+            ("source", points[0], source),
+            ("target", points[-1], target),
+        ):
+            box = node_boxes[owner]
+            excess = torch.abs(point - box.center) - box.half_extents
+            clearance = float(torch.linalg.vector_norm(torch.clamp(excess, min=0.0)))
+            if clearance > intrinsic_unit / 2.0:
+                return _invalid(
+                    IngestionErrorCode.TOPOLOGY_MISMATCH,
+                    "route terminal is detached from its declared endpoint",
+                    f"drawing.routes[{route_index}].{endpoint_name}",
+                )
         seen_edges.add(route.edge_index)
         routes.append(Route(route.edge_index, points, route.kind))
     simple_keys = [tuple(sorted(edge)) for edge in graph.edges if edge[0] != edge[1]]
@@ -592,17 +869,6 @@ def ingest(
             "every port-bound edge requires a visible route",
             "drawing.routes",
         )
-    node_boxes, node_label_boxes, edge_label_boxes = _derive_boxes(graph, drawing, style, profile)
-    diagonals = torch.stack(
-        [2.0 * torch.linalg.vector_norm(box.half_extents) for box in node_boxes]
-    )
-    intrinsic_unit = float(torch.median(diagonals).item())
-    if intrinsic_unit <= 0.0 or not torch.isfinite(torch.tensor(intrinsic_unit)).item():
-        return _invalid(
-            IngestionErrorCode.IMPOSSIBLE_STYLE,
-            "derived primitive diagonal must be finite and positive",
-            "style",
-        )
     scene = Scene(
         graph=graph,
         style=style,
@@ -613,9 +879,11 @@ def ingest(
         node_boxes=node_boxes,
         node_label_boxes=node_label_boxes,
         edge_label_boxes=edge_label_boxes,
+        cluster_label_boxes={},
         intrinsic_unit=intrinsic_unit,
         profile_hash=_profile_hash(graph, style, profile),
     )
+    scene = replace(scene, cluster_label_boxes=_derive_cluster_label_boxes(scene))
     return ValidScene(scene)
 
 

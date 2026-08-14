@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Mapping, Optional, Tuple
 
+import pytest
 import torch
 
 from dagua.eval.ruler_v4.clusters import U25, U26, U27, U28, U29, U30
@@ -69,8 +70,8 @@ def _scene(
     return result.scene
 
 
-def test_u25_compact_cluster_scores_better_than_spread_twin() -> None:
-    """U25's compactness fixture strictly prefers the compact member drawing."""
+def test_u25_uniform_scale_preserves_shape_defect() -> None:
+    """U25's scale-neutral contract gives a homothetic pair the same defect."""
 
     compact = _scene(torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]]), {"c": (0, 1, 2)})
     spread = _scene(torch.tensor([[0.0, 0.0], [10.0, 0.0], [5.0, 10.0]]), {"c": (0, 1, 2)})
@@ -78,19 +79,28 @@ def test_u25_compact_cluster_scores_better_than_spread_twin() -> None:
     spread_result = U25(spread)
     assert compact_result.value is not None
     assert spread_result.value is not None
-    assert compact_result.value < spread_result.value
+    assert compact_result.value == pytest.approx(0.0, abs=0.0)
+    assert spread_result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u26_separated_clusters_score_better_than_interleaved_twin() -> None:
     """U26's community fixture prefers separated declared clusters."""
 
-    clusters = {"a": (0, 1), "b": (2, 3)}
-    separated = _scene(torch.tensor([[0.0, 0.0], [0.0, 1.0], [8.0, 0.0], [8.0, 1.0]]), clusters)
-    interleaved = _scene(torch.tensor([[0.0, 0.0], [8.0, 1.0], [0.0, 1.0], [8.0, 0.0]]), clusters)
+    clusters = {"a": (0, 1, 2), "b": (3, 4, 5)}
+    separated = _scene(
+        torch.tensor([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [8.0, 0.0], [8.0, 1.0], [9.0, 0.0]]),
+        clusters,
+    )
+    interleaved = _scene(
+        torch.tensor([[0.0, 0.0], [8.0, 1.0], [1.0, 0.0], [8.0, 0.0], [0.0, 1.0], [9.0, 0.0]]),
+        clusters,
+    )
     separated_result = U26(separated)
     interleaved_result = U26(interleaved)
     assert separated_result.value is not None
     assert interleaved_result.value is not None
+    assert separated_result.value == pytest.approx(0.0, abs=0.0)
+    assert interleaved_result.value == pytest.approx(0.6757302798599085, abs=1e-15)
     assert separated_result.value < interleaved_result.value
 
 
@@ -98,37 +108,51 @@ def test_u27_nonmember_nodes_and_routes_outside_region_have_no_intrusion() -> No
     """U27's clean containment fixture has zero foreign-node and route intrusion."""
 
     scene = _scene(
-        torch.tensor([[0.0, 0.0], [0.0, 1.0], [8.0, 0.0], [8.0, 1.0]]),
-        {"a": (0, 1), "b": (2, 3)},
+        torch.tensor([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [8.0, 0.0], [8.0, 1.0], [9.0, 0.0]]),
+        {"a": (0, 1, 2), "b": (3, 4, 5)},
     )
     result = U27(scene)
-    assert result.state is ResultState.VALUE
-    assert result.subterms["U27.i"] == 0.0
+    assert result.state is ResultState.NA
+    assert result.reason == "alpha_grid_unselected"
+    lower, upper = result.raw["grid_envelope"]
+    assert lower <= upper
+    assert upper == pytest.approx(0.2125671952287158, rel=1e-12)
 
 
 def test_u28_nested_parent_contains_child_without_overflow() -> None:
     """U28's nested hierarchy fixture has zero parent-child containment debt."""
 
     positions = torch.tensor(
-        [[-4.0, -4.0], [4.0, -4.0], [-1.0, 0.0], [1.0, 0.0], [-4.0, 4.0], [4.0, 4.0]]
+        [
+            [-4.0, -4.0],
+            [4.0, -4.0],
+            [-1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 0.0],
+            [-4.0, 4.0],
+            [4.0, 4.0],
+        ]
     )
     scene = _scene(
         positions,
-        {"child": (2, 3), "parent": (0, 1, 2, 3, 4, 5)},
+        {"child": (2, 3, 4), "parent": (0, 1, 2, 3, 4, 5, 6)},
         {"child": "parent"},
     )
     result = U28(scene)
-    assert result.state is ResultState.VALUE
-    assert result.subterms["U28.i"] == 0.0
+    assert result.state is ResultState.NA
+    assert result.reason == "alpha_grid_unselected"
+    lower, upper = result.raw["grid_envelope"]
+    assert lower <= upper
+    assert (lower, upper) == pytest.approx((1.0, 1.0), abs=0.0)
 
 
 def test_u29_square_cluster_has_exact_zero_shape_debt() -> None:
     """U29's square cluster has unit aspect ratio and exact zero defect."""
 
-    positions = torch.tensor([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
-    result = U29(_scene(positions, {"square": (0, 1, 2, 3)}))
+    positions = torch.tensor([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0], [0.0, 0.0]])
+    result = U29(_scene(positions, {"square": (0, 1, 2, 3, 4)}))
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u30_absent_cluster_label_channel_is_typed_na() -> None:
@@ -138,3 +162,19 @@ def test_u30_absent_cluster_label_channel_is_typed_na() -> None:
     result = U30(_scene(positions, {"square": (0, 1, 2, 3)}))
     assert result.state is ResultState.NA
     assert result.reason == "no_declared_cluster_labels"
+
+
+def test_u30_single_visible_cluster_label_pins_grid_envelope() -> None:
+    """U30 pins the exact pre-selection envelope for one derived cluster label."""
+
+    positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [1.0, 1.0]])
+    result = U30(
+        _scene(
+            positions,
+            {"c": (0, 1, 2)},
+            cluster_labels_visible=True,
+        )
+    )
+    assert result.state is ResultState.NA
+    assert result.reason == "alpha_grid_unselected"
+    assert result.raw["grid_envelope"] == pytest.approx((0.9289481267661222, 1.0), abs=1e-15)

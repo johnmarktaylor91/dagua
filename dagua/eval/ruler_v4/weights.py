@@ -11,8 +11,9 @@ from typing import DefaultDict, List
 
 import torch
 
-from dagua.eval.ruler_v4._util import graph_distances, isotonic_stress, pair_values
+from dagua.eval.ruler_v4._util import global_blend, graph_distances, primary_isotonic_fit
 from dagua.eval.ruler_v4.scene import FacetResult, Scene, na_result, value_result
+from dagua.eval.ruler_v4.structure import _distance_strata, _stress_from_fit
 
 _DISTANCE_SEMANTICS = frozenset({"distance_cost", "connection_strength"})
 _LOCAL_ORDER_SEMANTICS = frozenset({"distance_cost", "connection_strength"})
@@ -22,7 +23,7 @@ def U35(scene: Scene) -> FacetResult:
     """Weighted distance fidelity. Frozen SHA-256: 7644f1fef1bcede526f923da3bc70e24005a0c28296369300eec9cc9d4743810."""
 
     if scene.graph.edge_weights is None:
-        return na_result("NO_DECLARED_EDGE_WEIGHTS")
+        return na_result("WEIGHTS_ABSENT")
     if scene.graph.weight_semantics not in _DISTANCE_SEMANTICS:
         return na_result("WEIGHT_SEMANTICS_NOT_DISTANCE")
     declared = torch.tensor(scene.graph.edge_weights, dtype=torch.float64)
@@ -31,33 +32,76 @@ def U35(scene: Scene) -> FacetResult:
     else:
         costs = declared
     weighted_graph = replace_edge_weights(scene, tuple(float(value) for value in costs))
-    weighted_order, layout = pair_values(
+    if not any(len(members) >= 3 for members in _component_members(scene)):
+        return na_result("NO_THREE_NODE_WEIGHTED_COMPONENT")
+    unweighted_strata = _distance_strata(scene)
+    weighted_strata = _distance_strata(
         weighted_graph, graph_distances(weighted_graph, weighted=True)
     )
-    unweighted_order, _ = pair_values(scene, graph_distances(scene))
-    if weighted_order.numel() < 3:
-        return na_result("TOO_FEW_WEIGHTED_PAIRS")
-    stress_one = isotonic_stress(unweighted_order, layout)
-    stress_weighted = isotonic_stress(weighted_order, layout)
     logs = torch.log(costs)
     median = torch.median(logs)
     coefficient = (
         1.4826 * float(torch.median(torch.abs(logs - median))) / (abs(float(median)) + 1.0)
     )
     alpha = coefficient / (coefficient + 0.10)
-    defect = (1.0 - alpha) * stress_one + alpha * stress_weighted
+    combined_stress = []
+    stratum_weights = []
+    for component_index in sorted({item[0] for item in unweighted_strata}):
+        unweighted_component = [item for item in unweighted_strata if item[0] == component_index]
+        weighted_component = [item for item in weighted_strata if item[0] == component_index]
+        unweighted_order = torch.cat([item[2] for item in unweighted_component])
+        weighted_order = torch.cat([item[2] for item in weighted_component])
+        layout = torch.cat([item[3] for item in unweighted_component])
+        fit_unweighted = primary_isotonic_fit(unweighted_order, layout)
+        fit_weighted = primary_isotonic_fit(weighted_order, layout)
+        cursor = 0
+        for unweighted_item, weighted_item in zip(unweighted_component, weighted_component):
+            count = unweighted_item[2].numel()
+            stress_one = _stress_from_fit(
+                unweighted_item[2],
+                unweighted_item[3],
+                fit_unweighted[cursor : cursor + count],
+            )
+            stress_weighted = _stress_from_fit(
+                weighted_item[2],
+                weighted_item[3],
+                fit_weighted[cursor : cursor + count],
+            )
+            combined_stress.append((1.0 - alpha) * stress_one + alpha * stress_weighted)
+            stratum_weights.append(float(count))
+            cursor += count
+    defect = global_blend(combined_stress, stratum_weights)
     return value_result(
         defect,
         {"U35.headline": defect},
-        {"pair_count": weighted_order.numel(), "alpha": alpha},
+        {"pair_count": int(sum(stratum_weights)), "alpha": alpha},
     )
+
+
+def _component_members(scene: Scene) -> List[List[int]]:
+    """Return connected components without introducing another public dependency.
+
+    Parameters
+    ----------
+    scene : Scene
+        Validated graph scene.
+
+    Returns
+    -------
+    list[list[int]]
+        Canonically ordered component memberships.
+    """
+
+    from dagua.eval.ruler_v4._util import components
+
+    return components(scene)
 
 
 def U36(scene: Scene) -> FacetResult:
     """Local weight monotonicity. Frozen SHA-256: 574b04b859567036912ca0815385311a2524dca0cb89ff0bda27acbb4c0ed703."""
 
     if scene.graph.edge_weights is None:
-        return na_result("NO_DECLARED_EDGE_WEIGHTS")
+        return na_result("WEIGHTS_ABSENT")
     if scene.graph.weight_semantics not in _LOCAL_ORDER_SEMANTICS:
         return na_result("WEIGHT_SEMANTICS_NOT_LOCAL_ORDER")
     incident: DefaultDict[int, List[int]] = defaultdict(list)
@@ -71,8 +115,11 @@ def U36(scene: Scene) -> FacetResult:
     strengths = torch.tensor(scene.graph.edge_weights, dtype=torch.float64)
     if scene.graph.weight_semantics == "distance_cost":
         strengths = 1.0 / strengths
-    burdens = []
+    node_defects = []
+    node_weights = []
+    comparison_count = 0
     for edge_indices in incident.values():
+        burdens = []
         for left_index, left in enumerate(edge_indices):
             for right in edge_indices[left_index + 1 :]:
                 if strengths[left] == strengths[right]:
@@ -88,10 +135,18 @@ def U36(scene: Scene) -> FacetResult:
                 )
                 scaled = max(-60.0, min(60.0, margin / 0.03))
                 burdens.append(1.0 / (1.0 + math.exp(-scaled)))
-    if not burdens:
-        return na_result("NO_LOCAL_WEIGHT_COMPARISONS")
-    defect = sum(burdens) / len(burdens)
-    return value_result(defect, {"U36.headline": defect}, {"comparison_count": len(burdens)})
+        if burdens:
+            node_defects.append(sum(burdens) / len(burdens))
+            node_weights.append(float(len(burdens)))
+            comparison_count += len(burdens)
+    if not node_defects:
+        return na_result("NO_LOCAL_WEIGHT_ORDER")
+    defect = global_blend(node_defects, node_weights)
+    return value_result(
+        defect,
+        {"U36.headline": defect},
+        {"comparison_count": comparison_count, "node_count": len(node_defects)},
+    )
 
 
 def U37(scene: Scene) -> FacetResult:

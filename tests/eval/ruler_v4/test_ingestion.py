@@ -14,7 +14,6 @@ from dagua.eval.ruler_v4.scene import (
     Route,
     StyleContract,
     TemporalTransition,
-    ValidAbsence,
     ValidScene,
     ValidTemporalScene,
 )
@@ -47,8 +46,8 @@ def test_valid_scene_derives_boxes_and_unit() -> None:
     assert result.scene.positions.dtype == torch.float64
 
 
-def test_optional_absence_is_typed_na() -> None:
-    """A profile-wide optional missing channel produces ValidAbsence."""
+def test_optional_absence_keeps_unaffected_scene_scoreable() -> None:
+    """An optional missing channel does not discard the otherwise valid scene."""
 
     profile = ObservationProfile(optional_channels=frozenset({"node_labels"}))
     result = ingest(
@@ -57,12 +56,11 @@ def test_optional_absence_is_typed_na() -> None:
         StyleContract(),
         profile,
     )
-    assert isinstance(result, ValidAbsence)
-    assert result.reason == "no_declared_node_labels"
+    assert isinstance(result, ValidScene)
 
 
-def test_required_absence_is_invalid() -> None:
-    """A required missing route is invalid rather than favorable NA."""
+def test_absent_simple_route_uses_render_truth_chord() -> None:
+    """A missing simple-edge route remains valid under K17's chord identity."""
 
     graph = GraphSemantics(
         ("a", "b"), ((0, 1),), required_primitives=frozenset({"nodes", "routes"})
@@ -73,8 +71,8 @@ def test_required_absence_is_invalid() -> None:
         StyleContract(),
         ObservationProfile(),
     )
-    assert isinstance(result, InvalidScene)
-    assert result.code is IngestionErrorCode.MISSING_REQUIRED_PRIMITIVE
+    assert isinstance(result, ValidScene)
+    assert result.scene.routes == ()
 
 
 def test_nonfinite_geometry_is_invalid() -> None:
