@@ -79,6 +79,62 @@ class ObservationProfile:
 
 
 @dataclass(frozen=True)
+class PortDeclaration:
+    """One immutable semantic port declaration.
+
+    Parameters
+    ----------
+    port_id : str
+        Canonical port identifier.
+    node_id : int
+        Owning canonical node index.
+    side : str
+        Cardinal node-local side ``N``, ``E``, ``S``, or ``W``.
+    side_coordinate : float
+        Anchor coordinate in ``[0, 1]`` along the declared side.
+    order : int
+        Total order within the node side.
+    normal : tuple[float, float]
+        Declared outward unit normal.
+    expected_approach : tuple[float, float]
+        Expected unit route tangent pointing away from the node.
+    """
+
+    port_id: str
+    node_id: int
+    side: str
+    side_coordinate: float
+    order: int
+    normal: Tuple[float, float]
+    expected_approach: Tuple[float, float]
+
+
+@dataclass(frozen=True)
+class ChannelDeclaration:
+    """One corpus-owned non-geometric visual channel.
+
+    Parameters
+    ----------
+    channel_id : str
+        Stable channel identifier.
+    primitive_kind : str
+        Target population, ``node`` or ``edge``.
+    attribute : str
+        GraphSemantics categorical-attribute key encoded by the channel.
+    visual_property : str
+        Encoded property, currently ``fill_color`` or ``stroke_color``.
+    value_map : mapping[str, tuple[float, float, float]]
+        Category-to-sRGB map with channels in ``[0, 1]``.
+    """
+
+    channel_id: str
+    primitive_kind: str
+    attribute: str
+    visual_property: str
+    value_map: Mapping[str, Tuple[float, float, float]]
+
+
+@dataclass(frozen=True)
 class GraphSemantics:
     """Corpus-owned graph and optional semantic declarations.
 
@@ -106,9 +162,19 @@ class GraphSemantics:
         Optional immutable per-edge feedback mask.
     edge_weights : tuple[float, ...] or None
         Optional positive declared edge weights.
+    edge_styles : tuple[str, ...] or None
+        Optional immutable per-edge route style declarations.
+    edge_bundles : tuple[str | None, ...] or None
+        Optional immutable per-edge declared bundle ids.
+    node_attributes : mapping[str, tuple[str, ...]]
+        Optional declared categorical values in canonical node order.
+    edge_attributes : mapping[str, tuple[str, ...]]
+        Optional declared categorical values in canonical edge order.
+    legends : mapping[str, mapping[str, tuple[float, float, float]]]
+        Declared channel legends used for completeness validation.
     weight_semantics : str or None
         Interpretation of declared edge weights.
-    ports : mapping[int, tuple[str | None, str | None]]
+    ports : mapping[int, tuple[PortDeclaration | None, PortDeclaration | None]]
         Optional edge endpoint port declarations.
     temporal_ids : tuple[str, ...] or None
         Optional cross-frame node identities.
@@ -120,6 +186,20 @@ class GraphSemantics:
         Optional input-owned unit direction axis.
     symmetry_generators : tuple[tuple[int, ...], ...]
         Certified non-identity automorphism permutations.
+    node_masses : tuple[float, ...] or None
+        Optional positive input-owned node masses.
+    declared_graph_class : str or None
+        Optional input-owned graph class used by frozen facet exemptions.
+    lattice_dimensions : tuple[int, int] or None
+        Optional positive declared dimensions for lattice/grid classes.
+    tree_parents : tuple[int | None, ...] or None
+        Optional declared parent per node for rooted tree semantics.
+    tree_depths : tuple[int, ...] or None
+        Optional declared integer tree depth per node.
+    tree_layout : str or None
+        Declared tree display mode, ``layered`` or ``radial``.
+    ordered_children : mapping[int, tuple[int, ...]]
+        Optional immutable child order per parent.
     weight_visual_channel : str or None
         Optional declared visual encoding channel for edge weights.
     weight_encoding_knots : tuple[tuple[float, float], ...]
@@ -137,13 +217,27 @@ class GraphSemantics:
     roots: Tuple[int, ...] = ()
     feedback: Optional[Tuple[bool, ...]] = None
     edge_weights: Optional[Tuple[float, ...]] = None
+    edge_styles: Optional[Tuple[str, ...]] = None
+    edge_bundles: Optional[Tuple[Optional[str], ...]] = None
+    node_attributes: Mapping[str, Tuple[str, ...]] = field(default_factory=dict)
+    edge_attributes: Mapping[str, Tuple[str, ...]] = field(default_factory=dict)
+    legends: Mapping[str, Mapping[str, Tuple[float, float, float]]] = field(default_factory=dict)
     weight_semantics: Optional[str] = None
-    ports: Mapping[int, Tuple[Optional[str], Optional[str]]] = field(default_factory=dict)
+    ports: Mapping[int, Tuple[Optional[PortDeclaration], Optional[PortDeclaration]]] = field(
+        default_factory=dict
+    )
     temporal_ids: Optional[Tuple[str, ...]] = None
     required_primitives: FrozenSet[str] = frozenset({"nodes"})
     planarity_certificate: Optional[Mapping[str, Any]] = None
     flow_axis: Optional[Tuple[float, float]] = None
     symmetry_generators: Tuple[Tuple[int, ...], ...] = ()
+    node_masses: Optional[Tuple[float, ...]] = None
+    declared_graph_class: Optional[str] = None
+    lattice_dimensions: Optional[Tuple[int, int]] = None
+    tree_parents: Optional[Tuple[Optional[int], ...]] = None
+    tree_depths: Optional[Tuple[int, ...]] = None
+    tree_layout: Optional[str] = None
+    ordered_children: Mapping[int, Tuple[int, ...]] = field(default_factory=dict)
     weight_visual_channel: Optional[str] = None
     weight_encoding_knots: Tuple[Tuple[float, float], ...] = ()
 
@@ -178,6 +272,14 @@ class StyleContract:
         Input-owned route flattening tolerance.
     edge_stroke_widths : tuple[float, ...]
         Corpus-owned derived visible width for each semantic edge.
+    minimum_feature_separation : float
+        Smallest visible feature separation in intrinsic-unit multiples.
+    physical_output : mapping[str, float] or None
+        Optional complete physical viewport, font-height, and legibility-floor block.
+    channel_set : tuple[ChannelDeclaration, ...]
+        Corpus-owned non-geometric visual channel declarations.
+    canvas_background : tuple[float, float, float]
+        Opaque sRGB canvas backdrop.
     """
 
     font_size: float = 1.0
@@ -194,6 +296,10 @@ class StyleContract:
     allowed_route_kinds: FrozenSet[str] = frozenset({"polyline"})
     flattening_tolerance: float = 1e-3
     edge_stroke_widths: Tuple[float, ...] = ()
+    minimum_feature_separation: float = 0.05
+    physical_output: Optional[Mapping[str, float]] = None
+    channel_set: Tuple[ChannelDeclaration, ...] = ()
+    canvas_background: Tuple[float, float, float] = (1.0, 1.0, 1.0)
 
 
 @dataclass(frozen=True)
@@ -264,6 +370,8 @@ class Scene:
         Style-derived visible node-label boxes.
     edge_label_boxes : tuple[BoxGeometry, ...]
         Style-derived visible edge-label boxes.
+    cluster_label_boxes : mapping[str, BoxGeometry]
+        Style- and region-derived visible cluster-label boxes.
     intrinsic_unit : float
         Median diagonal of declared node primitives.
     profile_hash : str
@@ -279,6 +387,7 @@ class Scene:
     node_boxes: Tuple[BoxGeometry, ...]
     node_label_boxes: Tuple[BoxGeometry, ...]
     edge_label_boxes: Tuple[BoxGeometry, ...]
+    cluster_label_boxes: Mapping[str, BoxGeometry]
     intrinsic_unit: float
     profile_hash: str
 
@@ -371,6 +480,8 @@ class FacetResult:
         Score-visible sub-term values keyed by manifest id.
     raw : mapping[str, Any]
         Published sufficient statistics and diagnostics.
+    temporal_headline : float or None
+        Sequence-only headline used by temporal facets and excluded from static scoring.
     """
 
     state: ResultState
@@ -378,6 +489,7 @@ class FacetResult:
     reason: Optional[str]
     subterms: Mapping[str, float] = field(default_factory=dict)
     raw: Mapping[str, Any] = field(default_factory=dict)
+    temporal_headline: Optional[float] = None
 
 
 @dataclass(frozen=True)

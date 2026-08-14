@@ -283,6 +283,8 @@ def evaluate_jump_bound(
     if event.jump_bound.kind == "numeric":
         assert event.jump_bound.value is not None
         return event.jump_bound.value
+    if event.jump_bound.formula is not None and event.jump_bound.formula.strip() == "0.0":
+        return 0.0
     values: Dict[str, float] = {key: float(value) for key, value in (context or {}).items()}
     if event.facet_id == "U41":
         f0 = max(1.0, values.get("F0", 1.0))

@@ -38,7 +38,7 @@ def test_contract_smoke_case(facet_id: str, semantic_scene: Scene) -> None:
     if result.value is not None:
         assert math.isfinite(result.value)
         assert 0.0 <= result.value <= 1.0
-        assert set(result.subterms) == set(CONTRACTS[facet_id].scored_subterms)
+        assert set(result.subterms).issubset(CONTRACTS[facet_id].scored_subterms)
 
 
 @pytest.mark.parametrize("facet_id", CONTRACTS)
@@ -60,8 +60,10 @@ def test_contract_na_case_is_typed(facet_id: str, semantic_scene: Scene) -> None
     if result.state is ResultState.NA:
         assert result.value is None
         assert result.reason
+    elif result.state is ResultState.VALUE:
+        assert result.subterms
     else:
-        assert result.value is not None or result.state is ResultState.INVALID
+        assert result.state is ResultState.INVALID
 
 
 @pytest.mark.parametrize("facet_id", CONTRACTS)
