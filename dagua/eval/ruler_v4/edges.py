@@ -9,7 +9,7 @@ import heapq
 import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import DefaultDict, Dict, List, Optional, Tuple
+from typing import DefaultDict, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -33,8 +33,10 @@ from dagua.eval.ruler_v4.scene import (
     value_result,
 )
 
-_U07_GAMMA = 1.0
-_U07_TAIL_WEIGHT = 0.5
+_U07_WORKED_EXAMPLE_GAMMA = 1.0
+_U07_WORKED_EXAMPLE_LAMBDA_T = 0.5
+_U11_TERMINAL_DISK_SIDES = 16
+_U11_TERMINAL_CLEAR_RADIUS = 0.5
 
 
 @dataclass(frozen=True)
@@ -138,13 +140,15 @@ def _segment_event_point(
     return midpoint, 0.0
 
 
-def _crossing_events(scene: Scene) -> List[_CrossingEvent]:
+def _crossing_events(scene: Scene, gamma: float) -> List[_CrossingEvent]:
     """Compute U07 crossing events and frozen four-component severities.
 
     Parameters
     ----------
     scene : Scene
         Validated route scene.
+    gamma : float
+        Positive fitted crossing-severity scale.
 
     Returns
     -------
@@ -186,7 +190,7 @@ def _crossing_events(scene: Scene) -> List[_CrossingEvent]:
         proximity_term = max(0.0, 1.0 - proximity_ratio**2 / 16.0) ** 2
         repeat_term = (multiplicity - 1.0) / multiplicity
         density_term = density / (density + 3.0)
-        severity = _U07_GAMMA * (
+        severity = gamma * (
             0.50 * angle_term
             + sine_squared * (0.20 * proximity_term + 0.15 * density_term)
             + 0.15 * repeat_term
@@ -206,23 +210,54 @@ def _crossing_events(scene: Scene) -> List[_CrossingEvent]:
     return results
 
 
-def U07(scene: Scene) -> FacetResult:
-    """NORMATIVE CONTRACT: Crossing slot. Frozen SHA-256: 63526aa6824dfa5180234ba97086725621e8b9e8aa3c40713c85a7c4a86caf2b."""
+def U07(
+    scene: Scene,
+    gamma: float = _U07_WORKED_EXAMPLE_GAMMA,
+    lambda_T: float = _U07_WORKED_EXAMPLE_LAMBDA_T,
+) -> FacetResult:
+    """NORMATIVE CONTRACT: Crossing slot. Frozen SHA-256: 63526aa6824dfa5180234ba97086725621e8b9e8aa3c40713c85a7c4a86caf2b.
 
-    events = _crossing_events(scene)
+    Parameters
+    ----------
+    scene : Scene
+        Validated canonical scene.
+    gamma : float
+        Fitted severity scale in the contract range ``(0, 3]``. The default is
+        the phase-4 worked-example value and is not a P5 fitted selection.
+    lambda_T : float
+        Fitted excess-severity weight in ``[0, 1]``. The default is the phase-4
+        worked-example value and is not a P5 fitted selection.
+
+    Returns
+    -------
+    FacetResult
+        Crossing defect and its contract rows.
+
+    Raises
+    ------
+    ValueError
+        If a fitted parameter lies outside its frozen contract range.
+    """
+
+    if not math.isfinite(gamma) or not 0.0 < gamma <= 3.0:
+        raise ValueError("U07 gamma must be finite and lie in (0, 3]")
+    if not math.isfinite(lambda_T) or not 0.0 <= lambda_T <= 1.0:
+        raise ValueError("U07 lambda_T must be finite and lie in [0, 1]")
+
+    events = _crossing_events(scene, gamma)
     eligible = 0
     for left in range(scene.edge_count):
         for right in range(left + 1, scene.edge_count):
             if not set(scene.graph.edges[left]) & set(scene.graph.edges[right]):
                 eligible += 1
     base_raw = sum(1.0 + event.severity for event in events)
-    threshold = 0.5 * _U07_GAMMA
+    threshold = 0.5 * gamma
     tail_raw = sum(max(0.0, event.severity - threshold) for event in events)
     opportunity = eligible + 1
-    normalized = (base_raw + _U07_TAIL_WEIGHT * tail_raw) / opportunity
+    normalized = (base_raw + lambda_T * tail_raw) / opportunity
     defect = normalized / (normalized + 0.25) if normalized > 0.0 else 0.0
     base_x = base_raw / opportunity
-    tail_x = _U07_TAIL_WEIGHT * tail_raw / opportunity
+    tail_x = lambda_T * tail_raw / opportunity
     base = base_x / (base_x + 0.25) if base_x > 0.0 else 0.0
     tail = tail_x / (tail_x + 0.25) if tail_x > 0.0 else 0.0
     return value_result(
@@ -234,6 +269,8 @@ def U07(scene: Scene) -> FacetResult:
             "opportunity_guarded": opportunity,
             "base_raw": base_raw,
             "tail_raw": tail_raw,
+            "gamma": gamma,
+            "lambda_T": lambda_T,
             "events": tuple(
                 {
                     "edge_pair": (event.edge_a, event.edge_b),
@@ -996,43 +1033,244 @@ def _first_nonzero_tangent(points: torch.Tensor, reverse: bool) -> Optional[torc
     return None
 
 
-def _segment_box_interior_intersection(
-    start: torch.Tensor, end: torch.Tensor, box: BoxGeometry
+def _regular_polygon(center: torch.Tensor, radius: float, sides: int) -> torch.Tensor:
+    """Build a counter-clockwise regular polygon.
+
+    Parameters
+    ----------
+    center : torch.Tensor
+        Polygon center with shape ``[2]``.
+    radius : float
+        Positive circumradius.
+    sides : int
+        Number of polygon sides, at least three.
+
+    Returns
+    -------
+    torch.Tensor
+        Polygon vertices with shape ``[sides, 2]``.
+    """
+
+    angles = torch.arange(sides, dtype=torch.float64) * (2.0 * math.pi / sides)
+    offsets = radius * torch.stack((torch.cos(angles), torch.sin(angles)), dim=1)
+    return center + offsets
+
+
+def _box_boundary_segments(box: BoxGeometry) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    """Return the four canonical boundary segments of one axis-aligned box.
+
+    Parameters
+    ----------
+    box : BoxGeometry
+        Axis-aligned obstacle box.
+
+    Returns
+    -------
+    list[tuple[torch.Tensor, torch.Tensor]]
+        Four boundary segments in counter-clockwise order.
+    """
+
+    lower = box.center - box.half_extents
+    upper = box.center + box.half_extents
+    corners = [
+        torch.tensor([lower[0], lower[1]], dtype=torch.float64),
+        torch.tensor([upper[0], lower[1]], dtype=torch.float64),
+        torch.tensor([upper[0], upper[1]], dtype=torch.float64),
+        torch.tensor([lower[0], upper[1]], dtype=torch.float64),
+    ]
+    return list(zip(corners, corners[1:] + corners[:1]))
+
+
+def _polygon_boundary_segments(polygon: torch.Tensor) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    """Return consecutive boundary segments of one polygon.
+
+    Parameters
+    ----------
+    polygon : torch.Tensor
+        Polygon vertices with shape ``[P, 2]``.
+
+    Returns
+    -------
+    list[tuple[torch.Tensor, torch.Tensor]]
+        Closed polygon boundary segments.
+    """
+
+    return [
+        (polygon[index], polygon[(index + 1) % polygon.shape[0]])
+        for index in range(polygon.shape[0])
+    ]
+
+
+def _segment_boundary_parameter(
+    start: torch.Tensor,
+    end: torch.Tensor,
+    boundary_start: torch.Tensor,
+    boundary_end: torch.Tensor,
+) -> Optional[Tuple[float, torch.Tensor]]:
+    """Return one transversal segment-boundary intersection.
+
+    Parameters
+    ----------
+    start, end : torch.Tensor
+        Query segment endpoints with shape ``[2]``.
+    boundary_start, boundary_end : torch.Tensor
+        Boundary segment endpoints with shape ``[2]``.
+
+    Returns
+    -------
+    tuple[float, torch.Tensor] or None
+        Query parameter and intersection point, including endpoints.
+    """
+
+    query = end - start
+    boundary = boundary_end - boundary_start
+    denominator = float(query[0] * boundary[1] - query[1] * boundary[0])
+    if denominator == 0.0:
+        return None
+    offset = boundary_start - start
+    query_parameter = float(offset[0] * boundary[1] - offset[1] * boundary[0]) / denominator
+    boundary_parameter = float(offset[0] * query[1] - offset[1] * query[0]) / denominator
+    if 0.0 <= query_parameter <= 1.0 and 0.0 <= boundary_parameter <= 1.0:
+        return query_parameter, start + query_parameter * query
+    return None
+
+
+def _point_in_convex_polygon(point: torch.Tensor, polygon: torch.Tensor) -> bool:
+    """Test closed membership in a counter-clockwise convex polygon.
+
+    Parameters
+    ----------
+    point : torch.Tensor
+        Query point with shape ``[2]``.
+    polygon : torch.Tensor
+        Counter-clockwise convex polygon with shape ``[P, 2]``.
+
+    Returns
+    -------
+    bool
+        Whether the point lies inside or on the polygon.
+    """
+
+    for start, end in _polygon_boundary_segments(polygon):
+        edge = end - start
+        offset = point - start
+        if float(edge[0] * offset[1] - edge[1] * offset[0]) < -1e-12:
+            return False
+    return True
+
+
+def _cleared_obstacle_contains(
+    point: torch.Tensor, box: BoxGeometry, terminal_polygons: Sequence[torch.Tensor]
 ) -> bool:
-    """Test whether a segment crosses an AABB interior.
+    """Test strict membership in a terminal-cleared U11 obstacle.
+
+    Parameters
+    ----------
+    point : torch.Tensor
+        Query point with shape ``[2]``.
+    box : BoxGeometry
+        Uninflated node obstacle.
+    terminal_polygons : sequence[torch.Tensor]
+        Two terminal-centered regular 16-gons removed from the obstacle.
+
+    Returns
+    -------
+    bool
+        Whether the point lies in the residual obstacle interior.
+    """
+
+    if not bool(torch.all(torch.abs(point - box.center) < box.half_extents)):
+        return False
+    return not any(_point_in_convex_polygon(point, polygon) for polygon in terminal_polygons)
+
+
+def _segment_cleared_obstacle_interior_intersection(
+    start: torch.Tensor,
+    end: torch.Tensor,
+    box: BoxGeometry,
+    terminal_polygons: Sequence[torch.Tensor],
+) -> bool:
+    """Test whether a segment crosses a terminal-cleared obstacle interior.
 
     Parameters
     ----------
     start, end : torch.Tensor
         Segment endpoints with shape ``[2]``.
     box : BoxGeometry
-        Obstacle box.
+        Uninflated node obstacle.
+    terminal_polygons : sequence[torch.Tensor]
+        Polygonized terminal disks removed from the box.
 
     Returns
     -------
     bool
-        Whether a positive parameter interval lies strictly inside the box.
+        Whether any positive-length segment interval lies in the residual obstacle.
     """
 
+    parameters = [0.0, 1.0]
+    boundaries = _box_boundary_segments(box)
+    for polygon in terminal_polygons:
+        boundaries.extend(_polygon_boundary_segments(polygon))
+    for boundary_start, boundary_end in boundaries:
+        intersection = _segment_boundary_parameter(start, end, boundary_start, boundary_end)
+        if intersection is not None:
+            parameters.append(intersection[0])
+    ordered = sorted(set(parameters))
     direction = end - start
-    lower = box.center - box.half_extents
-    upper = box.center + box.half_extents
-    entry = 0.0
-    exit_ = 1.0
-    for axis in range(2):
-        delta = float(direction[axis])
-        if delta == 0.0:
-            if not float(lower[axis]) < float(start[axis]) < float(upper[axis]):
-                return False
-            continue
-        first = (float(lower[axis]) - float(start[axis])) / delta
-        second = (float(upper[axis]) - float(start[axis])) / delta
-        entry = max(entry, min(first, second))
-        exit_ = min(exit_, max(first, second))
-        if entry >= exit_:
-            return False
-    midpoint = start + ((entry + exit_) / 2.0) * direction
-    return bool(torch.all(torch.abs(midpoint - box.center) < box.half_extents))
+    return any(
+        _cleared_obstacle_contains(
+            start + ((lower + upper) / 2.0) * direction,
+            box,
+            terminal_polygons,
+        )
+        for lower, upper in zip(ordered[:-1], ordered[1:])
+        if upper > lower
+    )
+
+
+def _cleared_obstacle_vertices(
+    box: BoxGeometry, terminal_polygons: Sequence[torch.Tensor]
+) -> List[torch.Tensor]:
+    """Return visibility vertices of a terminal-cleared box.
+
+    Parameters
+    ----------
+    box : BoxGeometry
+        Uninflated node obstacle.
+    terminal_polygons : sequence[torch.Tensor]
+        Polygonized terminal disks removed from the box.
+
+    Returns
+    -------
+    list[torch.Tensor]
+        Residual box corners, disk vertices inside the box, and boundary intersections.
+    """
+
+    box_segments = _box_boundary_segments(box)
+    candidates = [start for start, _ in box_segments]
+    for polygon in terminal_polygons:
+        for point in polygon:
+            if bool(torch.all(torch.abs(point - box.center) <= box.half_extents)):
+                candidates.append(point)
+        for box_start, box_end in box_segments:
+            for polygon_start, polygon_end in _polygon_boundary_segments(polygon):
+                intersection = _segment_boundary_parameter(
+                    box_start,
+                    box_end,
+                    polygon_start,
+                    polygon_end,
+                )
+                if intersection is not None:
+                    candidates.append(intersection[1])
+    retained = [
+        point
+        for point in candidates
+        if not _cleared_obstacle_contains(point, box, terminal_polygons)
+    ]
+    unique: Dict[Tuple[float, float], torch.Tensor] = {}
+    for point in retained:
+        unique[(float(point[0]), float(point[1]))] = point
+    return [unique[key] for key in sorted(unique)]
 
 
 def _route_baseline(scene: Scene, route: Route) -> Tuple[float, float]:
@@ -1058,6 +1296,11 @@ def _route_baseline(scene: Scene, route: Route) -> Tuple[float, float]:
     if chord == 0.0:
         return max(scene.intrinsic_unit, 1e-300), 0.0
     cap = 4.0 * chord
+    clear_radius = _U11_TERMINAL_CLEAR_RADIUS * scene.intrinsic_unit
+    terminal_polygons = (
+        _regular_polygon(start, clear_radius, _U11_TERMINAL_DISK_SIDES),
+        _regular_polygon(end, clear_radius, _U11_TERMINAL_DISK_SIDES),
+    )
     obstacles = [
         box
         for box in scene.node_boxes
@@ -1066,21 +1309,36 @@ def _route_baseline(scene: Scene, route: Route) -> Tuple[float, float]:
         + float(torch.linalg.vector_norm(box.center - end))
         <= cap
     ]
-    if not any(_segment_box_interior_intersection(start, end, box) for box in obstacles):
+    if not any(
+        _segment_cleared_obstacle_interior_intersection(
+            start,
+            end,
+            box,
+            terminal_polygons,
+        )
+        for box in obstacles
+    ):
         return chord, 0.0
-    vertices = [start, end]
+    obstacle_vertices: List[torch.Tensor] = []
     for box in obstacles:
-        for x_sign in (-1.0, 1.0):
-            for y_sign in (-1.0, 1.0):
-                vertices.append(
-                    box.center
-                    + box.half_extents * torch.tensor([x_sign, y_sign], dtype=torch.float64)
-                )
+        obstacle_vertices.extend(_cleared_obstacle_vertices(box, terminal_polygons))
+    unique_vertices: Dict[Tuple[float, float], torch.Tensor] = {}
+    for point in obstacle_vertices:
+        unique_vertices[(float(point[0]), float(point[1]))] = point
+    vertices = [start, end] + [unique_vertices[key] for key in sorted(unique_vertices)]
     neighbors: List[List[Tuple[int, float]]] = [[] for _ in vertices]
     for left_index, left in enumerate(vertices):
         for right_index in range(left_index + 1, len(vertices)):
             right = vertices[right_index]
-            if any(_segment_box_interior_intersection(left, right, box) for box in obstacles):
+            if any(
+                _segment_cleared_obstacle_interior_intersection(
+                    left,
+                    right,
+                    box,
+                    terminal_polygons,
+                )
+                for box in obstacles
+            ):
                 continue
             distance = float(torch.linalg.vector_norm(right - left))
             neighbors[left_index].append((right_index, distance))
@@ -1299,7 +1557,7 @@ def _trim_polyline(points: torch.Tensor, start_trim: float, end_trim: float) -> 
 def _parallel_route_integral(
     left: torch.Tensor, right: torch.Tensor, intrinsic_unit: float
 ) -> float:
-    """Integrate U13's polynomial near-parallel kernel over segment overlaps.
+    """Integrate U13's kernel against the nearest point on the other route.
 
     Parameters
     ----------
@@ -1311,7 +1569,7 @@ def _parallel_route_integral(
     Returns
     -------
     float
-        Dimensionless sum of closed-form segment-pair integrals.
+        Dimensionless exact piecewise-polynomial route-pair integral.
     """
 
     total = 0.0
@@ -1322,87 +1580,221 @@ def _parallel_route_integral(
         if length_left == 0.0:
             continue
         unit_left = vector_left / length_left
-        for start_right, end_right in zip(right[:-1], right[1:]):
-            vector_right = end_right - start_right
-            length_right = float(torch.linalg.vector_norm(vector_right))
-            if length_right == 0.0:
+        right_segments = [
+            (start_right, end_right, end_right - start_right)
+            for start_right, end_right in zip(right[:-1], right[1:])
+            if float(torch.linalg.vector_norm(end_right - start_right)) > 0.0
+        ]
+        if not right_segments:
+            continue
+        base_breaks = [0.0, 1.0]
+        for start_right, _, vector_right in right_segments:
+            denominator = float(torch.dot(vector_right, vector_right))
+            offset = start_left - start_right
+            projection_constant = float(torch.dot(offset, vector_right)) / denominator
+            projection_slope = float(torch.dot(vector_left, vector_right)) / denominator
+            base_breaks.extend(_unit_interval_root(projection_constant, projection_slope))
+            base_breaks.extend(_unit_interval_root(projection_constant - 1.0, projection_slope))
+        ordered_base = sorted(set(base_breaks))
+        for lower, upper in zip(ordered_base[:-1], ordered_base[1:]):
+            if upper <= lower:
                 continue
-            unit_right = vector_right / length_right
-            if float(torch.dot(unit_left, unit_right)) < 0.0:
-                unit_right = -unit_right
-            axis_vector = unit_left + unit_right
-            axis_length = float(torch.linalg.vector_norm(axis_vector))
-            if axis_length == 0.0:
-                continue
-            axis = axis_vector / axis_length
-            normal = torch.tensor([-axis[1], axis[0]], dtype=torch.float64)
-            left_axis = sorted(
-                (float(torch.dot(start_left, axis)), float(torch.dot(end_left, axis)))
-            )
-            right_axis = sorted(
-                (float(torch.dot(start_right, axis)), float(torch.dot(end_right, axis)))
-            )
-            lower = max(left_axis[0], right_axis[0])
-            upper = min(left_axis[1], right_axis[1])
-            if lower >= upper:
-                continue
-            left_slope = float(torch.dot(unit_left, normal) / torch.dot(unit_left, axis))
-            right_slope = float(torch.dot(unit_right, normal) / torch.dot(unit_right, axis))
-            left_intercept = float(torch.dot(start_left, normal)) - left_slope * float(
-                torch.dot(start_left, axis)
-            )
-            right_intercept = float(torch.dot(start_right, normal)) - right_slope * float(
-                torch.dot(start_right, axis)
-            )
-            slope = left_slope - right_slope
-            intercept = left_intercept - right_intercept
-            intervals = [(lower, upper)]
-            if slope != 0.0:
-                roots = sorted(((-radius - intercept) / slope, (radius - intercept) / slope))
-                intervals = [(max(lower, roots[0]), min(upper, roots[1]))]
-            cosine = abs(float(torch.dot(unit_left, unit_right)))
-            for interval_left, interval_right in intervals:
-                if interval_left >= interval_right:
+            midpoint = (lower + upper) / 2.0
+            candidates: List[Tuple[float, float, float, float]] = []
+            for start_right, end_right, vector_right in right_segments:
+                coefficients = _segment_distance_polynomial(
+                    start_left,
+                    vector_left,
+                    start_right,
+                    end_right,
+                    vector_right,
+                    midpoint,
+                )
+                unit_right = vector_right / torch.linalg.vector_norm(vector_right)
+                cosine = abs(float(torch.dot(unit_left, unit_right)))
+                candidates.append((*coefficients, cosine**4))
+            envelope_breaks = [lower, upper]
+            for left_index, left_candidate in enumerate(candidates):
+                envelope_breaks.extend(
+                    _quadratic_roots_in_interval(
+                        left_candidate[0],
+                        left_candidate[1],
+                        left_candidate[2] - radius * radius,
+                        lower,
+                        upper,
+                    )
+                )
+                for right_candidate in candidates[left_index + 1 :]:
+                    envelope_breaks.extend(
+                        _quadratic_roots_in_interval(
+                            left_candidate[0] - right_candidate[0],
+                            left_candidate[1] - right_candidate[1],
+                            left_candidate[2] - right_candidate[2],
+                            lower,
+                            upper,
+                        )
+                    )
+            ordered = sorted(set(envelope_breaks))
+            for interval_left, interval_right in zip(ordered[:-1], ordered[1:]):
+                if interval_right <= interval_left:
                     continue
-                if slope == 0.0 and abs(intercept) >= radius:
+                sample = (interval_left + interval_right) / 2.0
+                candidate = min(
+                    candidates,
+                    key=lambda item: item[0] * sample * sample + item[1] * sample + item[2],
+                )
+                squared_distance = (
+                    candidate[0] * sample * sample + candidate[1] * sample + candidate[2]
+                )
+                if squared_distance >= radius * radius:
                     continue
                 total += (
-                    cosine**4
-                    * _polynomial_separation_integral(
-                        slope, intercept, radius, interval_left, interval_right
+                    candidate[3]
+                    * length_left
+                    * _quartic_distance_kernel_integral(
+                        candidate[0],
+                        candidate[1],
+                        candidate[2],
+                        radius,
+                        interval_left,
+                        interval_right,
                     )
                     / intrinsic_unit
                 )
     return total
 
 
-def _polynomial_separation_integral(
-    slope: float, intercept: float, radius: float, lower: float, upper: float
-) -> float:
-    """Integrate ``(1-((m*x+b)/r)^2)^2`` on one support interval.
+def _segment_distance_polynomial(
+    query_start: torch.Tensor,
+    query_vector: torch.Tensor,
+    segment_start: torch.Tensor,
+    segment_end: torch.Tensor,
+    segment_vector: torch.Tensor,
+    sample_parameter: float,
+) -> Tuple[float, float, float]:
+    """Return one point-to-segment squared-distance polynomial branch.
 
     Parameters
     ----------
-    slope, intercept : float
-        Linear signed-separation coefficients.
-    radius : float
-        Positive compact-support radius.
+    query_start, query_vector : torch.Tensor
+        Query point path ``query_start + t*query_vector``.
+    segment_start, segment_end, segment_vector : torch.Tensor
+        Nonzero candidate segment geometry.
+    sample_parameter : float
+        Parameter selecting the constant, interior, or terminal projection branch.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        Coefficients ``(a, b, c)`` of squared distance ``a*t^2+b*t+c``.
+    """
+
+    denominator = float(torch.dot(segment_vector, segment_vector))
+    offset = query_start - segment_start
+    projection = (
+        float(torch.dot(offset, segment_vector))
+        + sample_parameter * float(torch.dot(query_vector, segment_vector))
+    ) / denominator
+    if projection <= 0.0:
+        difference = query_start - segment_start
+        return (
+            float(torch.dot(query_vector, query_vector)),
+            2.0 * float(torch.dot(difference, query_vector)),
+            float(torch.dot(difference, difference)),
+        )
+    if projection >= 1.0:
+        difference = query_start - segment_end
+        return (
+            float(torch.dot(query_vector, query_vector)),
+            2.0 * float(torch.dot(difference, query_vector)),
+            float(torch.dot(difference, difference)),
+        )
+    offset_projection = float(torch.dot(offset, segment_vector))
+    vector_projection = float(torch.dot(query_vector, segment_vector))
+    return (
+        float(torch.dot(query_vector, query_vector)) - vector_projection**2 / denominator,
+        2.0
+        * (
+            float(torch.dot(offset, query_vector))
+            - offset_projection * vector_projection / denominator
+        ),
+        float(torch.dot(offset, offset)) - offset_projection**2 / denominator,
+    )
+
+
+def _quadratic_roots_in_interval(
+    a: float, b: float, c: float, lower: float, upper: float
+) -> List[float]:
+    """Return real roots strictly inside one parameter interval.
+
+    Parameters
+    ----------
+    a, b, c : float
+        Quadratic coefficients.
     lower, upper : float
-        Integration bounds inside support.
+        Open interval bounds.
+
+    Returns
+    -------
+    list[float]
+        Sorted unique roots inside ``(lower, upper)``.
+    """
+
+    if a == 0.0:
+        if b == 0.0:
+            return []
+        root = -c / b
+        return [root] if lower < root < upper else []
+    discriminant = b * b - 4.0 * a * c
+    if discriminant < 0.0:
+        return []
+    square_root = math.sqrt(max(0.0, discriminant))
+    roots = ((-b - square_root) / (2.0 * a), (-b + square_root) / (2.0 * a))
+    return sorted({root for root in roots if lower < root < upper})
+
+
+def _quartic_distance_kernel_integral(
+    a: float,
+    b: float,
+    c: float,
+    radius: float,
+    lower: float,
+    upper: float,
+) -> float:
+    """Integrate ``(1-(a*t^2+b*t+c)/radius^2)^2`` exactly.
+
+    Parameters
+    ----------
+    a, b, c : float
+        Squared-distance polynomial coefficients.
+    radius : float
+        Positive compact-support distance.
+    lower, upper : float
+        Parameter interval lying inside the support.
 
     Returns
     -------
     float
-        Exact polynomial integral.
+        Exact nonnegative kernel integral.
     """
 
+    radius_squared = radius * radius
+    radius_fourth = radius_squared * radius_squared
+    coefficients = (
+        1.0 - 2.0 * c / radius_squared + c * c / radius_fourth,
+        -2.0 * b / radius_squared + 2.0 * b * c / radius_fourth,
+        -2.0 * a / radius_squared + (b * b + 2.0 * a * c) / radius_fourth,
+        2.0 * a * b / radius_fourth,
+        a * a / radius_fourth,
+    )
+
     def primitive(value: float) -> float:
-        """Evaluate the expanded polynomial antiderivative.
+        """Evaluate the quartic antiderivative.
 
         Parameters
         ----------
         value : float
-            Axis coordinate.
+            Parameter value.
 
         Returns
         -------
@@ -1410,22 +1802,9 @@ def _polynomial_separation_integral(
             Antiderivative value.
         """
 
-        m = slope
-        b = intercept
-        r2 = radius * radius
-        r4 = r2 * r2
-        return (
-            value
-            - 2.0 / r2 * (m * m * value**3 / 3.0 + m * b * value * value + b * b * value)
-            + 1.0
-            / r4
-            * (
-                m**4 * value**5 / 5.0
-                + m**3 * b * value**4
-                + 2.0 * m * m * b * b * value**3
-                + 2.0 * m * b**3 * value * value
-                + b**4 * value
-            )
+        return sum(
+            coefficient * value ** (degree + 1) / (degree + 1)
+            for degree, coefficient in enumerate(coefficients)
         )
 
     return max(0.0, primitive(upper) - primitive(lower))

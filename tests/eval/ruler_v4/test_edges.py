@@ -8,7 +8,17 @@ from typing import Any, Mapping, Optional, Tuple
 import pytest
 import torch
 
-from dagua.eval.ruler_v4.edges import U07, U08, U10, U11, U12, U13, U15, U16
+from dagua.eval.ruler_v4.edges import (
+    U07,
+    U08,
+    U10,
+    U11,
+    U12,
+    U13,
+    U15,
+    U16,
+    _parallel_route_integral,
+)
 from dagua.eval.ruler_v4.ingestion import ingest
 from dagua.eval.ruler_v4.scene import (
     DrawingScene,
@@ -83,6 +93,41 @@ def test_u07_crossing_free_routes_have_exact_zero_defect() -> None:
     assert result.raw["crossing_count"] == 0
 
 
+def test_u07_remote_perpendicular_crossing_pins_guarded_normalization() -> None:
+    """U07 G02 pins one zero-severity event and the guarded opportunity count."""
+
+    positions = torch.tensor(
+        [[-10.0, 0.0], [10.0, 0.0], [0.0, -10.0], [0.0, 10.0]],
+        dtype=torch.float64,
+    )
+    result = U07(_scene(positions, ((0, 1), (2, 3))), gamma=3.0, lambda_T=1.0)
+    assert result.state is ResultState.VALUE
+    assert result.raw["crossing_count"] == 1
+    assert result.raw["events"][0]["severity"] == pytest.approx(0.0, abs=1e-30)
+    assert result.raw["opportunity_guarded"] == 2
+    assert result.raw["base_raw"] == pytest.approx(1.0, abs=0.0)
+    assert result.raw["tail_raw"] == pytest.approx(0.0, abs=0.0)
+    assert result.value == pytest.approx(2.0 / 3.0, abs=1e-15)
+
+
+@pytest.mark.parametrize(
+    ("gamma", "lambda_T"),
+    ((0.0, 0.5), (3.1, 0.5), (1.0, -0.1), (1.0, 1.1)),
+)
+def test_u07_fitted_parameter_ranges_are_enforced(gamma: float, lambda_T: float) -> None:
+    """Reject U07 fitted values outside the contract's declared ranges.
+
+    Parameters
+    ----------
+    gamma, lambda_T : float
+        Invalid fitted-parameter pair supplied by pytest.
+    """
+
+    scene = _scene(torch.tensor([[0.0, 0.0], [2.0, 0.0]]), ((0, 1),))
+    with pytest.raises(ValueError):
+        U07(scene, gamma=gamma, lambda_T=lambda_T)
+
+
 def test_u08_equal_six_spoke_star_has_exact_zero_defect() -> None:
     """U08's equal 60-degree spoke fixture has exact fair angular resolution."""
 
@@ -113,6 +158,16 @@ def test_u11_straight_route_hits_all_five_anchored_zeros() -> None:
     assert result.subterms["U11.i"] == pytest.approx(0.0, abs=0.0)
 
 
+def test_u11_terminal_disk_clears_coincident_nonterminal_box() -> None:
+    """U11 section 7.2 removes the terminal 16-gon from every obstacle."""
+
+    positions = torch.tensor([[0.0, 0.0], [10.0, 0.0], [0.0, 0.0]])
+    result = U11(_scene(positions, ((0, 1),)))
+    assert result.state is ResultState.VALUE
+    assert result.raw["edges"][0]["baseline_length"] == pytest.approx(10.0, abs=0.0)
+    assert result.raw["edges"][0]["baseline_turn"] == pytest.approx(0.0, abs=0.0)
+
+
 def test_u12_collinear_subdivided_path_has_zero_continuity_defect() -> None:
     """U12 is invariant to collinear route subdivision and returns exact zero."""
 
@@ -130,6 +185,25 @@ def test_u13_well_separated_parallel_routes_hit_compact_zero() -> None:
     result = U13(_scene(positions, ((0, 1), (2, 3))))
     assert result.state is ResultState.VALUE
     assert result.value == pytest.approx(0.0, abs=0.0)
+
+
+def test_u13_ten_unit_parallel_pair_matches_hand_integral() -> None:
+    """U13 golden 2 pins the exact 0.5u-separation polynomial integral."""
+
+    left = torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float64)
+    right = torch.tensor([[0.0, 0.5], [10.0, 0.5]], dtype=torch.float64)
+    expected = 10.0 * (35.0 / 36.0) ** 2
+    assert _parallel_route_integral(left, right, 1.0) == pytest.approx(expected, abs=1e-14)
+
+
+def test_u13_nearest_extent_is_invariant_to_other_route_subdivision() -> None:
+    """A bend-vertex subdivision cannot double-count U13's shared extent."""
+
+    left = torch.tensor([[0.0, 0.0], [10.0, 0.0]], dtype=torch.float64)
+    unsplit = torch.tensor([[0.0, 0.5], [10.0, 0.5]], dtype=torch.float64)
+    split = torch.tensor([[0.0, 0.5], [5.0, 0.5], [10.0, 0.5]], dtype=torch.float64)
+    expected = _parallel_route_integral(left, unsplit, 1.0)
+    assert _parallel_route_integral(left, split, 1.0) == pytest.approx(expected, abs=1e-14)
 
 
 def test_u15_separated_parallel_arcs_have_zero_merge_defect() -> None:

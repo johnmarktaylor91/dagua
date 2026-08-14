@@ -111,7 +111,7 @@ def test_u27_nonmember_nodes_and_routes_outside_region_have_no_intrusion() -> No
         torch.tensor([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [8.0, 0.0], [8.0, 1.0], [9.0, 0.0]]),
         {"a": (0, 1, 2), "b": (3, 4, 5)},
     )
-    result = U27(scene)
+    result = U27(scene, None)
     assert result.state is ResultState.NA
     assert result.reason == "alpha_grid_unselected"
     lower, upper = result.raw["grid_envelope"]
@@ -138,7 +138,7 @@ def test_u28_nested_parent_contains_child_without_overflow() -> None:
         {"child": (2, 3, 4), "parent": (0, 1, 2, 3, 4, 5, 6)},
         {"child": "parent"},
     )
-    result = U28(scene)
+    result = U28(scene, None)
     assert result.state is ResultState.NA
     assert result.reason == "alpha_grid_unselected"
     lower, upper = result.raw["grid_envelope"]
@@ -159,7 +159,7 @@ def test_u30_absent_cluster_label_channel_is_typed_na() -> None:
     """U30's applicability golden is NA when cluster-label rendering is undeclared."""
 
     positions = torch.tensor([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
-    result = U30(_scene(positions, {"square": (0, 1, 2, 3)}))
+    result = U30(_scene(positions, {"square": (0, 1, 2, 3)}), None)
     assert result.state is ResultState.NA
     assert result.reason == "no_declared_cluster_labels"
 
@@ -173,7 +173,8 @@ def test_u30_single_visible_cluster_label_pins_grid_envelope() -> None:
             positions,
             {"c": (0, 1, 2)},
             cluster_labels_visible=True,
-        )
+        ),
+        None,
     )
     assert result.state is ResultState.NA
     assert result.reason == "alpha_grid_unselected"

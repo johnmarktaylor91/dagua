@@ -64,13 +64,13 @@ def test_contract_na_case_is_typed(facet_id: str, semantic_scene: Scene) -> None
         assert result.subterms
     else:
         assert result.state is ResultState.INVALID
+        assert result.value is None
+        assert result.reason
 
 
-@pytest.mark.parametrize("facet_id", CONTRACTS)
-def test_contract_invalid_ingestion_path_is_typed(facet_id: str) -> None:
-    """Reject malformed geometry before dispatch for every contract entry point."""
+def test_invalid_ingestion_precedes_facet_dispatch() -> None:
+    """Reject malformed geometry once, before any facet can be dispatched."""
 
-    del facet_id
     graph = GraphSemantics(("a", "b"), ((0, 1),))
     result = ingest_record(
         graph,
