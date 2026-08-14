@@ -99,7 +99,7 @@ _DEFAULT_DATA: Mapping[str, Any] = {
         (
             "U11",
             "U11.i.self_intersection",
-            "transversal route self-intersection count change",
+            "change in the transversal self",
             "u11",
         ),
         ("U17", "U17.contact_i_j", "node OBB disjoint/intersecting transition", "zero"),

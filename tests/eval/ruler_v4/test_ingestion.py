@@ -88,6 +88,79 @@ def test_nonfinite_geometry_is_invalid() -> None:
     assert result.code is IngestionErrorCode.NONFINITE_GEOMETRY
 
 
+def test_malformed_position_shape_is_typed() -> None:
+    """A rank-one position tensor returns MALFORMED_POSITIONS."""
+
+    result = ingest(
+        _graph(),
+        DrawingScene(torch.tensor([0.0, 1.0, 2.0])),
+        StyleContract(),
+        ObservationProfile(),
+    )
+    assert isinstance(result, InvalidScene)
+    assert result.code is IngestionErrorCode.MALFORMED_POSITIONS
+
+
+def test_impossible_style_is_typed() -> None:
+    """A nonpositive minimum extent returns IMPOSSIBLE_STYLE."""
+
+    result = ingest(
+        _graph(),
+        DrawingScene(torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])),
+        StyleContract(minimum_node_width=0.0),
+        ObservationProfile(),
+    )
+    assert isinstance(result, InvalidScene)
+    assert result.code is IngestionErrorCode.IMPOSSIBLE_STYLE
+
+
+def test_unsupported_compositing_is_typed() -> None:
+    """A non-opaque style returns UNSUPPORTED_COMPOSITING."""
+
+    result = ingest(
+        _graph(),
+        DrawingScene(torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])),
+        StyleContract(opaque=False),
+        ObservationProfile(),
+    )
+    assert isinstance(result, InvalidScene)
+    assert result.code is IngestionErrorCode.UNSUPPORTED_COMPOSITING
+
+
+def test_malformed_route_shape_is_typed() -> None:
+    """A one-point route returns MALFORMED_ROUTE."""
+
+    route = Route(0, torch.tensor([[0.0, 0.0]]))
+    result = ingest(
+        _graph(),
+        DrawingScene(
+            torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]),
+            (route,),
+        ),
+        StyleContract(),
+        ObservationProfile(),
+    )
+    assert isinstance(result, InvalidScene)
+    assert result.code is IngestionErrorCode.MALFORMED_ROUTE
+
+
+def test_detached_route_terminal_is_topology_mismatch() -> None:
+    """A terminal farther than u/2 from its owner returns TOPOLOGY_MISMATCH."""
+
+    route = Route(0, torch.tensor([[10.0, 10.0], [1.0, 0.0]]))
+    result = ingest(
+        _graph(),
+        DrawingScene(
+            torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]),
+            (route,),
+        ),
+        StyleContract(),
+        ObservationProfile(),
+    )
+    assert isinstance(result, InvalidScene)
+    assert result.code is IngestionErrorCode.TOPOLOGY_MISMATCH
+
+
 def test_producer_extent_field_is_rejected() -> None:
     """Untrusted records cannot choose primitive extents."""
 

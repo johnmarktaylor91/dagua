@@ -69,16 +69,42 @@ def _scene(
 def test_u17_generously_separated_nodes_have_exact_zero_defect() -> None:
     """U17's clear pair lies beyond the compact half-unit clearance support."""
 
-    result = U17(_scene(torch.tensor([[0.0, 0.0], [5.0, 0.0]])))
+    result = U17(_scene(torch.tensor([[0.0, 0.0], [5.0, 0.0]])), None)
     assert result.state is ResultState.NA
     assert result.reason == "alpha_grid_unselected"
     assert result.raw["grid_envelope"] == pytest.approx((0.0, 0.0), abs=0.0)
 
 
+def test_u17_explicit_grid_row_returns_its_exact_scalar() -> None:
+    """An explicit shared-grid row selects a scalar without inventing a default row."""
+
+    scene = _scene(torch.tensor([[0.0, 0.0], [5.0, 0.0]]))
+    selected = U17(scene, 1)
+    assert selected.state is ResultState.VALUE
+    assert selected.raw["alpha_grid_index"] == 1
+    assert selected.raw["alpha_grid_name"] == "AC15_AH00"
+    assert selected.value == pytest.approx(0.0, abs=0.0)
+
+
+@pytest.mark.parametrize("alpha_grid_index", (0, 13, True))
+def test_u17_rejects_non_grid_parameters(alpha_grid_index: int) -> None:
+    """Reject off-list shared-grid parameters.
+
+    Parameters
+    ----------
+    alpha_grid_index : int
+        Invalid row supplied by pytest.
+    """
+
+    scene = _scene(torch.tensor([[0.0, 0.0], [5.0, 0.0]]))
+    with pytest.raises(ValueError):
+        U17(scene, alpha_grid_index)
+
+
 def test_u18_separated_node_labels_have_zero_overlap_terms() -> None:
     """U18's separated declared labels have no label, node, or route collision."""
 
-    result = U18(_scene(torch.tensor([[0.0, 0.0], [6.0, 0.0]]), labelled=True))
+    result = U18(_scene(torch.tensor([[0.0, 0.0], [6.0, 0.0]]), labelled=True), None)
     assert result.state is ResultState.NA
     assert result.reason == "alpha_grid_unselected"
     assert result.raw["grid_envelope"] == pytest.approx((0.0, 0.0), abs=0.0)
