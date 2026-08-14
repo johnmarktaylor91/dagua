@@ -22,7 +22,7 @@ from dagua.eval.ruler_v4._util import (
     pair_values,
     soft_pos,
 )
-from dagua.eval.ruler_v4.frames import robust_frame
+from dagua.eval.ruler_v4.frames import robust_frame, robust_projection
 from dagua.eval.ruler_v4.scene import FacetResult, Scene, na_result, value_result
 
 
@@ -246,25 +246,76 @@ def U14(scene: Scene) -> FacetResult:
 def U22(scene: Scene) -> FacetResult:
     """Aspect ratio / shape. Frozen SHA-256: d141e6fef540d3115fe342b275133278b550ee5d064663779b19c58b61b6304e."""
 
-    if scene.node_count < 2:
-        return na_result("too_few_nodes")
-    frame = robust_frame(scene.positions, scene.intrinsic_unit)
-    ratio = float(torch.max(frame.half_extents) / torch.min(frame.half_extents))
-    defect = bounded(abs(math.log(ratio)))
+    if scene.node_count < 4:
+        return na_result("insufficient_node_population")
+    axis = torch.tensor([0.0, 1.0], dtype=torch.float64) if scene.graph.ranks is not None else None
+    floor_bound = False
+    if axis is not None:
+        cross = torch.tensor([-axis[1], axis[0]], dtype=torch.float64)
+        axis_extent = robust_projection(scene.positions @ axis, scene.intrinsic_unit)
+        cross_extent = robust_projection(scene.positions @ cross, scene.intrinsic_unit)
+        observed = axis_extent.half_extent / cross_extent.half_extent
+        floor_bound = axis_extent.floor_bound or cross_extent.floor_bound
+        ranks = torch.tensor(scene.graph.ranks, dtype=torch.long)
+        counts = torch.stack([(ranks == rank).sum() for rank in torch.unique(ranks)])
+        target = float(torch.max(counts)) / counts.numel()
+        measurement = "declared_axis"
+    else:
+        extents = []
+        for index in range(180):
+            angle = math.pi * index / 180.0
+            direction = torch.tensor([math.cos(angle), math.sin(angle)], dtype=torch.float64)
+            extent = robust_projection(scene.positions @ direction, scene.intrinsic_unit)
+            extents.append(extent.half_extent)
+            floor_bound = floor_bound or extent.floor_bound
+        observed = max(extents) / min(extents)
+        target = 1.0
+        measurement = "frozen_direction_set"
+    excess = soft_pos(abs(math.log(observed / target)) - math.log(3.0))
+    defect = excess / (1.0 + excess)
     return value_result(
-        defect, {"U22.headline": defect}, {"aspect_ratio": ratio, "regime": frame.regime}
+        defect,
+        {"U22.headline": defect},
+        {
+            "aspect_ratio": observed,
+            "target": target,
+            "measurement": measurement,
+            "degenerate_extent_floor": floor_bound,
+        },
     )
 
 
 def U23(scene: Scene) -> FacetResult:
     """Visual balance. Frozen SHA-256: c14a86d9e00099c5db2c6d571e1af057896146222e96737678253a76ffdd5972."""
 
+    if scene.node_count < 4:
+        return na_result("insufficient_node_population")
     frame = robust_frame(scene.positions, scene.intrinsic_unit)
-    degrees = 1.0 + node_degrees(scene)
-    centroid = torch.sum(scene.positions * degrees[:, None], dim=0) / torch.sum(degrees)
-    normalized = torch.linalg.vector_norm((centroid - frame.center) / frame.half_extents)
-    defect = bounded(float(normalized))
-    return value_result(defect, {"U23.headline": defect}, {"centroid_offset": float(normalized)})
+    centroid = torch.mean(scene.positions, dim=0)
+    offset = centroid - frame.center
+    if scene.graph.ranks is not None:
+        cross = torch.tensor([1.0, 0.0], dtype=torch.float64)
+        extent = robust_projection(scene.positions @ cross, scene.intrinsic_unit)
+        normalized = abs(float(torch.dot(offset, cross))) / extent.half_extent
+        measurement = "declared_cross_axis"
+    else:
+        extents = []
+        for index in range(180):
+            angle = math.pi * index / 180.0
+            direction = torch.tensor([math.cos(angle), math.sin(angle)], dtype=torch.float64)
+            extents.append(
+                robust_projection(scene.positions @ direction, scene.intrinsic_unit).half_extent
+            )
+        radius = sum(extents) / len(extents)
+        normalized = float(torch.linalg.vector_norm(offset)) / radius
+        measurement = "rotation_averaged"
+    argument = torch.clamp(torch.tensor(normalized / 0.5), 0.0, 1.0)
+    defect = float(argument**3 * (argument * (6.0 * argument - 15.0) + 10.0))
+    return value_result(
+        defect,
+        {"U23.headline": defect},
+        {"centroid_offset": normalized, "measurement": measurement},
+    )
 
 
 def U24(scene: Scene) -> FacetResult:
