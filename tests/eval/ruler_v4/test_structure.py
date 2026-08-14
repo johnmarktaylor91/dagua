@@ -6,6 +6,7 @@ import math
 from dataclasses import replace
 from typing import Any, Mapping, Optional, Tuple
 
+import pytest
 import torch
 
 from dagua.eval.ruler_v4.ingestion import ingest
@@ -89,17 +90,26 @@ def test_u01_path_with_unit_spacing_has_zero_stress(semantic_scene: Scene) -> No
     scene = replace(semantic_scene, graph=graph, positions=positions, routes=())
     result = U01(scene)
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u01b_small_component_drops_empty_long_band() -> None:
-    """U01b's small-component golden keeps local mass and publishes the long drop."""
+    """U01b's sub-30-pair bands produce the frozen typed absence."""
 
     positions = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
     result = U01b(_scene(positions, ((0, 1), (1, 2))))
+    assert result.state is ResultState.NA
+    assert result.reason == "band_underpopulated"
+    assert result.raw["band_counts"] == {"local": 3, "long": 0}
+
+
+def test_u01b_long_path_pins_both_shared_fit_band_values() -> None:
+    """U01b's two populated bands read exact zero from one shared path fit."""
+
+    positions = torch.stack((torch.arange(25, dtype=torch.float64), torch.zeros(25)), dim=1)
+    result = U01b(_scene(positions, tuple((index, index + 1) for index in range(24))))
     assert result.state is ResultState.VALUE
-    assert result.subterms == {"U01b.local": 0.0, "U01b.long": 0.0}
-    assert result.raw["dropped_subterms"] == ("U01b.long",)
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u02_monotone_path_has_perfect_rank_fidelity() -> None:
@@ -108,7 +118,7 @@ def test_u02_monotone_path_has_perfect_rank_fidelity() -> None:
     positions = torch.stack((torch.arange(5, dtype=torch.float64), torch.zeros(5)), dim=1)
     result = U02(_scene(positions, tuple((index, index + 1) for index in range(4))))
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u03_complete_graph_is_typed_saturated_absence() -> None:
@@ -122,24 +132,33 @@ def test_u03_complete_graph_is_typed_saturated_absence() -> None:
     assert result.reason == "neighborhoods_saturated"
 
 
+def test_u03_path_pins_sigmoid_credit_and_frozen_radius_mix() -> None:
+    """U03's ten-node path pins the exact soft-credit multiradius composite."""
+
+    positions = torch.stack((torch.arange(10, dtype=torch.float64), torch.zeros(10)), dim=1)
+    result = U03(_scene(positions, tuple((index, index + 1) for index in range(9))))
+    assert result.state is ResultState.VALUE
+    assert result.value == pytest.approx(0.3834401785815821, abs=1e-15)
+
+
 def test_u04a_regular_cycle_has_identical_density_fields() -> None:
-    """U04a reads zero divergence when graph demand and primitive mass are uniform."""
+    """U04a pins the exact two-scale rotation-averaged cycle field divergence."""
 
     angles = torch.arange(10, dtype=torch.float64) * (2.0 * math.pi / 10.0)
     positions = 5.0 * torch.stack((torch.cos(angles), torch.sin(angles)), dim=1)
     edges = tuple((index, (index + 1) % 10) for index in range(10))
     result = U04a(_scene(positions, edges))
     assert result.state is ResultState.VALUE
-    assert result.value is not None and result.value < 0.05
+    assert result.value == pytest.approx(0.16982518728540882, abs=1e-15)
 
 
 def test_u04b_generous_spacing_has_low_crowding() -> None:
-    """U04b's sparse fixture has low nearest-primitive and whitespace burden."""
+    """U04b's sparse fixture has exactly zero above-knee coverage burden."""
 
-    positions = torch.tensor([[-2.5, -2.5], [-2.5, 2.5], [2.5, -2.5], [2.5, 2.5]])
-    result = U04b(_scene(positions, ((0, 1), (1, 3), (3, 2))))
+    positions = torch.stack((5.0 * torch.arange(10, dtype=torch.float64), torch.zeros(10)), dim=1)
+    result = U04b(_scene(positions, tuple((index, index + 1) for index in range(9))))
     assert result.state is ResultState.VALUE
-    assert result.value is not None and result.value < 0.05
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u05_path_matches_zero_stress_shape_golden() -> None:
@@ -148,7 +167,7 @@ def test_u05_path_matches_zero_stress_shape_golden() -> None:
     positions = torch.stack((torch.arange(20, dtype=torch.float64), torch.zeros(20)), dim=1)
     result = U05(_scene(positions, tuple((index, index + 1) for index in range(19))))
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u06_regular_hexagon_realizes_certified_rotation() -> None:
@@ -160,25 +179,25 @@ def test_u06_regular_hexagon_realizes_certified_rotation() -> None:
     generator = tuple((index + 1) % 6 for index in range(6))
     result = U06(_scene(positions, edges, {"symmetry_generators": (generator,)}))
     assert result.state is ResultState.VALUE
-    assert result.value is not None and result.value < 1e-12
+    assert result.value == pytest.approx(0.0, abs=1e-12)
 
 
 def test_u09_unit_edge_lengths_have_zero_dispersion() -> None:
     """U09's unit-length path has exact zero median absolute dispersion."""
 
-    positions = torch.stack((torch.arange(5, dtype=torch.float64), torch.zeros(5)), dim=1)
-    result = U09(_scene(positions, tuple((index, index + 1) for index in range(4))))
+    positions = torch.stack((torch.arange(6, dtype=torch.float64), torch.zeros(6)), dim=1)
+    result = U09(_scene(positions, tuple((index, index + 1) for index in range(5))))
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u14_well_separated_nonedge_reaches_compact_zero() -> None:
     """U14's compact clearance kernel is exactly zero beyond one intrinsic unit."""
 
-    positions = torch.tensor([[0.0, 0.0], [4.0, 0.0], [8.0, 0.0]])
-    result = U14(_scene(positions, ((0, 1),)))
+    positions = torch.stack((4.0 * torch.arange(8, dtype=torch.float64), torch.zeros(8)), dim=1)
+    result = U14(_scene(positions, tuple((index, index + 1) for index in range(7))))
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u22_wide_plateau_has_zero_cost(semantic_scene: Scene) -> None:
@@ -187,7 +206,7 @@ def test_u22_wide_plateau_has_zero_cost(semantic_scene: Scene) -> None:
     scene = replace(semantic_scene, graph=replace(semantic_scene.graph, ranks=None))
     result = U22(scene)
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
     assert result.raw["measurement"] == "frozen_direction_set"
 
 
@@ -196,14 +215,14 @@ def test_u23_symmetric_fixture_is_balanced(semantic_scene: Scene) -> None:
 
     result = U23(semantic_scene)
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u24_compact_scene_publishes_finite_ink_ratio() -> None:
     """U24's compact node-only fixture produces a finite bounded ink defect."""
 
     positions = torch.tensor([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
-    result = U24(_scene(positions, ()))
+    result = U24(_scene(positions, ((0, 1), (1, 3), (3, 2), (2, 0))))
     assert result.state is ResultState.VALUE
-    assert result.value is not None and 0.0 <= result.value < 1.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
     assert result.raw["ink_ratio"] > 0.0

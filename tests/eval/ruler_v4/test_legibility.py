@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
+import pytest
 import torch
 
 from dagua.eval.ruler_v4.ingestion import ingest
@@ -69,16 +70,18 @@ def test_u17_generously_separated_nodes_have_exact_zero_defect() -> None:
     """U17's clear pair lies beyond the compact half-unit clearance support."""
 
     result = U17(_scene(torch.tensor([[0.0, 0.0], [5.0, 0.0]])))
-    assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.state is ResultState.NA
+    assert result.reason == "alpha_grid_unselected"
+    assert result.raw["grid_envelope"] == pytest.approx((0.0, 0.0), abs=0.0)
 
 
 def test_u18_separated_node_labels_have_zero_overlap_terms() -> None:
     """U18's separated declared labels have no label, node, or route collision."""
 
     result = U18(_scene(torch.tensor([[0.0, 0.0], [6.0, 0.0]]), labelled=True))
-    assert result.state is ResultState.VALUE
-    assert set(result.subterms.values()) == {0.0}
+    assert result.state is ResultState.NA
+    assert result.reason == "alpha_grid_unselected"
+    assert result.raw["grid_envelope"] == pytest.approx((0.0, 0.0), abs=0.0)
 
 
 def test_u19_v4_profile_without_physical_output_is_typed_na() -> None:
@@ -86,7 +89,32 @@ def test_u19_v4_profile_without_physical_output_is_typed_na() -> None:
 
     result = U19(_scene(torch.tensor([[0.0, 0.0], [6.0, 0.0]]), labelled=True))
     assert result.state is ResultState.NA
-    assert result.reason == "no_physical_viewport"
+    assert result.reason == "no_declared_physical_size"
+
+
+def test_u19_physical_label_fixture_pins_exact_legibility_loss() -> None:
+    """U19 pins the declared physical scale and quintic legibility loss."""
+
+    positions = torch.tensor([[0.0, 0.0], [4.0, 0.0]], dtype=torch.float64)
+    graph = GraphSemantics(("n0", "n1"), ((0, 1),), node_labels=("a", "b"))
+    style = StyleContract(
+        physical_output={
+            "output_width": 10.0,
+            "output_height": 10.0,
+            "h_font": 1.0,
+            "h_floor": 2.0,
+        }
+    )
+    result = ingest(
+        graph,
+        DrawingScene(positions),
+        style,
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes", "node_labels"})),
+    )
+    assert isinstance(result, ValidScene)
+    facet = U19(result.scene)
+    assert facet.state is ResultState.VALUE
+    assert facet.value == pytest.approx(0.6533805941358025, abs=1e-15)
 
 
 def test_u20a_total_collapse_is_worse_than_two_dimensional_spread() -> None:
@@ -98,6 +126,8 @@ def test_u20a_total_collapse_is_worse_than_two_dimensional_spread() -> None:
     collapsed_result = U20a(collapsed)
     assert spread_result.value is not None
     assert collapsed_result.value is not None
+    assert spread_result.value == pytest.approx(0.0, abs=0.0)
+    assert collapsed_result.value == pytest.approx(1.0, abs=0.0)
     assert collapsed_result.value > spread_result.value
 
 
@@ -107,7 +137,7 @@ def test_u20b_midscale_edges_lie_on_low_defect_plateau() -> None:
     positions = torch.tensor([[0.0, 0.0], [7.0, 0.0], [14.0, 0.0]])
     result = U20b(_scene(positions, ((0, 1), (1, 2))))
     assert result.state is ResultState.VALUE
-    assert result.value is not None and result.value < 0.05
+    assert result.value == pytest.approx(0.07306493805930278, abs=1e-15)
 
 
 def test_u21_compact_symmetric_scene_has_no_sparse_or_overflow_debt() -> None:
@@ -116,4 +146,4 @@ def test_u21_compact_symmetric_scene_has_no_sparse_or_overflow_debt() -> None:
     positions = torch.tensor([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
     result = U21(_scene(positions, ((0, 1), (1, 3), (3, 2), (2, 0))))
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)

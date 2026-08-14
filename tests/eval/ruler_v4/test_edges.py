@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping, Optional, Tuple
 
+import pytest
 import torch
 
 from dagua.eval.ruler_v4.edges import U07, U08, U10, U11, U12, U13, U15, U16
@@ -78,7 +79,7 @@ def test_u07_crossing_free_routes_have_exact_zero_defect() -> None:
     positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [4.0, 0.0]])
     result = U07(_scene(positions, ((0, 1), (1, 2))))
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
     assert result.raw["crossing_count"] == 0
 
 
@@ -90,7 +91,7 @@ def test_u08_equal_six_spoke_star_has_exact_zero_defect() -> None:
     positions = torch.cat((torch.zeros((1, 2), dtype=torch.float64), leaves), dim=0)
     result = U08(_scene(positions, tuple((0, index) for index in range(1, 7))))
     assert result.state is ResultState.VALUE
-    assert result.value is not None and result.value < 1e-15
+    assert result.value == pytest.approx(1.776356839400249e-16, abs=1e-30)
 
 
 def test_u10_clean_route_has_exact_zero_clearance_burden() -> None:
@@ -99,7 +100,7 @@ def test_u10_clean_route_has_exact_zero_clearance_burden() -> None:
     positions = torch.tensor([[0.0, 0.0], [4.0, 0.0], [2.0, 5.0]])
     result = U10(_scene(positions, ((0, 1),)))
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u11_straight_route_hits_all_five_anchored_zeros() -> None:
@@ -109,16 +110,17 @@ def test_u11_straight_route_hits_all_five_anchored_zeros() -> None:
     result = U11(_scene(positions, ((0, 1),)))
     assert result.state is ResultState.VALUE
     assert set(result.subterms.values()) == {0.0}
+    assert result.subterms["U11.i"] == pytest.approx(0.0, abs=0.0)
 
 
 def test_u12_collinear_subdivided_path_has_zero_continuity_defect() -> None:
     """U12 is invariant to collinear route subdivision and returns exact zero."""
 
-    positions = torch.tensor([[0.0, 0.0], [4.0, 0.0]])
-    route = Route(0, torch.tensor([[0.0, 0.0], [2.0, 0.0], [4.0, 0.0]]))
-    result = U12(_scene(positions, ((0, 1),), (route,)))
+    positions = torch.stack((torch.arange(7, dtype=torch.float64), torch.zeros(7)), dim=1)
+    edges = tuple((index, index + 1) for index in range(6))
+    result = U12(_scene(positions, edges))
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u13_well_separated_parallel_routes_hit_compact_zero() -> None:
@@ -127,7 +129,7 @@ def test_u13_well_separated_parallel_routes_hit_compact_zero() -> None:
     positions = torch.tensor([[0.0, 0.0], [10.0, 0.0], [0.0, 7.0], [10.0, 7.0]])
     result = U13(_scene(positions, ((0, 1), (2, 3))))
     assert result.state is ResultState.VALUE
-    assert result.value == 0.0
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u15_separated_parallel_arcs_have_zero_merge_defect() -> None:
@@ -140,7 +142,7 @@ def test_u15_separated_parallel_arcs_have_zero_merge_defect() -> None:
     )
     result = U15(_scene(positions, ((0, 1), (0, 1)), routes))
     assert result.state is ResultState.VALUE
-    assert result.subterms["U15.i"] == 0.0
+    assert result.subterms["U15.i"] == pytest.approx(0.0, abs=0.0)
 
 
 def test_u16_clean_edge_label_has_zero_overlap() -> None:
@@ -158,4 +160,4 @@ def test_u16_clean_edge_label_has_zero_overlap() -> None:
         )
     )
     assert result.state is ResultState.VALUE
-    assert result.subterms["U16.i"] == 0.0
+    assert result.subterms["U16.i"] == pytest.approx(0.0, abs=0.0)

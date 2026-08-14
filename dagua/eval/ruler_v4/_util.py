@@ -4,11 +4,64 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from typing import List, Mapping, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import torch
 
-from dagua.eval.ruler_v4.scene import BoxGeometry, FacetResult, Scene, na_result, value_result
+from dagua.eval.ruler_v4.scene import (
+    BoxGeometry,
+    FacetResult,
+    Route,
+    Scene,
+    na_result,
+    value_result,
+)
+
+_BLEND_WEIGHTS = (0.65, 0.25, 0.10)
+_TRIM_FRACTION = 0.05
+_CVAR_TAIL_FRACTION = 0.10
+_SMOOTH_MAX_TEMPERATURE = 0.05
+
+_FACET_ROW_WEIGHTS: Dict[str, Dict[str, float]] = {
+    "U01b": {"U01b.local": 0.5, "U01b.long": 0.5},
+    "U03": {"U03.r_1": 0.5, "U03.r_2": 0.3, "U03.r_4": 0.2},
+    "U04a": {"U04a.2u": 0.5, "U04a.8u": 0.5},
+    "U04b": {"U04b.part_1": 0.5, "U04b.part_2": 0.5},
+    "U07": {"U7.base": 1.0, "U7.tail": 1.0},
+    "U11": {
+        "U11.i": 0.30,
+        "U11.ii": 0.15,
+        "U11.iii": 0.20,
+        "U11.iv": 0.15,
+        "U11.v": 0.20,
+    },
+    "U13": {"U13.i": 0.7, "U13.ii": 0.3},
+    "U15": {"U15.i": 0.5, "U15.ii": 0.5},
+    "U16": {"U16.i": 0.6, "U16.ii": 0.4},
+    "U18": {"U18.ll": 0.4, "U18.ln": 0.4, "U18.le": 0.2},
+    "U20a": {"U20a.i": 0.45, "U20a.ii": 0.25, "U20a.iii": 0.30},
+    "U26": {"U26.i": 0.50, "U26.ii": 0.25, "U26.iii": 0.25},
+    "U27": {"U27.i": 0.50, "U27.ii": 0.20, "U27.iii": 0.30},
+    "U28": {"U28.i": 0.45, "U28.ii": 0.35, "U28.iii": 0.20},
+    "U30": {"U30.i": 0.35, "U30.ii": 0.25, "U30.iii": 0.40},
+    "U32": {"U32.L_iso": 0.40, "U32.L_crisp": 0.30, "U32.L_overlap": 0.30},
+    "U33.layered": {
+        "U33.layered.1": 5.0 / 16.0,
+        "U33.layered.2": 1.0 / 4.0,
+        "U33.layered.3": 5.0 / 16.0,
+        "U33.layered.4": 1.0 / 8.0,
+    },
+    "U33.radial": {"U33.radial.1": 0.55, "U33.radial.2": 0.45},
+    "U34": {"U34.L_back": 0.40, "U34.L_mono": 0.35, "U34.L_cont": 0.25},
+    "U37": {"U37.ell_e": 0.75, "U37.ell_ord": 0.25},
+    "U38": {"U38.L_clear": 0.55, "U38.L_pack": 0.30, "U38.L_prop": 0.15},
+    "U39": {"U39.1": 0.30, "U39.2": 0.25, "U39.3": 0.20, "U39.4": 0.25},
+    "U40": {"U40.1": 0.55, "U40.2": 0.25, "U40.3": 0.20},
+    "U41": {"U41.L_conv": 0.60, "U41.L_area": 0.40},
+    "U42": {"U42.i": 0.40, "U42.ii": 0.35, "U42.iv": 0.25},
+}
+
+_NOISY_OR_FACETS = frozenset({"U18", "U20a", "U26", "U27", "U28", "U30", "U42"})
 
 
 def smoothstep(value: torch.Tensor) -> torch.Tensor:
@@ -71,7 +124,7 @@ def bounded(value: float) -> float:
 def mean_result(
     facet_id: str, values: Mapping[str, float], raw: Optional[Mapping[str, object]] = None
 ) -> FacetResult:
-    """Build a facet value as the fixed-ratio mean of scored rows.
+    """Build a facet value with its frozen row-composition operator.
 
     Parameters
     ----------
@@ -90,8 +143,151 @@ def mean_result(
 
     if not values:
         return na_result(f"{facet_id.lower()}_no_objects", raw)
-    result = sum(values.values()) / len(values)
+    weights = _FACET_ROW_WEIGHTS.get(facet_id)
+    if weights is None and facet_id == "U33":
+        has_radial_rows = any(key.startswith("U33.radial") for key in values)
+        mode = "U33.radial" if has_radial_rows else "U33.layered"
+        weights = _FACET_ROW_WEIGHTS[mode]
+    if weights is None:
+        weights = {key: 1.0 for key in values}
+    applicable = {key: weight for key, weight in weights.items() if key in values}
+    mass = sum(applicable.values())
+    if mass <= 0.0:
+        return na_result(f"{facet_id.lower()}_no_objects", raw)
+    normalized = {key: weight / mass for key, weight in applicable.items()}
+    if facet_id in _NOISY_OR_FACETS:
+        survival = 1.0
+        for key, weight in normalized.items():
+            survival *= (1.0 - float(values[key])) ** weight
+        result = 1.0 - survival
+    else:
+        result = sum(normalized[key] * float(values[key]) for key in normalized)
     return value_result(result, values, raw)
+
+
+def _weighted_interval_mean(
+    values: Sequence[float], weights: Sequence[float], lower: float, upper: float
+) -> float:
+    """Average a weighted empirical distribution over a mass interval.
+
+    Parameters
+    ----------
+    values : sequence[float]
+        Defects sorted in nondecreasing order.
+    weights : sequence[float]
+        Corresponding positive population weights normalized to total mass one.
+    lower, upper : float
+        Half-open cumulative-mass interval in ``[0, 1]``.
+
+    Returns
+    -------
+    float
+        Exact fractional-boundary weighted mean over the requested interval.
+    """
+
+    if not 0.0 <= lower < upper <= 1.0:
+        raise ValueError("weighted interval must satisfy 0 <= lower < upper <= 1")
+    total = 0.0
+    cursor = 0.0
+    for value, weight in zip(values, weights):
+        next_cursor = cursor + weight
+        overlap = max(0.0, min(next_cursor, upper) - max(cursor, lower))
+        total += overlap * value
+        cursor = next_cursor
+        if cursor >= upper:
+            break
+    return total / (upper - lower)
+
+
+def global_blend(
+    defects: Iterable[float], population_weights: Optional[Iterable[float]] = None
+) -> float:
+    """Evaluate the ecosystem-normative U11 section 17 mean-plus-tail blend.
+
+    Parameters
+    ----------
+    defects : iterable[float]
+        Per-object defects in ``[0, 1]`` after any contract-defined fade transform.
+    population_weights : iterable[float] or None
+        Positive input-owned masses. Equal mass is used when omitted.
+
+    Returns
+    -------
+    float
+        ``0.65*TrimmedMean_5% + 0.25*CVaR_0.10 + 0.10*SmoothMax_0.05``.
+
+    Raises
+    ------
+    ValueError
+        If the population is empty, a defect is out of range, or weights are invalid.
+    """
+
+    return blend_with_weights(defects, population_weights, _BLEND_WEIGHTS)
+
+
+def blend_with_weights(
+    defects: Iterable[float],
+    population_weights: Optional[Iterable[float]],
+    blend_weights: Tuple[float, float, float],
+) -> float:
+    """Evaluate the global blend with one contract-declared component vector.
+
+    Parameters
+    ----------
+    defects : iterable[float]
+        Per-object defects in ``[0, 1]``.
+    population_weights : iterable[float] or None
+        Positive input-owned object masses, or equal mass.
+    blend_weights : tuple[float, float, float]
+        Nonnegative ``(trimmed_mean, CVaR, smooth_max)`` coefficients summing to one.
+
+    Returns
+    -------
+    float
+        Bounded weighted component blend.
+
+    Raises
+    ------
+    ValueError
+        If the population or any coefficient is malformed.
+    """
+
+    invalid_weights = any(weight < 0.0 or not math.isfinite(weight) for weight in blend_weights)
+    weights_do_not_sum_to_one = not math.isclose(
+        sum(blend_weights), 1.0, rel_tol=0.0, abs_tol=1e-12
+    )
+    if invalid_weights or weights_do_not_sum_to_one:
+        raise ValueError("blend component weights must be nonnegative and sum to one")
+    values = [float(value) for value in defects]
+    if not values:
+        raise ValueError("global blend requires a nonempty object population")
+    if any(not math.isfinite(value) or value < 0.0 or value > 1.0 for value in values):
+        raise ValueError("global blend defects must be finite and lie in [0, 1]")
+    if population_weights is None:
+        masses = [1.0] * len(values)
+    else:
+        masses = [float(weight) for weight in population_weights]
+    if len(masses) != len(values):
+        raise ValueError("global blend weights must match the defect population")
+    if any(not math.isfinite(weight) or weight <= 0.0 for weight in masses):
+        raise ValueError("global blend weights must be finite and positive")
+    ordered = sorted(zip(values, masses), key=lambda item: item[0])
+    total_mass = sum(weight for _, weight in ordered)
+    sorted_values = [value for value, _ in ordered]
+    normalized = [weight / total_mass for _, weight in ordered]
+    trimmed = _weighted_interval_mean(
+        sorted_values, normalized, _TRIM_FRACTION, 1.0 - _TRIM_FRACTION
+    )
+    cvar = _weighted_interval_mean(sorted_values, normalized, 1.0 - _CVAR_TAIL_FRACTION, 1.0)
+    maximum = sorted_values[-1]
+    exponential_mean = sum(
+        weight * math.exp((value - maximum) / _SMOOTH_MAX_TEMPERATURE)
+        for value, weight in zip(sorted_values, normalized)
+    )
+    smooth_max = maximum + _SMOOTH_MAX_TEMPERATURE * math.log(exponential_mean)
+    mean_weight, cvar_weight, maximum_weight = blend_weights
+    blend = mean_weight * trimmed + cvar_weight * cvar + maximum_weight * smooth_max
+    return min(1.0, max(0.0, blend))
 
 
 def adjacency(scene: Scene) -> List[Set[int]]:
@@ -261,17 +457,45 @@ def isotonic_stress(order: torch.Tensor, layout: torch.Tensor) -> float:
 
     if order.numel() == 0:
         return 0.0
-    levels, inverse = torch.unique(order, sorted=True, return_inverse=True)
-    sums = torch.zeros_like(levels, dtype=torch.float64)
-    counts = torch.zeros_like(levels, dtype=torch.float64)
-    sums.scatter_add_(0, inverse, layout)
-    counts.scatter_add_(0, inverse, torch.ones_like(layout))
-    fitted_levels = pava(sums / counts, counts)
-    fitted = fitted_levels[inverse]
+    fitted = primary_isotonic_fit(order, layout)
+    levels = torch.unique(order, sorted=True)
     denominator = float(torch.sum(layout * layout).item())
     if denominator == 0.0:
         return 1.0 if levels.numel() > 1 else 0.0
     return min(1.0, math.sqrt(float(torch.sum((layout - fitted) ** 2).item()) / denominator))
+
+
+def primary_isotonic_fit(order: torch.Tensor, layout: torch.Tensor) -> torch.Tensor:
+    """Fit nondecreasing disparities with Kruskal primary tie handling.
+
+    Parameters
+    ----------
+    order : torch.Tensor
+        Graph-side coordinates with shape ``[P]``.
+    layout : torch.Tensor
+        Layout distances with shape ``[P]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Fitted disparities in the original pair order.
+    """
+
+    if order.shape != layout.shape or order.ndim != 1:
+        raise ValueError("primary isotonic inputs must be equal one-dimensional arrays")
+    if order.numel() == 0:
+        return torch.empty_like(layout)
+    ordered_indices: List[int] = []
+    for level in torch.unique(order, sorted=True):
+        indices = torch.nonzero(order == level, as_tuple=False).flatten()
+        local = indices[torch.argsort(layout[indices], stable=True)]
+        ordered_indices.extend(int(index) for index in local)
+    permutation = torch.tensor(ordered_indices, dtype=torch.long, device=layout.device)
+    ordered_layout = layout[permutation]
+    fitted_ordered = pava(ordered_layout, torch.ones_like(ordered_layout))
+    fitted = torch.empty_like(layout)
+    fitted[permutation] = fitted_ordered
+    return fitted
 
 
 def midranks(values: torch.Tensor) -> torch.Tensor:
@@ -368,17 +592,45 @@ def route_segments(scene: Scene) -> List[Tuple[int, int, torch.Tensor, torch.Ten
     """
 
     result = []
-    for route_index, route in enumerate(scene.routes):
+    for route in resolved_routes(scene):
         for segment_index in range(route.points.shape[0] - 1):
             result.append(
                 (
-                    route_index,
+                    route.edge_index,
                     segment_index,
                     route.points[segment_index],
                     route.points[segment_index + 1],
                 )
             )
     return result
+
+
+def resolved_routes(scene: Scene) -> Tuple[Route, ...]:
+    """Return one render-truth route per declared edge with chord fallbacks.
+
+    Parameters
+    ----------
+    scene : Scene
+        Validated graph scene.
+
+    Returns
+    -------
+    tuple[Route, ...]
+        Routes in declared edge order. An absent record is the straight segment
+        between endpoint positions, as required by the K17 identity.
+    """
+
+    explicit = {route.edge_index: route for route in scene.routes}
+    routes: List[Route] = []
+    for edge_index, (source, target) in enumerate(scene.graph.edges):
+        route = explicit.get(edge_index)
+        if route is None:
+            route = Route(
+                edge_index=edge_index,
+                points=torch.stack((scene.positions[source], scene.positions[target])),
+            )
+        routes.append(route)
+    return tuple(routes)
 
 
 def proper_intersection(
@@ -433,7 +685,7 @@ def route_lengths(scene: Scene) -> torch.Tensor:
     return torch.tensor(
         [
             float(torch.sum(torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1)))
-            for route in scene.routes
+            for route in resolved_routes(scene)
         ],
         dtype=torch.float64,
     )
@@ -472,6 +724,4 @@ def declared_axis(scene: Scene) -> Optional[torch.Tensor]:
 
     if scene.graph.flow_axis is not None:
         return torch.tensor(scene.graph.flow_axis, dtype=torch.float64)
-    if scene.graph.ranks is not None:
-        return torch.tensor([0.0, 1.0], dtype=torch.float64)
     return None

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Union
 
 from dagua.eval.ruler_v4.clusters import U25, U26, U27, U28, U29, U30
 from dagua.eval.ruler_v4.contracts import CONTRACTS, SCORED_SUBTERM_COUNT
@@ -10,7 +10,7 @@ from dagua.eval.ruler_v4.directed import U31, U32, U33, U34, U39, U40
 from dagua.eval.ruler_v4.edges import U07, U08, U10, U11, U12, U13, U15, U16
 from dagua.eval.ruler_v4.legibility import U17, U18, U19, U21, U20a, U20b
 from dagua.eval.ruler_v4.packing import U38, U41, U42
-from dagua.eval.ruler_v4.scene import FacetResult, Scene
+from dagua.eval.ruler_v4.scene import FacetResult, Scene, TemporalScene
 from dagua.eval.ruler_v4.structure import (
     U01,
     U02,
@@ -82,15 +82,15 @@ FACET_FUNCTIONS: Mapping[str, FacetFunction] = {
 }
 
 
-def evaluate_facet(facet_id: str, scene: Scene) -> FacetResult:
+def evaluate_facet(facet_id: str, scene: Union[Scene, TemporalScene]) -> FacetResult:
     """Evaluate one independent contract facet.
 
     Parameters
     ----------
     facet_id : str
         Frozen contract id.
-    scene : Scene
-        Validated canonical scene.
+    scene : Scene or TemporalScene
+        Validated canonical static scene, or the temporal scene required by U40.
 
     Returns
     -------
@@ -103,7 +103,12 @@ def evaluate_facet(facet_id: str, scene: Scene) -> FacetResult:
         If ``facet_id`` is not one of the 45 frozen contracts.
     """
 
-    return FACET_FUNCTIONS[facet_id](scene)
+    function = FACET_FUNCTIONS[facet_id]
+    if isinstance(scene, TemporalScene):
+        if facet_id != "U40":
+            raise TypeError(f"{facet_id} requires a static Scene")
+        return U40(scene)
+    return function(scene)
 
 
 def validate_registry() -> None:
