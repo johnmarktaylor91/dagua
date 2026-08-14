@@ -6,17 +6,19 @@
 from __future__ import annotations
 
 import math
-from typing import List
+from typing import List, Optional
 
 import torch
 
 from dagua.eval.ruler_v4._util import (
+    ALPHA_GRID,
     aabb_pair,
     adjacency,
     global_blend,
     mean_result,
     proper_intersection,
     resolved_routes,
+    selected_alpha_grid_offset,
     smoothstep,
     soft_pos,
 )
@@ -24,9 +26,24 @@ from dagua.eval.ruler_v4.frames import overflow_defect, robust_frame
 from dagua.eval.ruler_v4.scene import BoxGeometry, FacetResult, Scene, na_result, value_result
 
 
-def U17(scene: Scene) -> FacetResult:
-    """Node-node occlusion / clearance. Frozen SHA-256: c4b70fd5614c1c66e1e96cb62e41fbe87803319f5b50f96b4bf8bbc2cc74a322."""
+def U17(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
+    """Node-node occlusion / clearance. Frozen SHA-256: c4b70fd5614c1c66e1e96cb62e41fbe87803319f5b50f96b4bf8bbc2cc74a322.
 
+    Parameters
+    ----------
+    scene : Scene
+        Validated canonical scene.
+    alpha_grid_index : int or None
+        Required shared-grid state. A manifest row index selects a value;
+        ``None`` publishes the preregistered unselected envelope.
+
+    Returns
+    -------
+    FacetResult
+        Selected scalar value or typed unselected-grid envelope.
+    """
+
+    selected_offset = selected_alpha_grid_offset(alpha_grid_index)
     if scene.node_count < 2:
         return na_result("insufficient_node_population")
     node_masses = (
@@ -48,20 +65,7 @@ def U17(scene: Scene) -> FacetResult:
         if degree == 0:
             raw_budget = 1.5 * diagonals[node] / 2.0
         budgets.append(max(raw_budget, 0.125 * scene.intrinsic_unit))
-    grid = (
-        (0.15, 0.00),
-        (0.15, 0.20),
-        (0.15, 0.50),
-        (0.15, 1.00),
-        (0.30, 0.00),
-        (0.30, 0.20),
-        (0.30, 0.50),
-        (0.30, 1.00),
-        (0.50, 0.00),
-        (0.50, 0.20),
-        (0.50, 0.50),
-        (0.50, 1.00),
-    )
+    grid = tuple((alpha_clear, alpha_high) for _, alpha_clear, alpha_high in ALPHA_GRID)
     per_grid_nodes: List[List[float]] = [[0.0] * scene.node_count for _ in grid]
     survival: List[List[float]] = [[1.0] * scene.node_count for _ in grid]
     overlap_count = 0
@@ -103,21 +107,39 @@ def U17(scene: Scene) -> FacetResult:
         envelope_values.append(global_blend(per_grid_nodes[grid_index], node_masses))
     lower = min(envelope_values)
     upper = max(envelope_values)
-    return na_result(
-        "alpha_grid_unselected",
-        {
-            "grid_envelope": (lower, upper),
-            "grid_values": tuple(envelope_values),
-            "pair_count": scene.node_count * (scene.node_count - 1) // 2,
-            "overlap_count": overlap_count,
-            "upper_subterms": {"U17.1": upper},
-        },
-    )
+    raw = {
+        "grid_envelope": (lower, upper),
+        "grid_values": tuple(envelope_values),
+        "pair_count": scene.node_count * (scene.node_count - 1) // 2,
+        "overlap_count": overlap_count,
+        "upper_subterms": {"U17.1": upper},
+    }
+    if selected_offset is None:
+        return na_result("alpha_grid_unselected", raw)
+    selected_name = ALPHA_GRID[selected_offset][0]
+    selected_value = envelope_values[selected_offset]
+    raw.update({"alpha_grid_index": selected_offset + 1, "alpha_grid_name": selected_name})
+    return value_result(selected_value, {"U17.1": selected_value}, raw)
 
 
-def U18(scene: Scene) -> FacetResult:
-    """Label legibility (node labels). Frozen SHA-256: 68e32c4e9edfac024c8d2e651538d5e41e0781134960f75ca06b131cb40b346d."""
+def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
+    """Label legibility (node labels). Frozen SHA-256: 68e32c4e9edfac024c8d2e651538d5e41e0781134960f75ca06b131cb40b346d.
 
+    Parameters
+    ----------
+    scene : Scene
+        Validated canonical scene.
+    alpha_grid_index : int or None
+        Required shared-grid state. A manifest row index selects a value;
+        ``None`` publishes the preregistered unselected envelope.
+
+    Returns
+    -------
+    FacetResult
+        Selected scalar value or typed unselected-grid envelope.
+    """
+
+    selected_offset = selected_alpha_grid_offset(alpha_grid_index)
     labels = scene.node_label_boxes
     if not labels:
         return na_result("no_declared_node_labels")
@@ -144,11 +166,7 @@ def U18(scene: Scene) -> FacetResult:
         if not neighbors:
             raw_budget = 1.5 * label_diagonals[owner] / 2.0
         budgets.append(max(raw_budget, 0.125 * scene.intrinsic_unit))
-    grid = tuple(
-        (alpha_clear, alpha_high)
-        for alpha_clear in (0.15, 0.30, 0.50)
-        for alpha_high in (0.00, 0.20, 0.50, 1.00)
-    )
+    grid = tuple((alpha_clear, alpha_high) for _, alpha_clear, alpha_high in ALPHA_GRID)
     owner_to_index = {label.owner: index for index, label in enumerate(labels)}
     survival = [[[1.0, 1.0, 1.0] for _ in labels] for _ in grid]
     pair_counts = [0, 0, 0]
@@ -261,16 +279,22 @@ def U18(scene: Scene) -> FacetResult:
         envelope_values.append(global_blend(label_defects, label_masses))
         subterms_by_grid.append(values)
     upper_index = max(range(len(envelope_values)), key=envelope_values.__getitem__)
-    return na_result(
-        "alpha_grid_unselected",
+    raw = {
+        "grid_envelope": (min(envelope_values), max(envelope_values)),
+        "grid_values": tuple(envelope_values),
+        "upper_subterms": subterms_by_grid[upper_index],
+        "label_count": len(labels),
+        "pair_counts": tuple(pair_counts),
+    }
+    if selected_offset is None:
+        return na_result("alpha_grid_unselected", raw)
+    raw.update(
         {
-            "grid_envelope": (min(envelope_values), max(envelope_values)),
-            "grid_values": tuple(envelope_values),
-            "upper_subterms": subterms_by_grid[upper_index],
-            "label_count": len(labels),
-            "pair_counts": tuple(pair_counts),
-        },
+            "alpha_grid_index": selected_offset + 1,
+            "alpha_grid_name": ALPHA_GRID[selected_offset][0],
+        }
     )
+    return value_result(envelope_values[selected_offset], subterms_by_grid[selected_offset], raw)
 
 
 def _route_box_overlap_area(points: torch.Tensor, box: BoxGeometry, stroke_width: float) -> float:

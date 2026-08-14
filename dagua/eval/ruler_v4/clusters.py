@@ -8,16 +8,18 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
 from dagua.eval.ruler_v4._util import (
+    ALPHA_GRID,
     aabb_pair,
     blend_with_weights,
     global_blend,
     mean_result,
     resolved_routes,
+    selected_alpha_grid_offset,
     smoothstep,
     soft_pos,
 )
@@ -956,8 +958,7 @@ def _alpha_grid_for_budget(scene: Scene, budget: float) -> Tuple[float, ...]:
     blend = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, argument))))
     return tuple(
         alpha_clear * (1.0 - blend) + alpha_clear * blend * alpha_high
-        for alpha_clear in (0.15, 0.30, 0.50)
-        for alpha_high in (0.00, 0.20, 0.50, 1.00)
+        for _, alpha_clear, alpha_high in ALPHA_GRID
     )
 
 
@@ -1178,9 +1179,24 @@ def U26(scene: Scene) -> FacetResult:
     )
 
 
-def U27(scene: Scene) -> FacetResult:
-    """Containment / non-intrusion. Frozen SHA-256: fee484e87c819fbe1457b7519fb0586ef1ca5f27f8fed0e7eeaa5fc7ba997f5c."""
+def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
+    """Containment / non-intrusion. Frozen SHA-256: fee484e87c819fbe1457b7519fb0586ef1ca5f27f8fed0e7eeaa5fc7ba997f5c.
 
+    Parameters
+    ----------
+    scene : Scene
+        Validated canonical scene.
+    alpha_grid_index : int or None
+        Required shared-grid state. A manifest row index selects a value;
+        ``None`` publishes the preregistered unselected envelope.
+
+    Returns
+    -------
+    FacetResult
+        Selected scalar value or typed unselected-grid envelope.
+    """
+
+    selected_offset = selected_alpha_grid_offset(alpha_grid_index)
     if not scene.graph.clusters:
         return na_result("no_declared_clusters")
     clusters = _clusters(scene, 3)
@@ -1193,11 +1209,7 @@ def U27(scene: Scene) -> FacetResult:
     member_masses: List[float] = []
     route_intrusions: List[float] = []
     masses = _node_masses(scene)
-    grid = tuple(
-        (alpha_clear, alpha_high)
-        for alpha_clear in (0.15, 0.30, 0.50)
-        for alpha_high in (0.00, 0.20, 0.50, 1.00)
-    )
+    grid = tuple((alpha_clear, alpha_high) for _, alpha_clear, alpha_high in ALPHA_GRID)
     for name, members in clusters.items():
         member_set = set(members)
         region = regions[name]
@@ -1283,22 +1295,43 @@ def U27(scene: Scene) -> FacetResult:
     if not grid_values:
         return na_result("no_foreign_nodes")
     upper_index = max(range(len(grid_values)), key=grid_values.__getitem__)
-    return na_result(
-        "alpha_grid_unselected",
+    raw = {
+        "grid_envelope": (min(grid_values), max(grid_values)),
+        "grid_values": tuple(grid_values),
+        "upper_subterms": grid_subterms[upper_index],
+        "foreign_incidence_count": len(node_intrusion_masses),
+        "member_incidence_count": len(member_outside),
+        "route_incidence_count": len(route_intrusions),
+    }
+    if selected_offset is None:
+        return na_result("alpha_grid_unselected", raw)
+    raw.update(
         {
-            "grid_envelope": (min(grid_values), max(grid_values)),
-            "grid_values": tuple(grid_values),
-            "upper_subterms": grid_subterms[upper_index],
-            "foreign_incidence_count": len(node_intrusion_masses),
-            "member_incidence_count": len(member_outside),
-            "route_incidence_count": len(route_intrusions),
-        },
+            "alpha_grid_index": selected_offset + 1,
+            "alpha_grid_name": ALPHA_GRID[selected_offset][0],
+        }
     )
+    return value_result(grid_values[selected_offset], grid_subterms[selected_offset], raw)
 
 
-def U28(scene: Scene) -> FacetResult:
-    """Hierarchy nesting fidelity. Frozen SHA-256: 5d48376583595a1fad3dee50676d440eb2f0d5bf9bdd6acb03b93535a421e649."""
+def U28(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
+    """Hierarchy nesting fidelity. Frozen SHA-256: 5d48376583595a1fad3dee50676d440eb2f0d5bf9bdd6acb03b93535a421e649.
 
+    Parameters
+    ----------
+    scene : Scene
+        Validated canonical scene.
+    alpha_grid_index : int or None
+        Required shared-grid state. A manifest row index selects a value;
+        ``None`` publishes the preregistered unselected envelope.
+
+    Returns
+    -------
+    FacetResult
+        Selected scalar value or typed unselected-grid envelope.
+    """
+
+    selected_offset = selected_alpha_grid_offset(alpha_grid_index)
     if not scene.graph.cluster_parents:
         return na_result("no_declared_hierarchy")
     canonical = _clusters(scene)
@@ -1390,17 +1423,23 @@ def U28(scene: Scene) -> FacetResult:
             grid_values.append(result.value)
             grid_subterms.append(dict(result.subterms))
     upper_index = max(range(len(grid_values)), key=grid_values.__getitem__)
-    return na_result(
-        "alpha_grid_unselected",
+    raw = {
+        "grid_envelope": (min(grid_values), max(grid_values)),
+        "grid_values": tuple(grid_values),
+        "upper_subterms": grid_subterms[upper_index],
+        "parent_child_count": len(size_relation),
+        "sibling_pair_count": len(sibling_overlap),
+        "region_areas": area_cache,
+    }
+    if selected_offset is None:
+        return na_result("alpha_grid_unselected", raw)
+    raw.update(
         {
-            "grid_envelope": (min(grid_values), max(grid_values)),
-            "grid_values": tuple(grid_values),
-            "upper_subterms": grid_subterms[upper_index],
-            "parent_child_count": len(size_relation),
-            "sibling_pair_count": len(sibling_overlap),
-            "region_areas": area_cache,
-        },
+            "alpha_grid_index": selected_offset + 1,
+            "alpha_grid_name": ALPHA_GRID[selected_offset][0],
+        }
     )
+    return value_result(grid_values[selected_offset], grid_subterms[selected_offset], raw)
 
 
 def U29(scene: Scene) -> FacetResult:
@@ -1443,9 +1482,24 @@ def U29(scene: Scene) -> FacetResult:
     return value_result(value, {"U29.headline": value}, statistics)
 
 
-def U30(scene: Scene) -> FacetResult:
-    """Cluster labels. Frozen SHA-256: 64ce190db377b294922a09b4b0e045224c02d611ff451b33f3fb5d07d1ca69c4."""
+def U30(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
+    """Cluster labels. Frozen SHA-256: 64ce190db377b294922a09b4b0e045224c02d611ff451b33f3fb5d07d1ca69c4.
 
+    Parameters
+    ----------
+    scene : Scene
+        Validated canonical scene.
+    alpha_grid_index : int or None
+        Required shared-grid state. A manifest row index selects a value;
+        ``None`` publishes the preregistered unselected envelope.
+
+    Returns
+    -------
+    FacetResult
+        Selected scalar value or typed unselected-grid envelope.
+    """
+
+    selected_offset = selected_alpha_grid_offset(alpha_grid_index)
     if not scene.graph.clusters:
         return na_result("no_declared_clusters")
     clusters = _clusters(scene, 3)
@@ -1534,13 +1588,19 @@ def U30(scene: Scene) -> FacetResult:
             grid_values.append(result.value)
             grid_subterms.append(dict(result.subterms))
     upper_index = max(range(len(grid_values)), key=grid_values.__getitem__)
-    return na_result(
-        "alpha_grid_unselected",
+    raw = {
+        "grid_envelope": (min(grid_values), max(grid_values)),
+        "grid_values": tuple(grid_values),
+        "upper_subterms": grid_subterms[upper_index],
+        "label_count": len(labels),
+        "derived_label_boxes": labels,
+    }
+    if selected_offset is None:
+        return na_result("alpha_grid_unselected", raw)
+    raw.update(
         {
-            "grid_envelope": (min(grid_values), max(grid_values)),
-            "grid_values": tuple(grid_values),
-            "upper_subterms": grid_subterms[upper_index],
-            "label_count": len(labels),
-            "derived_label_boxes": labels,
-        },
+            "alpha_grid_index": selected_offset + 1,
+            "alpha_grid_name": ALPHA_GRID[selected_offset][0],
+        }
     )
+    return value_result(grid_values[selected_offset], grid_subterms[selected_offset], raw)

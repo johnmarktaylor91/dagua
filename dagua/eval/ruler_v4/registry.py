@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Mapping, Union
+from typing import Callable, Mapping, Optional, Union
 
 from dagua.eval.ruler_v4.clusters import U25, U26, U27, U28, U29, U30
 from dagua.eval.ruler_v4.contracts import CONTRACTS, SCORED_SUBTERM_COUNT
@@ -28,7 +28,9 @@ from dagua.eval.ruler_v4.structure import (
 )
 from dagua.eval.ruler_v4.weights import U35, U36, U37
 
-FacetFunction = Callable[[Scene], FacetResult]
+FacetFunction = Callable[..., FacetResult]
+
+_ALPHA_GRID_FACETS = frozenset({"U17", "U18", "U27", "U28", "U30"})
 
 FACET_FUNCTIONS: Mapping[str, FacetFunction] = {
     function.__name__: function
@@ -82,7 +84,12 @@ FACET_FUNCTIONS: Mapping[str, FacetFunction] = {
 }
 
 
-def evaluate_facet(facet_id: str, scene: Union[Scene, TemporalScene]) -> FacetResult:
+def evaluate_facet(
+    facet_id: str,
+    scene: Union[Scene, TemporalScene],
+    *,
+    alpha_grid_index: Optional[int] = None,
+) -> FacetResult:
     """Evaluate one independent contract facet.
 
     Parameters
@@ -91,6 +98,9 @@ def evaluate_facet(facet_id: str, scene: Union[Scene, TemporalScene]) -> FacetRe
         Frozen contract id.
     scene : Scene or TemporalScene
         Validated canonical static scene, or the temporal scene required by U40.
+    alpha_grid_index : int or None
+        Shared U17-family grid row. ``None`` explicitly requests the frozen
+        pre-selection envelope for grid-consuming facets.
 
     Returns
     -------
@@ -108,6 +118,8 @@ def evaluate_facet(facet_id: str, scene: Union[Scene, TemporalScene]) -> FacetRe
         if facet_id != "U40":
             raise TypeError(f"{facet_id} requires a static Scene")
         return U40(scene)
+    if facet_id in _ALPHA_GRID_FACETS:
+        return function(scene, alpha_grid_index)
     return function(scene)
 
 

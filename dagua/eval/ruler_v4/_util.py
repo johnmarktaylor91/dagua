@@ -22,6 +22,21 @@ _TRIM_FRACTION = 0.05
 _CVAR_TAIL_FRACTION = 0.10
 _SMOOTH_MAX_TEMPERATURE = 0.05
 
+ALPHA_GRID: Tuple[Tuple[str, float, float], ...] = (
+    ("AC15_AH00", 0.15, 0.00),
+    ("AC15_AH20", 0.15, 0.20),
+    ("AC15_AH50", 0.15, 0.50),
+    ("AC15_AH100", 0.15, 1.00),
+    ("AC30_AH00", 0.30, 0.00),
+    ("AC30_AH20", 0.30, 0.20),
+    ("AC30_AH50", 0.30, 0.50),
+    ("AC30_AH100", 0.30, 1.00),
+    ("AC50_AH00", 0.50, 0.00),
+    ("AC50_AH20", 0.50, 0.20),
+    ("AC50_AH50", 0.50, 0.50),
+    ("AC50_AH100", 0.50, 1.00),
+)
+
 _FACET_ROW_WEIGHTS: Dict[str, Dict[str, float]] = {
     "U01b": {"U01b.local": 0.5, "U01b.long": 0.5},
     "U03": {"U03.r_1": 0.5, "U03.r_2": 0.3, "U03.r_4": 0.2},
@@ -62,6 +77,35 @@ _FACET_ROW_WEIGHTS: Dict[str, Dict[str, float]] = {
 }
 
 _NOISY_OR_FACETS = frozenset({"U18", "U20a", "U26", "U27", "U28", "U30", "U42"})
+
+
+def selected_alpha_grid_offset(alpha_grid_index: Optional[int]) -> Optional[int]:
+    """Validate and convert one shared U17 grid selection.
+
+    Parameters
+    ----------
+    alpha_grid_index : int or None
+        Manifest row index in ``[1, 12]``. ``None`` denotes the contract's
+        preregistered unselected state and requires publishing an envelope.
+
+    Returns
+    -------
+    int or None
+        Zero-based row offset, or ``None`` for the unselected state.
+
+    Raises
+    ------
+    ValueError
+        If the supplied index is not a row of the frozen grid.
+    """
+
+    if alpha_grid_index is None:
+        return None
+    if isinstance(alpha_grid_index, bool) or not isinstance(alpha_grid_index, int):
+        raise ValueError("alpha_grid_index must be an integer in [1, 12] or None")
+    if not 1 <= alpha_grid_index <= len(ALPHA_GRID):
+        raise ValueError("alpha_grid_index must be an integer in [1, 12] or None")
+    return alpha_grid_index - 1
 
 
 def smoothstep(value: torch.Tensor) -> torch.Tensor:
