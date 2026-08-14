@@ -320,6 +320,10 @@ def correlation_defect(left: torch.Tensor, right: torch.Tensor) -> float:
     if float(denominator) == 0.0:
         return 0.0 if torch.allclose(left, right) else 1.0
     correlation = float(torch.dot(x, y) / denominator)
+    if correlation >= 1.0 - 1e-15:
+        return 0.0
+    if correlation <= -1.0 + 1e-15:
+        return 1.0
     return min(1.0, max(0.0, (1.0 - correlation) / 2.0))
 
 
@@ -466,6 +470,8 @@ def declared_axis(scene: Scene) -> Optional[torch.Tensor]:
         Unit axis selected without drawing-side optimization.
     """
 
-    if not scene.graph.directed and scene.graph.ranks is None:
-        return None
-    return torch.tensor([0.0, 1.0], dtype=torch.float64)
+    if scene.graph.flow_axis is not None:
+        return torch.tensor(scene.graph.flow_axis, dtype=torch.float64)
+    if scene.graph.ranks is not None:
+        return torch.tensor([0.0, 1.0], dtype=torch.float64)
+    return None

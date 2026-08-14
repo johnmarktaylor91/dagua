@@ -97,9 +97,71 @@ def U36(scene: Scene) -> FacetResult:
 def U37(scene: Scene) -> FacetResult:
     """Thickness-only weight encoding. Frozen SHA-256: ad46f1330b123bd7941b47e9e49cd00b59803c0705b2d2432bda4da81ece53da."""
 
-    if scene.graph.edge_weights is None:
-        return na_result("NO_DECLARED_EDGE_WEIGHTS")
-    return na_result("NO_DECLARED_PER_EDGE_STROKE_WIDTHS")
+    if scene.graph.edge_weights is None or scene.graph.weight_visual_channel != "stroke_thickness":
+        return na_result("THICKNESS_ENCODING_NOT_DECLARED")
+    weights = torch.tensor(scene.graph.edge_weights, dtype=torch.float64)
+    knots = torch.tensor(scene.graph.weight_encoding_knots, dtype=torch.float64)
+    widths = torch.tensor(scene.style.edge_stroke_widths, dtype=torch.float64)
+    target_widths = _log_linear_targets(weights, knots)
+    log_error = torch.log(widths / target_widths)
+    edge_losses = 1.0 - torch.exp(-((log_error / 0.10) ** 2))
+    order = torch.argsort(weights, stable=True)
+    order_losses = []
+    for left, right in zip(order[:-1].tolist(), order[1:].tolist()):
+        if weights[left] == weights[right]:
+            continue
+        argument = float((torch.log(widths[left]) - torch.log(widths[right])) / 0.02)
+        argument = max(-60.0, min(60.0, argument))
+        order_losses.append(1.0 / (1.0 + math.exp(-argument)))
+    per_edge = float(torch.mean(edge_losses))
+    if order_losses:
+        order_loss = sum(order_losses) / len(order_losses)
+        defect = 0.75 * per_edge + 0.25 * order_loss
+    else:
+        order_loss = 0.0
+        defect = per_edge
+    return value_result(
+        defect,
+        {"U37.ell_e": per_edge, "U37.ell_ord": order_loss},
+        {
+            "target_widths": tuple(float(value) for value in target_widths),
+            "derived_widths": tuple(float(value) for value in widths),
+            "concordance_count": len(order_losses),
+        },
+    )
+
+
+def _log_linear_targets(weights: torch.Tensor, knots: torch.Tensor) -> torch.Tensor:
+    """Evaluate a positive piecewise-linear map in log-weight/log-width space.
+
+    Parameters
+    ----------
+    weights : torch.Tensor
+        Positive declared edge weights with shape ``[E]``.
+    knots : torch.Tensor
+        Positive monotone ``(weight, width)`` knots with shape ``[K, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Target widths with shape ``[E]``.
+    """
+
+    if knots.shape[0] == 1:
+        return torch.full_like(weights, float(knots[0, 1]))
+    log_weights = torch.log(weights)
+    log_knot_weights = torch.log(knots[:, 0])
+    log_knot_widths = torch.log(knots[:, 1])
+    right = torch.searchsorted(log_knot_weights, log_weights, right=True)
+    right = torch.clamp(right, min=1, max=knots.shape[0] - 1)
+    left = right - 1
+    fraction = (log_weights - log_knot_weights[left]) / (
+        log_knot_weights[right] - log_knot_weights[left]
+    )
+    fraction = torch.clamp(fraction, 0.0, 1.0)
+    return torch.exp(
+        log_knot_widths[left] + fraction * (log_knot_widths[right] - log_knot_widths[left])
+    )
 
 
 def replace_edge_weights(scene: Scene, weights: tuple[float, ...]) -> Scene:

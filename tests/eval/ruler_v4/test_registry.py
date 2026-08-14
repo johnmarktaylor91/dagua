@@ -7,8 +7,17 @@ import math
 import pytest
 
 from dagua.eval.ruler_v4.contracts import CONTRACTS, SCORED_SUBTERM_COUNT
+from dagua.eval.ruler_v4.ingestion import ingest_record
 from dagua.eval.ruler_v4.registry import FACET_FUNCTIONS, evaluate_facet, validate_registry
-from dagua.eval.ruler_v4.scene import ResultState, Scene
+from dagua.eval.ruler_v4.scene import (
+    GraphSemantics,
+    IngestionErrorCode,
+    InvalidScene,
+    ObservationProfile,
+    ResultState,
+    Scene,
+    StyleContract,
+)
 
 
 def test_frozen_contract_inventory() -> None:
@@ -53,3 +62,19 @@ def test_contract_na_case_is_typed(facet_id: str, semantic_scene: Scene) -> None
         assert result.reason
     else:
         assert result.value is not None or result.state is ResultState.INVALID
+
+
+@pytest.mark.parametrize("facet_id", CONTRACTS)
+def test_contract_invalid_ingestion_path_is_typed(facet_id: str) -> None:
+    """Reject malformed geometry before dispatch for every contract entry point."""
+
+    del facet_id
+    graph = GraphSemantics(("a", "b"), ((0, 1),))
+    result = ingest_record(
+        graph,
+        {"positions": [[0.0, 0.0], [float("nan"), 1.0]]},
+        StyleContract(),
+        ObservationProfile(),
+    )
+    assert isinstance(result, InvalidScene)
+    assert result.code is IngestionErrorCode.NONFINITE_GEOMETRY
