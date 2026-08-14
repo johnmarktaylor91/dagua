@@ -1,0 +1,444 @@
+"""Immutable scene, semantic, style, and result contracts for RULER V4."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, FrozenSet, Mapping, Optional, Tuple
+
+import torch
+
+
+class IngestionErrorCode(str, Enum):
+    """Typed invalid-scene error codes."""
+
+    MALFORMED_POSITIONS = "malformed_positions"
+    NONFINITE_GEOMETRY = "nonfinite_geometry"
+    TOPOLOGY_MISMATCH = "topology_mismatch"
+    MISSING_REQUIRED_PRIMITIVE = "missing_required_primitive"
+    IMPOSSIBLE_STYLE = "impossible_style"
+    UNSUPPORTED_COMPOSITING = "unsupported_compositing"
+    PRODUCER_EXTENTS_FORBIDDEN = "producer_extents_forbidden"
+    MALFORMED_ROUTE = "malformed_route"
+    MALFORMED_METADATA = "malformed_metadata"
+
+
+class ResultState(str, Enum):
+    """Facet execution states."""
+
+    VALUE = "VALUE"
+    NA = "NA"
+    INVALID = "INVALID"
+
+
+@dataclass(frozen=True)
+class Route:
+    """One producer-owned vector edge route.
+
+    Parameters
+    ----------
+    edge_index : int
+        Index of the corresponding declared graph edge.
+    points : torch.Tensor
+        Route vertices with shape ``[P, 2]`` and float64 coordinates.
+    kind : str
+        Declared route geometry kind. Phase 1 accepts flattened polylines.
+    """
+
+    edge_index: int
+    points: torch.Tensor
+    kind: str = "polyline"
+
+
+@dataclass(frozen=True)
+class ObservationProfile:
+    """Input-owned declaration of channels visible to one observation profile.
+
+    Parameters
+    ----------
+    name : str
+        Stable profile name.
+    visible_channels : frozenset[str]
+        Channels that are visible in this profile.
+    required_channels : frozenset[str]
+        Channels that every valid drawing must carry.
+    optional_channels : frozenset[str]
+        Channels whose graph-wide absence is a valid NA condition.
+    scale_normalized : bool
+        Whether position scale has been removed by the profile contract.
+    viewport : tuple[float, float] or None
+        Optional physical viewport dimensions.
+    """
+
+    name: str = "ordinary"
+    visible_channels: FrozenSet[str] = frozenset({"nodes", "routes"})
+    required_channels: FrozenSet[str] = frozenset({"nodes"})
+    optional_channels: FrozenSet[str] = frozenset()
+    scale_normalized: bool = False
+    viewport: Optional[Tuple[float, float]] = None
+
+
+@dataclass(frozen=True)
+class GraphSemantics:
+    """Corpus-owned graph and optional semantic declarations.
+
+    Parameters
+    ----------
+    node_ids : tuple[str, ...]
+        Canonical node identifiers.
+    edges : tuple[tuple[int, int], ...]
+        Canonical directed or undirected edge multiset.
+    directed : bool
+        Whether edge direction is declared.
+    node_labels : tuple[str | None, ...]
+        Optional declared node label strings.
+    edge_labels : tuple[str | None, ...]
+        Optional declared edge label strings.
+    clusters : mapping[str, tuple[int, ...]]
+        Declared cluster memberships.
+    cluster_parents : mapping[str, str]
+        Child-to-parent cluster hierarchy.
+    ranks : tuple[int, ...] or None
+        Optional declared node ranks.
+    roots : tuple[int, ...]
+        Optional declared roots.
+    feedback : tuple[bool, ...] or None
+        Optional immutable per-edge feedback mask.
+    edge_weights : tuple[float, ...] or None
+        Optional positive declared edge weights.
+    weight_semantics : str or None
+        Interpretation of declared edge weights.
+    ports : mapping[int, tuple[str | None, str | None]]
+        Optional edge endpoint port declarations.
+    temporal_ids : tuple[str, ...] or None
+        Optional cross-frame node identities.
+    required_primitives : frozenset[str]
+        Render channels required by graph semantics.
+    planarity_certificate : mapping[str, Any] or None
+        Optional input-owned planarity certificate.
+    """
+
+    node_ids: Tuple[str, ...]
+    edges: Tuple[Tuple[int, int], ...]
+    directed: bool = False
+    node_labels: Tuple[Optional[str], ...] = ()
+    edge_labels: Tuple[Optional[str], ...] = ()
+    clusters: Mapping[str, Tuple[int, ...]] = field(default_factory=dict)
+    cluster_parents: Mapping[str, str] = field(default_factory=dict)
+    ranks: Optional[Tuple[int, ...]] = None
+    roots: Tuple[int, ...] = ()
+    feedback: Optional[Tuple[bool, ...]] = None
+    edge_weights: Optional[Tuple[float, ...]] = None
+    weight_semantics: Optional[str] = None
+    ports: Mapping[int, Tuple[Optional[str], Optional[str]]] = field(default_factory=dict)
+    temporal_ids: Optional[Tuple[str, ...]] = None
+    required_primitives: FrozenSet[str] = frozenset({"nodes"})
+    planarity_certificate: Optional[Mapping[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class StyleContract:
+    """Corpus-owned extent and primitive model.
+
+    Parameters
+    ----------
+    font_size : float
+        Node-label font size in canonical scene units.
+    average_character_width : float
+        Character width as a multiple of ``font_size``.
+    line_height : float
+        Label line height as a multiple of ``font_size``.
+    padding_x, padding_y : float
+        Node padding in canonical scene units.
+    minimum_node_width, minimum_node_height : float
+        Minimum visible node dimensions.
+    route_stroke_width : float
+        Declared visible route stroke width.
+    label_gap : float
+        Gap between node center and externally placed label center.
+    coordinate_scale : float
+        Unit re-expression scale applied to all dimensional style fields.
+    opaque : bool
+        Whether all declared primitives use the supported opaque model.
+    allowed_route_kinds : frozenset[str]
+        Route kinds accepted at ingestion.
+    flattening_tolerance : float
+        Input-owned route flattening tolerance.
+    """
+
+    font_size: float = 1.0
+    average_character_width: float = 0.52
+    line_height: float = 1.0
+    padding_x: float = 0.25
+    padding_y: float = 0.20
+    minimum_node_width: float = 1.0
+    minimum_node_height: float = 1.0
+    route_stroke_width: float = 0.08
+    label_gap: float = 0.20
+    coordinate_scale: float = 1.0
+    opaque: bool = True
+    allowed_route_kinds: FrozenSet[str] = frozenset({"polyline"})
+    flattening_tolerance: float = 1e-3
+
+
+@dataclass(frozen=True)
+class DrawingScene:
+    """Producer-owned drawing fields.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node centers with shape ``[N, 2]`` in scene coordinates.
+    routes : tuple[Route, ...]
+        Exact flattened visible routes.
+    z_order : tuple[str, ...]
+        Back-to-front primitive identifiers.
+    node_label_offsets : torch.Tensor or None
+        Optional external label offsets with shape ``[N, 2]``.
+    edge_label_positions : torch.Tensor or None
+        Optional edge-label centers with shape ``[E, 2]``.
+    """
+
+    positions: torch.Tensor
+    routes: Tuple[Route, ...] = ()
+    z_order: Tuple[str, ...] = ()
+    node_label_offsets: Optional[torch.Tensor] = None
+    edge_label_positions: Optional[torch.Tensor] = None
+
+
+@dataclass(frozen=True)
+class BoxGeometry:
+    """One derived axis-aligned primitive box.
+
+    Parameters
+    ----------
+    center : torch.Tensor
+        Box center with shape ``[2]``.
+    half_extents : torch.Tensor
+        Positive half-width and half-height with shape ``[2]``.
+    owner : int
+        Owning node or edge index.
+    """
+
+    center: torch.Tensor
+    half_extents: torch.Tensor
+    owner: int
+
+
+@dataclass(frozen=True)
+class Scene:
+    """Validated canonical scene consumed by facets.
+
+    Parameters
+    ----------
+    graph : GraphSemantics
+        Canonical input-owned semantics.
+    style : StyleContract
+        Canonical input-owned primitive contract.
+    profile : ObservationProfile
+        Active observation profile.
+    positions : torch.Tensor
+        Validated float64 positions with shape ``[N, 2]``.
+    routes : tuple[Route, ...]
+        Validated float64 routes.
+    z_order : tuple[str, ...]
+        Producer-supplied primitive ordering.
+    node_boxes : tuple[BoxGeometry, ...]
+        Style-derived node boxes.
+    node_label_boxes : tuple[BoxGeometry, ...]
+        Style-derived visible node-label boxes.
+    edge_label_boxes : tuple[BoxGeometry, ...]
+        Style-derived visible edge-label boxes.
+    intrinsic_unit : float
+        Median diagonal of declared node primitives.
+    profile_hash : str
+        Canonical hash of graph/profile/style inputs.
+    """
+
+    graph: GraphSemantics
+    style: StyleContract
+    profile: ObservationProfile
+    positions: torch.Tensor
+    routes: Tuple[Route, ...]
+    z_order: Tuple[str, ...]
+    node_boxes: Tuple[BoxGeometry, ...]
+    node_label_boxes: Tuple[BoxGeometry, ...]
+    edge_label_boxes: Tuple[BoxGeometry, ...]
+    intrinsic_unit: float
+    profile_hash: str
+
+    @property
+    def node_count(self) -> int:
+        """Return the number of nodes.
+
+        Returns
+        -------
+        int
+            Number of canonical nodes.
+        """
+
+        return len(self.graph.node_ids)
+
+    @property
+    def edge_count(self) -> int:
+        """Return the number of declared edges.
+
+        Returns
+        -------
+        int
+            Number of edges in the multiset.
+        """
+
+        return len(self.graph.edges)
+
+
+@dataclass(frozen=True)
+class ValidScene:
+    """Successful ingestion result.
+
+    Parameters
+    ----------
+    scene : Scene
+        Fully validated scene.
+    """
+
+    scene: Scene
+
+
+@dataclass(frozen=True)
+class ValidAbsence:
+    """Valid graph-wide absence of an optional semantic block.
+
+    Parameters
+    ----------
+    reason : str
+        Machine-readable NA reason.
+    missing_channels : tuple[str, ...]
+        Optional channels absent for every drawing under the profile.
+    """
+
+    reason: str
+    missing_channels: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class InvalidScene:
+    """Typed malformed-scene ingestion result.
+
+    Parameters
+    ----------
+    code : IngestionErrorCode
+        Stable invalidity category.
+    message : str
+        Human-readable detail without a score.
+    path : str or None
+        Field path responsible for the error.
+    """
+
+    code: IngestionErrorCode
+    message: str
+    path: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class FacetResult:
+    """One independent facet result.
+
+    Parameters
+    ----------
+    state : ResultState
+        Value, valid absence, or typed invalid state.
+    value : float or None
+        Defect in ``[0, 1]`` for value results.
+    reason : str or None
+        Machine-readable NA or invalid reason.
+    subterms : mapping[str, float]
+        Score-visible sub-term values keyed by manifest id.
+    raw : mapping[str, Any]
+        Published sufficient statistics and diagnostics.
+    """
+
+    state: ResultState
+    value: Optional[float]
+    reason: Optional[str]
+    subterms: Mapping[str, float] = field(default_factory=dict)
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+IngestionResult = ValidScene | ValidAbsence | InvalidScene
+
+
+def value_result(
+    value: float,
+    subterms: Optional[Mapping[str, float]] = None,
+    raw: Optional[Mapping[str, Any]] = None,
+) -> FacetResult:
+    """Build a finite, bounded facet value.
+
+    Parameters
+    ----------
+    value : float
+        Scalar defect expected in ``[0, 1]``.
+    subterms : mapping[str, float] or None
+        Optional scored sub-term mapping.
+    raw : mapping[str, Any] or None
+        Optional raw statistic mapping.
+
+    Returns
+    -------
+    FacetResult
+        Validated value result.
+
+    Raises
+    ------
+    ValueError
+        If the value or a sub-term is non-finite or out of range.
+    """
+
+    values = {key: float(item) for key, item in (subterms or {}).items()}
+    candidates = [float(value), *values.values()]
+    if any(
+        not torch.isfinite(torch.tensor(item, dtype=torch.float64)).item() for item in candidates
+    ):
+        raise ValueError("facet values must be finite")
+    if any(item < 0.0 or item > 1.0 for item in candidates):
+        raise ValueError("facet values must lie in [0, 1]")
+    return FacetResult(ResultState.VALUE, float(value), None, values, dict(raw or {}))
+
+
+def na_result(reason: str, raw: Optional[Mapping[str, Any]] = None) -> FacetResult:
+    """Build a valid-absence facet result.
+
+    Parameters
+    ----------
+    reason : str
+        Machine-readable reason.
+    raw : mapping[str, Any] or None
+        Optional published context.
+
+    Returns
+    -------
+    FacetResult
+        NA result with no numeric score.
+    """
+
+    return FacetResult(ResultState.NA, None, reason, {}, dict(raw or {}))
+
+
+def invalid_result(reason: str, raw: Optional[Mapping[str, Any]] = None) -> FacetResult:
+    """Build a typed invalid facet result.
+
+    Parameters
+    ----------
+    reason : str
+        Machine-readable invalidity reason.
+    raw : mapping[str, Any] or None
+        Optional published context.
+
+    Returns
+    -------
+    FacetResult
+        Invalid result with no numeric score.
+    """
+
+    return FacetResult(ResultState.INVALID, None, reason, {}, dict(raw or {}))
