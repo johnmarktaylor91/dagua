@@ -5,7 +5,7 @@ contains scene ingestion, measurement frames, event metadata, and individual fac
 cross-facet composition is deliberately absent.
 """
 
-from dagua.eval.ruler_v4.ingestion import ingest, ingest_record
+from dagua.eval.ruler_v4.ingestion import ingest, ingest_record, ingest_temporal
 from dagua.eval.ruler_v4.registry import FACET_FUNCTIONS, evaluate_facet, validate_registry
 from dagua.eval.ruler_v4.scene import (
     DrawingScene,
@@ -16,8 +16,11 @@ from dagua.eval.ruler_v4.scene import (
     Route,
     Scene,
     StyleContract,
+    TemporalScene,
+    TemporalTransition,
     ValidAbsence,
     ValidScene,
+    ValidTemporalScene,
 )
 
 __all__ = [
@@ -30,10 +33,14 @@ __all__ = [
     "Route",
     "Scene",
     "StyleContract",
+    "TemporalScene",
+    "TemporalTransition",
     "ValidAbsence",
     "ValidScene",
+    "ValidTemporalScene",
     "evaluate_facet",
     "ingest",
     "ingest_record",
+    "ingest_temporal",
     "validate_registry",
 ]

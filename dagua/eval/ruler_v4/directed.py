@@ -7,12 +7,18 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict, deque
-from typing import DefaultDict, Dict, List, Optional, Tuple
+from typing import DefaultDict, Dict, List, Optional, Tuple, Union
 
 import torch
 
 from dagua.eval.ruler_v4._util import bounded, declared_axis, mean_result
-from dagua.eval.ruler_v4.scene import FacetResult, Scene, na_result, value_result
+from dagua.eval.ruler_v4.scene import (
+    FacetResult,
+    Scene,
+    TemporalScene,
+    na_result,
+    value_result,
+)
 
 
 def _feedback_mask(scene: Scene) -> Tuple[bool, ...]:
@@ -58,7 +64,12 @@ def U31(scene: Scene) -> FacetResult:
     """Direction consistency. Frozen SHA-256: e8c67a87acbfb2a4882c39f54ff50e6c34238cabb5324fad2ab48b0fc5f99ef2."""
 
     axis = declared_axis(scene)
-    if axis is None or not scene.graph.directed or scene.edge_count == 0:
+    if (
+        axis is None
+        or scene.graph.flow_axis is None
+        or not scene.graph.directed
+        or scene.edge_count == 0
+    ):
         return na_result("no_declared_direction")
     feedback = _feedback_mask(scene)
     burdens = []
@@ -88,11 +99,15 @@ def U31(scene: Scene) -> FacetResult:
 def U32(scene: Scene) -> FacetResult:
     """Rank/layer clarity. Frozen SHA-256: e1fdb3ffef119b8151d07ba8673778c88bb7bc565d596248220d2e828fe6eba4."""
 
-    if scene.graph.ranks is None:
-        return na_result("no_declared_ranks")
+    rank_values = scene.graph.ranks
+    if rank_values is None:
+        rank_values = _derived_ranks(scene)
+    if rank_values is None:
+        return na_result("NO_CANONICAL_DERIVED_RANK")
     axis = declared_axis(scene)
-    assert axis is not None
-    ranks = torch.tensor(scene.graph.ranks, dtype=torch.long)
+    if axis is None:
+        return na_result("RANK_AXIS_ABSENT")
+    ranks = torch.tensor(rank_values, dtype=torch.long)
     projection = scene.positions @ axis
     unique = torch.unique(ranks, sorted=True)
     centers = torch.stack([torch.mean(projection[ranks == rank]) for rank in unique])
@@ -117,6 +132,41 @@ def U32(scene: Scene) -> FacetResult:
         "U32.L_overlap": sum(overlap) / len(overlap) if overlap else 0.0,
     }
     return mean_result("U32", values, {"rank_count": unique.numel()})
+
+
+def _derived_ranks(scene: Scene) -> Optional[Tuple[int, ...]]:
+    """Derive longest-path source ranks for a directed acyclic graph.
+
+    Parameters
+    ----------
+    scene : Scene
+        Directed graph scene without declared ranks.
+
+    Returns
+    -------
+    tuple[int, ...] or None
+        Canonical ranks, or ``None`` when the graph is cyclic or undirected.
+    """
+
+    if not scene.graph.directed:
+        return None
+    incoming = [0] * scene.node_count
+    outgoing: DefaultDict[int, List[int]] = defaultdict(list)
+    for source, target in scene.graph.edges:
+        incoming[target] += 1
+        outgoing[source].append(target)
+    queue = deque(index for index, count in enumerate(incoming) if count == 0)
+    ranks = [0] * scene.node_count
+    visited = 0
+    while queue:
+        source = queue.popleft()
+        visited += 1
+        for target in sorted(outgoing[source]):
+            ranks[target] = max(ranks[target], ranks[source] + 1)
+            incoming[target] -= 1
+            if incoming[target] == 0:
+                queue.append(target)
+    return tuple(ranks) if visited == scene.node_count else None
 
 
 def U33(scene: Scene) -> FacetResult:
@@ -273,10 +323,10 @@ def _port_direction(name: Optional[str]) -> Optional[torch.Tensor]:
     """
 
     values = {
-        "north": torch.tensor([0.0, 1.0]),
-        "south": torch.tensor([0.0, -1.0]),
-        "east": torch.tensor([1.0, 0.0]),
-        "west": torch.tensor([-1.0, 0.0]),
+        "north": torch.tensor([0.0, 1.0], dtype=torch.float64),
+        "south": torch.tensor([0.0, -1.0], dtype=torch.float64),
+        "east": torch.tensor([1.0, 0.0], dtype=torch.float64),
+        "west": torch.tensor([-1.0, 0.0], dtype=torch.float64),
     }
     return values.get(name or "")
 
@@ -328,9 +378,218 @@ def U39(scene: Scene) -> FacetResult:
     return mean_result("U39", values)
 
 
-def U40(scene: Scene) -> FacetResult:
+def U40(scene: Union[Scene, TemporalScene]) -> FacetResult:
     """Temporal / mental-map continuity. Frozen SHA-256: b10f18a4380790db1be284956dc2094f3bdcc72334be500b7c08b5e9cc43ce8c."""
 
-    if scene.graph.temporal_ids is None:
-        return na_result("no_temporal_identities")
-    return na_result("no_temporal_reference_scene")
+    if isinstance(scene, Scene):
+        return na_result("TEMPORAL_PROFILE_ABSENT")
+    transition_values = []
+    displacement_values = []
+    churn_values = []
+    identity_values = []
+    transforms = []
+    for before, after, declaration in zip(scene.frames, scene.frames[1:], scene.transitions):
+        before_by_id = {
+            identifier: index for index, identifier in enumerate(before.graph.temporal_ids or ())
+        }
+        after_by_id = {
+            identifier: index for index, identifier in enumerate(after.graph.temporal_ids or ())
+        }
+        common = sorted(set(before_by_id) & set(after_by_id))
+        if len(common) < 2:
+            continue
+        previous = before.positions[[before_by_id[identifier] for identifier in common]]
+        current = after.positions[[after_by_id[identifier] for identifier in common]]
+        if float(torch.max(torch.cdist(previous, previous))) == 0.0:
+            continue
+        aligned, transform = _rigid_align(current, previous)
+        transforms.append(transform)
+        unit = before.intrinsic_unit
+        losses = []
+        for index, identifier in enumerate(common):
+            displacement = float(torch.linalg.vector_norm(aligned[index] - previous[index])) / unit
+            target = declaration.expected_displacements[identifier]
+            losses.append(1.0 - math.exp(-(((displacement - target) / 0.20) ** 2)))
+        displacement = sum(losses) / len(losses)
+        churn = _temporal_angular_churn(before, after, common, aligned, previous)
+        entering_or_exiting = [
+            identifier
+            for identifier, state in declaration.states.items()
+            if state in {"enter", "exit"}
+        ]
+        identity = 0.0
+        applicable = [(0.55, displacement), (0.25, churn)]
+        if entering_or_exiting:
+            identity = _temporal_identity_loss(
+                before, after, entering_or_exiting, before_by_id, after_by_id, common
+            )
+            applicable.append((0.20, identity))
+        mass = sum(weight for weight, _ in applicable)
+        transition_values.append(
+            (
+                declaration.elapsed_time,
+                sum(weight * value for weight, value in applicable) / mass,
+            )
+        )
+        displacement_values.append(displacement)
+        churn_values.append(churn)
+        identity_values.append(identity)
+    if not transition_values:
+        return na_result("INSUFFICIENT_COMMON_NODES")
+    elapsed = sum(weight for weight, _ in transition_values)
+    defect = sum(weight * value for weight, value in transition_values) / elapsed
+    return value_result(
+        defect,
+        {
+            "U40.1": sum(displacement_values) / len(displacement_values),
+            "U40.2": sum(churn_values) / len(churn_values),
+            "U40.3": sum(identity_values) / len(identity_values),
+        },
+        {
+            "transition_count": len(transition_values),
+            "temporal_headline": defect,
+            "transforms": tuple(transforms),
+        },
+    )
+
+
+def _rigid_align(
+    current: torch.Tensor, previous: torch.Tensor
+) -> Tuple[torch.Tensor, Dict[str, object]]:
+    """Rigidly align current points to previous points without scale or reflection.
+
+    Parameters
+    ----------
+    current, previous : torch.Tensor
+        Corresponding point arrays with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[torch.Tensor, dict[str, object]]
+        Aligned current points and published transform diagnostics.
+    """
+
+    current_center = torch.mean(current, dim=0)
+    previous_center = torch.mean(previous, dim=0)
+    centered_current = current - current_center
+    centered_previous = previous - previous_center
+    left, singular, right = torch.linalg.svd(centered_current.T @ centered_previous)
+    rotation = left @ right
+    if float(torch.linalg.det(rotation)) < 0.0:
+        left = left.clone()
+        left[:, -1] *= -1.0
+        rotation = left @ right
+    aligned = centered_current @ rotation + previous_center
+    return aligned, {
+        "rotation": rotation.tolist(),
+        "current_center": current_center.tolist(),
+        "previous_center": previous_center.tolist(),
+        "singular_values": singular.tolist(),
+    }
+
+
+def _temporal_angular_churn(
+    before: Scene,
+    after: Scene,
+    common: List[str],
+    aligned: torch.Tensor,
+    previous: torch.Tensor,
+) -> float:
+    """Measure retained-neighbor angular-order changes for common temporal ids.
+
+    Parameters
+    ----------
+    before, after : Scene
+        Consecutive validated frames.
+    common : list[str]
+        Canonically ordered common temporal ids.
+    aligned, previous : torch.Tensor
+        Aligned current and previous common-node positions ``[C, 2]``.
+
+    Returns
+    -------
+    float
+        Mean normalized inversion distance over scoreable common nodes.
+    """
+
+    if torch.allclose(aligned, previous, rtol=0.0, atol=1e-12):
+        return 0.0
+    before_ids = before.graph.temporal_ids or ()
+    after_ids = after.graph.temporal_ids or ()
+    before_neighbors: Dict[str, set[str]] = {identifier: set() for identifier in before_ids}
+    after_neighbors: Dict[str, set[str]] = {identifier: set() for identifier in after_ids}
+    for source, target in before.graph.edges:
+        before_neighbors[before_ids[source]].add(before_ids[target])
+        before_neighbors[before_ids[target]].add(before_ids[source])
+    for source, target in after.graph.edges:
+        after_neighbors[after_ids[source]].add(after_ids[target])
+        after_neighbors[after_ids[target]].add(after_ids[source])
+    common_set = set(common)
+    common_index = {identifier: index for index, identifier in enumerate(common)}
+    losses = []
+    for identifier in common:
+        old_set = before_neighbors[identifier] & common_set
+        new_set = after_neighbors[identifier] & common_set
+        union = old_set | new_set
+        input_churn = 1.0 - len(old_set & new_set) / len(union) if union else 0.0
+        retained = sorted(old_set & new_set)
+        if len(retained) < 2:
+            continue
+        center = common_index[identifier]
+        inversions = 0
+        pair_count = 0
+        for left_index, left_id in enumerate(retained):
+            for right_id in retained[left_index + 1 :]:
+                left = common_index[left_id]
+                right = common_index[right_id]
+                old_left = previous[left] - previous[center]
+                old_right = previous[right] - previous[center]
+                new_left = aligned[left] - aligned[center]
+                new_right = aligned[right] - aligned[center]
+                old_cross = float(old_left[0] * old_right[1] - old_left[1] * old_right[0])
+                new_cross = float(new_left[0] * new_right[1] - new_left[1] * new_right[0])
+                inversions += int(old_cross * new_cross < 0.0)
+                pair_count += 1
+        losses.append((1.0 - input_churn) * inversions / pair_count)
+    return sum(losses) / len(losses) if losses else 0.0
+
+
+def _temporal_identity_loss(
+    before: Scene,
+    after: Scene,
+    identifiers: List[str],
+    before_by_id: Dict[str, int],
+    after_by_id: Dict[str, int],
+    common: List[str],
+) -> float:
+    """Measure enter/exit distance to the nearest visible common-node anchor.
+
+    Parameters
+    ----------
+    before, after : Scene
+        Consecutive validated frames.
+    identifiers : list[str]
+        Declared entering or exiting temporal ids.
+    before_by_id, after_by_id : dict[str, int]
+        Temporal-id to frame-local index mappings.
+    common : list[str]
+        Common temporal ids eligible as anchors.
+
+    Returns
+    -------
+    float
+        Mean smooth too-near/too-far identity loss.
+    """
+
+    losses = []
+    for identifier in identifiers:
+        frame = after if identifier in after_by_id else before
+        mapping = after_by_id if identifier in after_by_id else before_by_id
+        point = frame.positions[mapping[identifier]]
+        anchors = frame.positions[[mapping[item] for item in common]]
+        distance = float(torch.min(torch.linalg.vector_norm(anchors - point, dim=1)))
+        normalized = distance / frame.intrinsic_unit
+        near = 1.0 / (1.0 + math.exp(max(-60.0, min(60.0, (normalized - 0.10) / 0.03))))
+        far = 1.0 / (1.0 + math.exp(max(-60.0, min(60.0, (2.0 - normalized) / 0.20))))
+        losses.append(near + far - near * far)
+    return sum(losses) / len(losses) if losses else 0.0

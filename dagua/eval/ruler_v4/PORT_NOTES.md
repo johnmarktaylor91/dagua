@@ -17,6 +17,9 @@ construction, and entry-point integration remain absent by design.
 | `smoothstep`, `soft_pos` | `_util.smoothstep`, `_util.soft_pos` |
 | `FACET_FUNCTIONS`, `run_scene` | `registry.FACET_FUNCTIONS`, `registry.evaluate_facet` |
 | frozen event JSON access | `events.load_event_registry`, `events.evaluate_jump_bound` |
+| temporal sequence validation | `ingestion.ingest_temporal`, `scene.TemporalScene`, `scene.TemporalTransition` |
+| certified symmetry declarations | `scene.GraphSemantics.symmetry_generators` |
+| declared thickness encoding | `scene.GraphSemantics.weight_encoding_knots`, `scene.StyleContract.edge_stroke_widths` |
 
 ## Facet symbols present in the spike
 
@@ -36,3 +39,15 @@ The remaining 22 ids have no spike facet symbol and are implemented from their f
 Markdown contracts: U01b, U02, U04a, U04b, U05, U06, U12, U13, U14, U15, U16, U19,
 U20b, U23, U24, U29, U30, U34, U37, U39, U40, and U42.
 
+## Phase-1 reconciliation
+
+- Dispatch inventory: 45/45 exact contract ids.
+- Score-visible inventory: 91/91 manifest sub-terms; the three unscored manifest rows
+  remain excluded as recorded in `DISCREPANCIES.md`.
+- Worked-fixture inventory: one contract-specific exact, relational, or typed-applicability
+  golden for every contract id. Family coverage lives in `test_structure.py`,
+  `test_edges.py`, `test_legibility.py`, `test_clusters.py`, and
+  `test_semantic_facets.py`.
+- Negative ingestion inventory: every dispatch id is paired with a typed malformed-scene
+  rejection, with focused negative cases for topology, producer extents, routes, axes,
+  certified symmetries, thickness maps, multiedge completeness, and temporal declarations.

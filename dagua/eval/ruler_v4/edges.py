@@ -16,6 +16,7 @@ from dagua.eval.ruler_v4._util import (
     mean_result,
     proper_intersection,
     route_segments,
+    smoothstep,
 )
 from dagua.eval.ruler_v4.scene import BoxGeometry, FacetResult, Scene, na_result, value_result
 
@@ -130,7 +131,8 @@ def U08(scene: Scene) -> FacetResult:
         ]
         minimum = min(gaps)
         ideal = 2.0 * math.pi / len(vectors)
-        defects.append(max(0.0, 1.0 - minimum / ideal))
+        defect = max(0.0, 1.0 - minimum / ideal)
+        defects.append(0.0 if defect < 1e-14 else defect)
     if not defects:
         return na_result("no_degree_two_nodes")
     defect = sum(defects) / len(defects)
@@ -314,16 +316,95 @@ def U15(scene: Scene) -> FacetResult:
     multiplicities = Counter(
         tuple(sorted(edge)) for edge in scene.graph.edges if edge[0] != edge[1]
     )
-    parallel_groups = [count for count in multiplicities.values() if count > 1]
+    parallel_groups = [edge for edge, count in multiplicities.items() if count > 1]
     loops = [index for index, edge in enumerate(scene.graph.edges) if edge[0] == edge[1]]
     if not parallel_groups and not loops:
         return na_result("no_multiedges_or_self_loops")
-    multi = bounded(sum(count - 1 for count in parallel_groups) / max(1, sum(parallel_groups)))
-    visible_loop_routes = sum(
-        1 for route in scene.routes if route.edge_index in loops and route.points.shape[0] >= 3
+    route_by_edge = {route.edge_index: route for route in scene.routes}
+    pair_defects = []
+    for edge in parallel_groups:
+        indices = [
+            index
+            for index, candidate in enumerate(scene.graph.edges)
+            if tuple(sorted(candidate)) == edge
+        ]
+        for left_position, left_index in enumerate(indices):
+            for right_index in indices[left_position + 1 :]:
+                left = route_by_edge.get(left_index)
+                right = route_by_edge.get(right_index)
+                if left is None or right is None:
+                    continue
+                left_length = float(
+                    torch.sum(torch.linalg.vector_norm(left.points[1:] - left.points[:-1], dim=1))
+                )
+                right_length = float(
+                    torch.sum(torch.linalg.vector_norm(right.points[1:] - right.points[:-1], dim=1))
+                )
+                maximum_length = max(left_length, right_length)
+                shared_length = min(left_length, right_length)
+                if maximum_length == 0.0:
+                    pair_defects.append(0.0)
+                    continue
+                left_samples = _sample_polyline(left.points, 33)[4:-4]
+                right_samples = _sample_polyline(right.points, 33)[4:-4]
+                separation = float(torch.min(torch.cdist(left_samples, right_samples)))
+                relative = separation / shared_length if shared_length > 0.0 else 0.0
+                defect = max(0.0, 1.0 - relative / 0.05) ** 2
+                fade_shared = float(
+                    smoothstep(torch.tensor(shared_length / (0.1 * maximum_length)))
+                )
+                fade_absolute = float(
+                    smoothstep(torch.tensor(maximum_length / (0.1 * scene.intrinsic_unit)))
+                )
+                pair_defects.append(fade_shared * fade_absolute * defect)
+    multi = sum(pair_defects) / len(pair_defects) if pair_defects else 0.0
+    loop_defects = []
+    for loop_index in loops:
+        route = route_by_edge.get(loop_index)
+        if route is None:
+            continue
+        owner = scene.graph.edges[loop_index][0]
+        box = scene.node_boxes[owner]
+        signed = (
+            min(_point_box_signed(point, box) for point in route.points[1:-1])
+            if route.points.shape[0] > 2
+            else 0.0
+        )
+        loop_defects.append(bounded(max(0.0, -signed) / scene.intrinsic_unit))
+    loop = sum(loop_defects) / len(loop_defects) if loop_defects else 0.0
+    return mean_result(
+        "U15",
+        {"U15.i": multi, "U15.ii": loop},
+        {"parallel_pair_count": len(pair_defects), "loop_count": len(loop_defects)},
     )
-    loop = 1.0 - visible_loop_routes / len(loops) if loops else 0.0
-    return mean_result("U15", {"U15.i": multi, "U15.ii": loop})
+
+
+def _sample_polyline(points: torch.Tensor, count: int) -> torch.Tensor:
+    """Sample a polyline at equally spaced arc-length fractions.
+
+    Parameters
+    ----------
+    points : torch.Tensor
+        Polyline vertices with shape ``[P, 2]``.
+    count : int
+        Number of samples, at least two.
+
+    Returns
+    -------
+    torch.Tensor
+        Sample points with shape ``[count, 2]``.
+    """
+
+    lengths = torch.linalg.vector_norm(points[1:] - points[:-1], dim=1)
+    cumulative = torch.cat((torch.zeros(1, dtype=torch.float64), torch.cumsum(lengths, dim=0)))
+    total = cumulative[-1]
+    if float(total) == 0.0:
+        return points[0].repeat(count, 1)
+    targets = torch.linspace(0.0, float(total), count, dtype=torch.float64)
+    segment = torch.searchsorted(cumulative[1:], targets, right=False)
+    segment = torch.clamp(segment, max=points.shape[0] - 2)
+    local = (targets - cumulative[segment]) / torch.clamp(lengths[segment], min=1e-12)
+    return points[segment] + local[:, None] * (points[segment + 1] - points[segment])
 
 
 def U16(scene: Scene) -> FacetResult:
