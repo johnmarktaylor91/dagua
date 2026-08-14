@@ -6,6 +6,7 @@ cross-facet composition is deliberately absent.
 """
 
 from dagua.eval.ruler_v4.ingestion import ingest, ingest_record
+from dagua.eval.ruler_v4.registry import FACET_FUNCTIONS, evaluate_facet, validate_registry
 from dagua.eval.ruler_v4.scene import (
     DrawingScene,
     FacetResult,
@@ -21,6 +22,7 @@ from dagua.eval.ruler_v4.scene import (
 
 __all__ = [
     "DrawingScene",
+    "FACET_FUNCTIONS",
     "FacetResult",
     "GraphSemantics",
     "InvalidScene",
@@ -30,6 +32,8 @@ __all__ = [
     "StyleContract",
     "ValidAbsence",
     "ValidScene",
+    "evaluate_facet",
     "ingest",
     "ingest_record",
+    "validate_registry",
 ]
