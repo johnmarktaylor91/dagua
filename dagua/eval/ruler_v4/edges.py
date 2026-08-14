@@ -75,7 +75,11 @@ def U07(scene: Scene) -> FacetResult:
     """NORMATIVE CONTRACT: Crossing slot. Frozen SHA-256: 63526aa6824dfa5180234ba97086725621e8b9e8aa3c40713c85a7c4a86caf2b."""
 
     if scene.edge_count < 2 or len(scene.routes) < 2:
-        return na_result("no_eligible_edge_pairs")
+        return mean_result(
+            "U07",
+            {"U7.base": 0.0, "U7.tail": 0.0},
+            {"crossing_count": 0, "eligible_pairs": 0},
+        )
     severities = _crossing_severities(scene)
     eligible = 0
     for left in range(scene.edge_count):
@@ -83,7 +87,11 @@ def U07(scene: Scene) -> FacetResult:
             if not set(scene.graph.edges[left]) & set(scene.graph.edges[right]):
                 eligible += 1
     if eligible == 0:
-        return na_result("no_eligible_edge_pairs")
+        return mean_result(
+            "U07",
+            {"U7.base": 0.0, "U7.tail": 0.0},
+            {"crossing_count": 0, "eligible_pairs": 0},
+        )
     base_raw = sum(1.0 + severity for severity in severities) / eligible
     base = bounded(base_raw)
     if severities:
@@ -113,13 +121,16 @@ def U08(scene: Scene) -> FacetResult:
     for vectors in directions.values():
         if len(vectors) < 2:
             continue
-        angles = []
-        for left in range(len(vectors)):
-            for right in range(left + 1, len(vectors)):
-                angles.append(_segment_angle(vectors[left], vectors[right]))
-        minimum = min(angles)
+        angles = sorted(
+            math.atan2(float(vector[1]), float(vector[0])) % (2.0 * math.pi) for vector in vectors
+        )
+        gaps = [
+            (angles[(index + 1) % len(angles)] - angles[index]) % (2.0 * math.pi)
+            for index in range(len(angles))
+        ]
+        minimum = min(gaps)
         ideal = 2.0 * math.pi / len(vectors)
-        defects.append(max(0.0, 1.0 - minimum / min(math.pi, ideal)))
+        defects.append(max(0.0, 1.0 - minimum / ideal))
     if not defects:
         return na_result("no_degree_two_nodes")
     defect = sum(defects) / len(defects)
@@ -286,7 +297,8 @@ def U13(scene: Scene) -> FacetResult:
                 torch.linalg.vector_norm((start_a + end_a - start_b - end_b) / 2.0)
             )
             parallel.append(max(0.0, 1.0 - angle / (math.pi / 12.0)))
-            close.append(math.exp(-midpoint_distance / scene.intrinsic_unit))
+            normalized_distance = midpoint_distance / scene.intrinsic_unit
+            close.append(max(0.0, 1.0 - normalized_distance / 3.5) ** 2)
     if not parallel:
         return na_result("too_few_route_segments")
     values = {

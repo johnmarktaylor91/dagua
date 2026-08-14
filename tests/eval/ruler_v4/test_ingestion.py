@@ -111,3 +111,25 @@ def test_topology_mismatch_is_invalid() -> None:
     )
     assert isinstance(result, InvalidScene)
     assert result.code is IngestionErrorCode.TOPOLOGY_MISMATCH
+
+
+def test_coordinate_unit_reexpression_preserves_profile_identity() -> None:
+    """Scaling positions and dimensional style together preserves profile identity."""
+
+    graph = _graph()
+    base = ingest(
+        graph,
+        DrawingScene(torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])),
+        StyleContract(),
+        ObservationProfile(),
+    )
+    scaled = ingest(
+        graph,
+        DrawingScene(torch.tensor([[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]])),
+        StyleContract(coordinate_scale=10.0),
+        ObservationProfile(),
+    )
+    assert isinstance(base, ValidScene)
+    assert isinstance(scaled, ValidScene)
+    assert base.scene.profile_hash == scaled.scene.profile_hash
+    assert scaled.scene.intrinsic_unit == 10.0 * base.scene.intrinsic_unit
