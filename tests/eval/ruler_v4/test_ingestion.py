@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import torch
 
-from dagua.eval.ruler_v4.ingestion import ingest, ingest_record
+from dagua.eval.ruler_v4.ingestion import ingest, ingest_record, ingest_temporal
 from dagua.eval.ruler_v4.scene import (
     DrawingScene,
     GraphSemantics,
     IngestionErrorCode,
     InvalidScene,
     ObservationProfile,
+    Route,
     StyleContract,
+    TemporalTransition,
     ValidAbsence,
     ValidScene,
+    ValidTemporalScene,
 )
 
 
@@ -133,3 +136,135 @@ def test_coordinate_unit_reexpression_preserves_profile_identity() -> None:
     assert isinstance(scaled, ValidScene)
     assert base.scene.profile_hash == scaled.scene.profile_hash
     assert scaled.scene.intrinsic_unit == 10.0 * base.scene.intrinsic_unit
+
+
+def test_nonunit_declared_axis_is_invalid() -> None:
+    """Declared axes are graph-owned unit vectors, never drawing-derived hints."""
+
+    graph = GraphSemantics(("a", "b"), ((0, 1),), directed=True, flow_axis=(0.0, 2.0))
+    result = ingest(
+        graph,
+        DrawingScene(torch.tensor([[0.0, 0.0], [0.0, 1.0]])),
+        StyleContract(),
+        ObservationProfile(),
+    )
+    assert isinstance(result, InvalidScene)
+    assert result.code is IngestionErrorCode.MALFORMED_METADATA
+
+
+def test_nonautomorphic_symmetry_generator_is_invalid() -> None:
+    """A permutation that does not preserve topology cannot activate U06."""
+
+    graph = GraphSemantics(
+        ("a", "b", "c"),
+        ((0, 1),),
+        symmetry_generators=((1, 2, 0),),
+    )
+    result = ingest(
+        graph,
+        DrawingScene(torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])),
+        StyleContract(),
+        ObservationProfile(),
+    )
+    assert isinstance(result, InvalidScene)
+    assert result.code is IngestionErrorCode.MALFORMED_METADATA
+
+
+def test_nonmonotone_thickness_map_is_invalid() -> None:
+    """Thickness encoding knots must be positive and monotone at ingestion."""
+
+    graph = GraphSemantics(
+        ("a", "b", "c"),
+        ((0, 1), (1, 2)),
+        edge_weights=(1.0, 2.0),
+        weight_semantics="connection_strength",
+        weight_visual_channel="stroke_thickness",
+        weight_encoding_knots=((1.0, 2.0), (2.0, 1.0)),
+    )
+    result = ingest(
+        graph,
+        DrawingScene(torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])),
+        StyleContract(edge_stroke_widths=(2.0, 1.0)),
+        ObservationProfile(),
+    )
+    assert isinstance(result, InvalidScene)
+    assert result.code is IngestionErrorCode.MALFORMED_METADATA
+
+
+def test_declared_thickness_with_missing_derived_width_is_invalid() -> None:
+    """A declared thickness channel cannot omit any corpus-derived edge stroke."""
+
+    graph = GraphSemantics(
+        ("a", "b"),
+        ((0, 1),),
+        edge_weights=(1.0,),
+        weight_semantics="connection_strength",
+        weight_visual_channel="stroke_thickness",
+        weight_encoding_knots=((1.0, 1.0),),
+    )
+    result = ingest(
+        graph,
+        DrawingScene(torch.tensor([[0.0, 0.0], [1.0, 0.0]])),
+        StyleContract(),
+        ObservationProfile(),
+    )
+    assert isinstance(result, InvalidScene)
+    assert result.code is IngestionErrorCode.MISSING_REQUIRED_PRIMITIVE
+
+
+def test_multiedge_missing_distinct_route_is_invalid() -> None:
+    """Every edge id in a parallel class requires its own visible route."""
+
+    positions = torch.tensor([[0.0, 0.0], [2.0, 0.0]])
+    graph = GraphSemantics(("a", "b"), ((0, 1), (0, 1)))
+    result = ingest(
+        graph,
+        DrawingScene(positions, (Route(0, positions.clone()),)),
+        StyleContract(),
+        ObservationProfile(),
+    )
+    assert isinstance(result, InvalidScene)
+    assert result.code is IngestionErrorCode.MISSING_REQUIRED_PRIMITIVE
+
+
+def test_malformed_temporal_magnitude_is_invalid() -> None:
+    """An unchanged temporal node cannot declare positive expected displacement."""
+
+    graph = GraphSemantics(
+        ("a", "b", "c"),
+        ((0, 1), (0, 2)),
+        temporal_ids=("a", "b", "c"),
+    )
+    positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]])
+    first = ingest(graph, DrawingScene(positions), StyleContract(), ObservationProfile())
+    second = ingest(graph, DrawingScene(positions), StyleContract(), ObservationProfile())
+    assert isinstance(first, ValidScene)
+    assert isinstance(second, ValidScene)
+    transition = TemporalTransition(
+        {"a": "unchanged", "b": "unchanged", "c": "unchanged"},
+        {"a": 1.0, "b": 0.0, "c": 0.0},
+    )
+    result = ingest_temporal((first.scene, second.scene), (transition,))
+    assert isinstance(result, InvalidScene)
+    assert result.code is IngestionErrorCode.MALFORMED_METADATA
+
+
+def test_valid_temporal_scene_preserves_typed_transition() -> None:
+    """Consistent temporal identities and magnitudes produce a validated sequence."""
+
+    graph = GraphSemantics(
+        ("a", "b", "c"),
+        ((0, 1), (0, 2)),
+        temporal_ids=("a", "b", "c"),
+    )
+    positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]])
+    first = ingest(graph, DrawingScene(positions), StyleContract(), ObservationProfile())
+    second = ingest(graph, DrawingScene(positions), StyleContract(), ObservationProfile())
+    assert isinstance(first, ValidScene)
+    assert isinstance(second, ValidScene)
+    transition = TemporalTransition(
+        {"a": "unchanged", "b": "unchanged", "c": "unchanged"},
+        {"a": 0.0, "b": 0.0, "c": 0.0},
+    )
+    result = ingest_temporal((first.scene, second.scene), (transition,))
+    assert isinstance(result, ValidTemporalScene)

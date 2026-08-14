@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import fields
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -20,13 +21,21 @@ from dagua.eval.ruler_v4.scene import (
     Route,
     Scene,
     StyleContract,
+    TemporalIngestionResult,
+    TemporalScene,
+    TemporalTransition,
     ValidAbsence,
     ValidScene,
+    ValidTemporalScene,
 )
 
 _FORBIDDEN_DRAWING_FIELDS = frozenset(
     {"half_extents", "node_boxes", "label_boxes", "stroke_widths", "marker_sizes", "glyph_metrics"}
 )
+_WEIGHT_SEMANTICS = frozenset(
+    {"distance_cost", "connection_strength", "generator_declared_edge_weights"}
+)
+_PORT_DIRECTIONS = frozenset({"north", "east", "south", "west"})
 
 
 def _invalid(code: IngestionErrorCode, message: str, path: Optional[str] = None) -> InvalidScene:
@@ -99,12 +108,98 @@ def _validate_graph(graph: GraphSemantics) -> Optional[InvalidScene]:
                 "edge weights must be finite and positive",
                 "graph.edge_weights",
             )
+        if graph.weight_semantics not in _WEIGHT_SEMANTICS:
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "weighted graphs require a closed-enum weight_semantics value",
+                "graph.weight_semantics",
+            )
     for name, members in graph.clusters.items():
         if not name or any(member < 0 or member >= node_count for member in members):
             return _invalid(
                 IngestionErrorCode.MALFORMED_METADATA,
                 "cluster members must reference canonical nodes",
                 f"graph.clusters.{name}",
+            )
+    if graph.flow_axis is not None:
+        axis = torch.tensor(graph.flow_axis, dtype=torch.float64)
+        if (
+            axis.shape != (2,)
+            or not bool(torch.isfinite(axis).all())
+            or not math.isclose(
+                float(torch.linalg.vector_norm(axis)), 1.0, rel_tol=0.0, abs_tol=1e-12
+            )
+        ):
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "flow_axis must be a finite unit vector",
+                "graph.flow_axis",
+            )
+    edge_multiset = sorted(graph.edges)
+    for index, permutation in enumerate(graph.symmetry_generators):
+        if sorted(permutation) != list(range(node_count)) or tuple(permutation) == tuple(
+            range(node_count)
+        ):
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "symmetry generators must be non-identity node permutations",
+                f"graph.symmetry_generators[{index}]",
+            )
+        mapped = sorted(
+            (permutation[source], permutation[target]) for source, target in graph.edges
+        )
+        if not graph.directed:
+            mapped = sorted(tuple(sorted(edge)) for edge in mapped)
+            reference = sorted(tuple(sorted(edge)) for edge in graph.edges)
+        else:
+            reference = edge_multiset
+        if mapped != reference:
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "symmetry generator does not preserve graph topology",
+                f"graph.symmetry_generators[{index}]",
+            )
+    if graph.weight_visual_channel is not None:
+        if graph.weight_visual_channel != "stroke_thickness":
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "unsupported weight visual channel",
+                "graph.weight_visual_channel",
+            )
+        if graph.edge_weights is None or len(graph.weight_encoding_knots) == 0:
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "thickness encoding requires weights and encoding knots",
+                "graph.weight_encoding_knots",
+            )
+        knots = torch.tensor(graph.weight_encoding_knots, dtype=torch.float64)
+        if (
+            knots.ndim != 2
+            or knots.shape[1] != 2
+            or not bool(torch.isfinite(knots).all())
+            or bool((knots <= 0.0).any())
+            or (knots.shape[0] > 1 and bool((knots[1:, 0] <= knots[:-1, 0]).any()))
+            or (knots.shape[0] > 1 and bool((knots[1:, 1] < knots[:-1, 1]).any()))
+        ):
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "encoding knots must be positive and monotone",
+                "graph.weight_encoding_knots",
+            )
+    for edge_index, directions in graph.ports.items():
+        if (
+            edge_index < 0
+            or edge_index >= len(graph.edges)
+            or len(directions) != 2
+            or any(
+                direction is not None and direction not in _PORT_DIRECTIONS
+                for direction in directions
+            )
+        ):
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "ports must reference an edge and use supported cardinal directions",
+                f"graph.ports.{edge_index}",
             )
     return None
 
@@ -307,6 +402,10 @@ def _profile_hash(graph: GraphSemantics, style: StyleContract, profile: Observat
         "ports": sorted((key, value) for key, value in graph.ports.items()),
         "temporal_ids": graph.temporal_ids,
         "required_primitives": sorted(graph.required_primitives),
+        "flow_axis": graph.flow_axis,
+        "symmetry_generators": graph.symmetry_generators,
+        "weight_visual_channel": graph.weight_visual_channel,
+        "weight_encoding_knots": graph.weight_encoding_knots,
         "style": {
             item.name: getattr(style, item.name)
             for item in fields(style)
@@ -364,6 +463,20 @@ def ingest(
     style_error = _validate_style(style)
     if style_error is not None:
         return style_error
+    if graph.weight_visual_channel == "stroke_thickness":
+        if len(style.edge_stroke_widths) != len(graph.edges):
+            return _invalid(
+                IngestionErrorCode.MISSING_REQUIRED_PRIMITIVE,
+                "thickness encoding requires one derived stroke width per edge",
+                "style.edge_stroke_widths",
+            )
+        widths = torch.tensor(style.edge_stroke_widths, dtype=torch.float64)
+        if not bool(torch.isfinite(widths).all()) or bool((widths <= 0.0).any()):
+            return _invalid(
+                IngestionErrorCode.IMPOSSIBLE_STYLE,
+                "derived edge stroke widths must be finite and positive",
+                "style.edge_stroke_widths",
+            )
     positions = drawing.positions
     if not isinstance(positions, torch.Tensor) or positions.ndim != 2 or positions.shape[1] != 2:
         return _invalid(
@@ -464,6 +577,21 @@ def ingest(
             )
         seen_edges.add(route.edge_index)
         routes.append(Route(route.edge_index, points, route.kind))
+    simple_keys = [tuple(sorted(edge)) for edge in graph.edges if edge[0] != edge[1]]
+    has_parallel = len(simple_keys) != len(set(simple_keys))
+    has_loop = any(source == target for source, target in graph.edges)
+    if (has_parallel or has_loop) and seen_edges != set(range(len(graph.edges))):
+        return _invalid(
+            IngestionErrorCode.MISSING_REQUIRED_PRIMITIVE,
+            "multiedges and self-loops require one distinct route per edge id",
+            "drawing.routes",
+        )
+    if not set(graph.ports).issubset(seen_edges):
+        return _invalid(
+            IngestionErrorCode.MISSING_REQUIRED_PRIMITIVE,
+            "every port-bound edge requires a visible route",
+            "drawing.routes",
+        )
     node_boxes, node_label_boxes, edge_label_boxes = _derive_boxes(graph, drawing, style, profile)
     diagonals = torch.stack(
         [2.0 * torch.linalg.vector_norm(box.half_extents) for box in node_boxes]
@@ -489,6 +617,106 @@ def ingest(
         profile_hash=_profile_hash(graph, style, profile),
     )
     return ValidScene(scene)
+
+
+def ingest_temporal(
+    frames: Tuple[Scene, ...], transitions: Tuple[TemporalTransition, ...]
+) -> TemporalIngestionResult:
+    """Validate an ordered temporal scene without re-ingesting static frames.
+
+    Parameters
+    ----------
+    frames : tuple[Scene, ...]
+        Previously validated static frames in chronological order.
+    transitions : tuple[TemporalTransition, ...]
+        Input-owned declarations for consecutive frame pairs.
+
+    Returns
+    -------
+    TemporalIngestionResult
+        Valid temporal scene, typed valid absence, or typed invalid scene.
+    """
+
+    if len(frames) < 2:
+        return ValidAbsence("TEMPORAL_PROFILE_ABSENT", ("temporal_frames",))
+    if len(transitions) != len(frames) - 1:
+        return _invalid(
+            IngestionErrorCode.MALFORMED_METADATA,
+            "temporal transition count must be frame count minus one",
+            "transitions",
+        )
+    first = frames[0]
+    if any(
+        frame.style != first.style or frame.profile.name != first.profile.name for frame in frames
+    ):
+        return _invalid(
+            IngestionErrorCode.MALFORMED_METADATA,
+            "temporal frames must share one style and profile family",
+            "frames",
+        )
+    for frame_index, frame in enumerate(frames):
+        identifiers = frame.graph.temporal_ids
+        if identifiers is None or len(set(identifiers)) != len(identifiers):
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "every temporal frame needs unique temporal_ids",
+                f"frames[{frame_index}].graph.temporal_ids",
+            )
+    allowed_states = frozenset({"unchanged", "changed", "enter", "exit"})
+    for index, (before, after, transition) in enumerate(zip(frames, frames[1:], transitions)):
+        if transition.elapsed_time <= 0.0 or not math.isfinite(transition.elapsed_time):
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "elapsed_time must be finite and positive",
+                f"transitions[{index}].elapsed_time",
+            )
+        before_ids = set(before.graph.temporal_ids or ())
+        after_ids = set(after.graph.temporal_ids or ())
+        expected_ids = before_ids | after_ids
+        if set(transition.states) != expected_ids or any(
+            state not in allowed_states for state in transition.states.values()
+        ):
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "transition states must cover exactly the temporal-id union",
+                f"transitions[{index}].states",
+            )
+        common = before_ids & after_ids
+        if set(transition.expected_displacements) != common:
+            return _invalid(
+                IngestionErrorCode.MALFORMED_METADATA,
+                "expected displacement must cover exactly the common temporal ids",
+                f"transitions[{index}].expected_displacements",
+            )
+        for identifier in expected_ids:
+            state = transition.states[identifier]
+            if identifier not in before_ids:
+                expected_state = "enter"
+            elif identifier not in after_ids:
+                expected_state = "exit"
+            else:
+                expected_state = None
+            if expected_state is not None and state != expected_state:
+                return _invalid(
+                    IngestionErrorCode.MALFORMED_METADATA,
+                    "enter/exit state contradicts frame identities",
+                    f"transitions[{index}].states.{identifier}",
+                )
+        for identifier, magnitude in transition.expected_displacements.items():
+            state = transition.states[identifier]
+            if (
+                magnitude < 0.0
+                or not math.isfinite(magnitude)
+                or (state == "unchanged" and magnitude != 0.0)
+                or (state == "changed" and magnitude <= 0.0)
+                or state not in {"unchanged", "changed"}
+            ):
+                return _invalid(
+                    IngestionErrorCode.MALFORMED_METADATA,
+                    "typed displacement magnitude contradicts node state",
+                    f"transitions[{index}].expected_displacements.{identifier}",
+                )
+    return ValidTemporalScene(TemporalScene(frames, transitions))
 
 
 def ingest_record(

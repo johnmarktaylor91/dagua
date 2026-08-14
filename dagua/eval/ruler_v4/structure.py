@@ -45,14 +45,23 @@ def U01b(scene: Scene) -> FacetResult:
     diameter = float(torch.max(graph_order))
     local_mask = graph_order <= min(2.0, diameter)
     long_mask = graph_order > max(2.0, diameter / 2.0)
-    if not bool(local_mask.any()) or not bool(long_mask.any()):
+    if not bool(local_mask.any()):
         return na_result("underpopulated_distance_bands")
+    long_value = (
+        isotonic_stress(graph_order[long_mask], layout[long_mask]) if bool(long_mask.any()) else 0.0
+    )
     values = {
         "U01b.local": isotonic_stress(graph_order[local_mask], layout[local_mask]),
-        "U01b.long": isotonic_stress(graph_order[long_mask], layout[long_mask]),
+        "U01b.long": long_value,
     }
     return mean_result(
-        "U01b", values, {"local_pairs": int(local_mask.sum()), "long_pairs": int(long_mask.sum())}
+        "U01b",
+        values,
+        {
+            "local_pairs": int(local_mask.sum()),
+            "long_pairs": int(long_mask.sum()),
+            "dropped_subterms": ("U01b.long",) if not bool(long_mask.any()) else (),
+        },
     )
 
 
@@ -147,7 +156,7 @@ def _density_defect(scene: Scene, bandwidth: float) -> float:
     mixture = (demand + occupancy) / 2.0
     left = torch.sum(torch.where(demand > 0.0, demand * torch.log(demand / mixture), 0.0))
     right = torch.sum(torch.where(occupancy > 0.0, occupancy * torch.log(occupancy / mixture), 0.0))
-    return min(1.0, float((left + right) / (2.0 * math.log(2.0))))
+    return min(1.0, max(0.0, float((left + right) / (2.0 * math.log(2.0)))))
 
 
 def U04a(scene: Scene) -> FacetResult:
@@ -171,10 +180,8 @@ def U04b(scene: Scene) -> FacetResult:
     distances.fill_diagonal_(float("inf"))
     nearest = torch.min(distances, dim=1).values / scene.intrinsic_unit
     crowding = float(torch.mean(torch.exp(-nearest)).item())
-    frame = robust_frame(scene.positions, scene.intrinsic_unit)
-    primitive_area = sum(float(4.0 * torch.prod(box.half_extents)) for box in scene.node_boxes)
-    whitespace = bounded(max(0.0, frame.area / max(primitive_area, 1e-12) - 10.0) / 10.0)
-    return mean_result("U04b", {"U04b.part_1": crowding, "U04b.part_2": whitespace})
+    broad_crowding = crowding * crowding
+    return mean_result("U04b", {"U04b.part_1": crowding, "U04b.part_2": broad_crowding})
 
 
 def U05(scene: Scene) -> FacetResult:
@@ -190,16 +197,32 @@ def U05(scene: Scene) -> FacetResult:
 def U06(scene: Scene) -> FacetResult:
     """Symmetry display. Frozen SHA-256: 9f6f3aa20625f493f3193bb2c8e377b79d2801257ef494d71cd433421497dabe."""
 
-    if scene.node_count < 4:
-        return na_result("no_nontrivial_automorphism")
-    frame = robust_frame(scene.positions, scene.intrinsic_unit)
-    centered = scene.positions - frame.center
-    reflected = centered.clone()
-    reflected[:, 0] *= -1.0
-    distances = torch.cdist(reflected, centered)
-    nearest = torch.min(distances, dim=1).values / scene.intrinsic_unit
-    defect = bounded(float(torch.mean(nearest).item()))
-    return value_result(defect, {"U06.headline": defect})
+    if not scene.graph.symmetry_generators:
+        return na_result("no_certified_symmetry")
+    residuals = []
+    for permutation in scene.graph.symmetry_generators:
+        source = scene.positions - torch.mean(scene.positions, dim=0)
+        target = scene.positions[list(permutation)]
+        target = target - torch.mean(target, dim=0)
+        left, _, right = torch.linalg.svd(source.T @ target)
+        rotation = left @ right
+        if float(torch.linalg.det(rotation)) < 0.0:
+            left = left.clone()
+            left[:, -1] *= -1.0
+            rotation = left @ right
+        spread = torch.sqrt(torch.mean(torch.sum(source * source, dim=1)))
+        if float(spread) == 0.0:
+            residuals.append(1.0)
+            continue
+        aligned = source @ rotation
+        residual = torch.sqrt(torch.mean(torch.sum((aligned - target) ** 2, dim=1)))
+        residuals.append(bounded(float(residual / spread)))
+    defect = sum(residuals) / len(residuals)
+    return value_result(
+        defect,
+        {"U06.headline": defect},
+        {"certified_generator_count": len(residuals)},
+    )
 
 
 def U09(scene: Scene) -> FacetResult:
@@ -236,7 +259,8 @@ def U14(scene: Scene) -> FacetResult:
             distance = float(
                 torch.linalg.vector_norm(scene.positions[left] - scene.positions[right])
             )
-            burdens.append(math.exp(-distance / scene.intrinsic_unit))
+            normalized = distance / scene.intrinsic_unit
+            burdens.append(max(0.0, 1.0 - normalized) ** 2)
     if not burdens:
         return na_result("no_nonadjacent_pairs")
     defect = sum(burdens) / len(burdens)

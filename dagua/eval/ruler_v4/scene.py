@@ -116,6 +116,14 @@ class GraphSemantics:
         Render channels required by graph semantics.
     planarity_certificate : mapping[str, Any] or None
         Optional input-owned planarity certificate.
+    flow_axis : tuple[float, float] or None
+        Optional input-owned unit direction axis.
+    symmetry_generators : tuple[tuple[int, ...], ...]
+        Certified non-identity automorphism permutations.
+    weight_visual_channel : str or None
+        Optional declared visual encoding channel for edge weights.
+    weight_encoding_knots : tuple[tuple[float, float], ...]
+        Positive ``(weight, target_width)`` knots for log-log interpolation.
     """
 
     node_ids: Tuple[str, ...]
@@ -134,6 +142,10 @@ class GraphSemantics:
     temporal_ids: Optional[Tuple[str, ...]] = None
     required_primitives: FrozenSet[str] = frozenset({"nodes"})
     planarity_certificate: Optional[Mapping[str, Any]] = None
+    flow_axis: Optional[Tuple[float, float]] = None
+    symmetry_generators: Tuple[Tuple[int, ...], ...] = ()
+    weight_visual_channel: Optional[str] = None
+    weight_encoding_knots: Tuple[Tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -164,6 +176,8 @@ class StyleContract:
         Route kinds accepted at ingestion.
     flattening_tolerance : float
         Input-owned route flattening tolerance.
+    edge_stroke_widths : tuple[float, ...]
+        Corpus-owned derived visible width for each semantic edge.
     """
 
     font_size: float = 1.0
@@ -179,6 +193,7 @@ class StyleContract:
     opaque: bool = True
     allowed_route_kinds: FrozenSet[str] = frozenset({"polyline"})
     flattening_tolerance: float = 1e-3
+    edge_stroke_widths: Tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -365,7 +380,56 @@ class FacetResult:
     raw: Mapping[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class TemporalTransition:
+    """Input-owned semantics for one consecutive frame transition.
+
+    Parameters
+    ----------
+    states : mapping[str, str]
+        Temporal node id to ``unchanged``, ``changed``, ``enter``, or ``exit``.
+    expected_displacements : mapping[str, float]
+        Expected displacement in intrinsic-unit multiples for common nodes.
+    elapsed_time : float
+        Positive input-owned transition duration.
+    """
+
+    states: Mapping[str, str]
+    expected_displacements: Mapping[str, float]
+    elapsed_time: float = 1.0
+
+
+@dataclass(frozen=True)
+class TemporalScene:
+    """Validated ordered temporal drawing consumed by U40.
+
+    Parameters
+    ----------
+    frames : tuple[Scene, ...]
+        At least two validated static scenes in chronological order.
+    transitions : tuple[TemporalTransition, ...]
+        Exactly one input-owned declaration per consecutive frame pair.
+    """
+
+    frames: Tuple[Scene, ...]
+    transitions: Tuple[TemporalTransition, ...]
+
+
+@dataclass(frozen=True)
+class ValidTemporalScene:
+    """Successful temporal ingestion result.
+
+    Parameters
+    ----------
+    scene : TemporalScene
+        Fully validated temporal scene.
+    """
+
+    scene: TemporalScene
+
+
 IngestionResult = Union[ValidScene, ValidAbsence, InvalidScene]
+TemporalIngestionResult = Union[ValidTemporalScene, ValidAbsence, InvalidScene]
 
 
 def value_result(
