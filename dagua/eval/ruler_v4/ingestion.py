@@ -201,6 +201,7 @@ def _derive_boxes(
     graph: GraphSemantics,
     drawing: DrawingScene,
     style: StyleContract,
+    profile: ObservationProfile,
 ) -> Tuple[Tuple[BoxGeometry, ...], Tuple[BoxGeometry, ...], Tuple[BoxGeometry, ...]]:
     """Derive node and label boxes from graph text and the style contract.
 
@@ -212,6 +213,8 @@ def _derive_boxes(
         Producer-owned centers and optional label placements.
     style : StyleContract
         Corpus-owned extent model.
+    profile : ObservationProfile
+        Input-owned visible-channel declaration.
 
     Returns
     -------
@@ -233,9 +236,13 @@ def _derive_boxes(
             style.minimum_node_height * scale, label_height + 2.0 * style.padding_y * scale
         )
         node_boxes.append(
-            BoxGeometry(center.clone(), torch.tensor([node_width / 2.0, node_height / 2.0]), index)
+            BoxGeometry(
+                center.clone(),
+                torch.tensor([node_width / 2.0, node_height / 2.0], dtype=torch.float64),
+                index,
+            )
         )
-        if labels[index] is not None and "node_labels" in drawing.z_order:
+        if labels[index] is not None and "node_labels" in profile.visible_channels:
             offset = (
                 _clone_float64(drawing.node_label_offsets)[index]
                 if drawing.node_label_offsets is not None
@@ -244,7 +251,7 @@ def _derive_boxes(
             node_label_boxes.append(
                 BoxGeometry(
                     center.clone() + offset,
-                    torch.tensor([label_width / 2.0, label_height / 2.0]),
+                    torch.tensor([label_width / 2.0, label_height / 2.0], dtype=torch.float64),
                     index,
                 )
             )
@@ -257,7 +264,11 @@ def _derive_boxes(
                 continue
             width, height = _text_extent(edge_labels[index], style)
             edge_label_boxes.append(
-                BoxGeometry(center.clone(), torch.tensor([width / 2.0, height / 2.0]), index)
+                BoxGeometry(
+                    center.clone(),
+                    torch.tensor([width / 2.0, height / 2.0], dtype=torch.float64),
+                    index,
+                )
             )
     return tuple(node_boxes), tuple(node_label_boxes), tuple(edge_label_boxes)
 
@@ -296,7 +307,11 @@ def _profile_hash(graph: GraphSemantics, style: StyleContract, profile: Observat
         "ports": sorted((key, value) for key, value in graph.ports.items()),
         "temporal_ids": graph.temporal_ids,
         "required_primitives": sorted(graph.required_primitives),
-        "style": {item.name: getattr(style, item.name) for item in fields(style)},
+        "style": {
+            item.name: getattr(style, item.name)
+            for item in fields(style)
+            if item.name != "coordinate_scale"
+        },
         "profile": {item.name: getattr(profile, item.name) for item in fields(profile)},
     }
 
@@ -372,7 +387,10 @@ def ingest(
     available = {"nodes"}
     if drawing.routes:
         available.add("routes")
-    if drawing.node_label_offsets is not None or "node_labels" in drawing.z_order:
+    if (
+        any(label is not None for label in graph.node_labels)
+        and "node_labels" in profile.visible_channels
+    ):
         available.add("node_labels")
     if drawing.edge_label_positions is not None:
         available.add("edge_labels")
@@ -446,7 +464,7 @@ def ingest(
             )
         seen_edges.add(route.edge_index)
         routes.append(Route(route.edge_index, points, route.kind))
-    node_boxes, node_label_boxes, edge_label_boxes = _derive_boxes(graph, drawing, style)
+    node_boxes, node_label_boxes, edge_label_boxes = _derive_boxes(graph, drawing, style, profile)
     diagonals = torch.stack(
         [2.0 * torch.linalg.vector_norm(box.half_extents) for box in node_boxes]
     )

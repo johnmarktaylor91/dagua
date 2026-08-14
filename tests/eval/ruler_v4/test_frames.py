@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import torch
 
-from dagua.eval.ruler_v4.frames import overflow_defect, robust_frame, trim_count
+from dagua.eval.ruler_v4.frames import (
+    overflow_defect,
+    robust_frame,
+    robust_projection,
+    trim_count,
+)
 from dagua.eval.ruler_v4.scene import Scene
 
 
@@ -54,3 +59,12 @@ def test_frame_rejects_nan() -> None:
         assert "finite" in str(error)
     else:
         raise AssertionError("non-finite frame input was accepted")
+
+
+def test_direction_resolved_frame_uses_same_small_n_contract() -> None:
+    """Fixed-direction consumers share U21's median/MAD rule and floor."""
+
+    projection = robust_projection(torch.tensor([0.0, 1.0, 2.0, 1000.0]), 2.0)
+    assert projection.center == 1.5
+    assert projection.half_extent == 3.0
+    assert not projection.floor_bound

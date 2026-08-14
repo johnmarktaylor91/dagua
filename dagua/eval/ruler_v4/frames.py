@@ -57,6 +57,25 @@ class RobustFrame:
         return float(4.0 * torch.prod(self.half_extents).item())
 
 
+@dataclass(frozen=True)
+class RobustProjection:
+    """One direction-resolved robust center and half-width.
+
+    Parameters
+    ----------
+    center : float
+        Robust projected center.
+    half_extent : float
+        Floored robust projected half-width.
+    floor_bound : bool
+        Whether the universal half-extent floor binds.
+    """
+
+    center: float
+    half_extent: float
+    floor_bound: bool
+
+
 def minimum_core_count(node_count: int) -> int:
     """Return the normative minimum retained core population.
 
@@ -194,6 +213,44 @@ def robust_frame(positions: torch.Tensor, unit: float) -> RobustFrame:
         regime=regime,
         floor_bound=(bool(bound[0]), bool(bound[1])),
     )
+
+
+def robust_projection(projections: torch.Tensor, unit: float) -> RobustProjection:
+    """Apply the U21 frame rule in one fixed input-owned direction.
+
+    Parameters
+    ----------
+    projections : torch.Tensor
+        Finite scalar projections with shape ``[N]``.
+    unit : float
+        Positive intrinsic unit.
+
+    Returns
+    -------
+    RobustProjection
+        Robust projected center and universally floored half-width.
+    """
+
+    if projections.ndim != 1 or projections.numel() == 0:
+        raise ValueError("projections must have shape [N] with N >= 1")
+    values = projections.detach().to(device="cpu", dtype=torch.float64)
+    if not bool(torch.isfinite(values).all()) or unit <= 0.0 or not math.isfinite(unit):
+        raise ValueError("projection inputs must be finite and unit must be positive")
+    count = values.numel()
+    if count >= N_SMALL:
+        ordered, _ = torch.sort(values)
+        trim = trim_count(count)
+        lower = float(ordered[trim])
+        upper = float(ordered[count - trim - 1])
+        center = (lower + upper) / 2.0
+        raw_half = (upper - lower) / 2.0
+    else:
+        center_tensor = _median(values[:, None])[0]
+        center = float(center_tensor)
+        deviations = torch.abs(values - center_tensor)[:, None]
+        raw_half = MAD_MULTIPLIER * float(_median(deviations)[0])
+    floor = HALF_EXTENT_FLOOR * unit
+    return RobustProjection(center, max(raw_half, floor), raw_half <= floor)
 
 
 def box_outside_area(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, FrozenSet, Mapping, Optional, Tuple
+from typing import Any, FrozenSet, Mapping, Optional, Tuple, Union
 
 import torch
 
@@ -365,7 +365,7 @@ class FacetResult:
     raw: Mapping[str, Any] = field(default_factory=dict)
 
 
-IngestionResult = ValidScene | ValidAbsence | InvalidScene
+IngestionResult = Union[ValidScene, ValidAbsence, InvalidScene]
 
 
 def value_result(
