@@ -50,8 +50,12 @@ class PairedDifferenceCertificate:
     sensitivity_bounds : mapping[str, float]
         Published per-argument ``Lambda_f`` bounds.
     shared_unobserved_subterms : tuple[str, ...]
-        Missing rows whose paired difference is exactly zero and therefore
-        cancels despite a full feasible level interval.
+        Missing rows whose paired difference is certified exactly zero.
+        A zero difference kills only the direct channel: under the frozen
+        nonlinear families the shared level still prices every other row's
+        certified difference, so these rows are charged their full level
+        oscillation bound ``2 * Lambda_f * level_radius`` rather than
+        being treated as an exact cancellation.
     """
 
     interval: CertifiedInterval
@@ -66,6 +70,15 @@ class EliminationRule(str, Enum):
 
     PAIRED_DIFFERENCE = "paired_difference"
     MARGINAL_BOUND = "marginal_bound"
+
+
+class InconsistentCertificateError(ValueError):
+    """Certified eliminations emptied the survivor set.
+
+    Sound certificates cannot exclude every candidate, so an empty survivor
+    set is a certificate-version failure. Racing fails closed with this loud
+    typed artifact (V4_SPEC_r4 6.4) instead of selecting from nothing.
+    """
 
 
 @dataclass(frozen=True)
@@ -132,8 +145,11 @@ class RaceResult:
 
     Parameters
     ----------
-    winner_id : str
-        Selected candidate, or the incumbent on exhausted budget.
+    winner_id : str or None
+        Selected candidate, the incumbent on exhausted budget, or ``None``
+        when the race is inconclusive because the budget was exhausted and
+        the incumbent carries a certified elimination (an eliminated
+        incumbent is not an admissible fallback winner).
     eliminations : tuple[EliminationRecord, ...]
         Certified pre-escalation eliminations.
     escalated_ids : tuple[str, ...]
@@ -146,7 +162,7 @@ class RaceResult:
         Stable outcome reason.
     """
 
-    winner_id: str
+    winner_id: Optional[str]
     eliminations: Tuple[EliminationRecord, ...]
     escalated_ids: Tuple[str, ...]
     true_losses: Mapping[str, float]
@@ -264,10 +280,17 @@ def certify_paired_difference(
     """Certify the primary paired exact-functional difference.
 
     The midpoint is evaluated through the frozen ``compose`` implementation.
-    Uncertainty is propagated with published per-argument sensitivity bounds.
-    A missing term is shared unobserved mass: its level is ``[0, 1]`` and its
-    CRN-paired difference is exactly ``[0, 0]``, so it contributes zero to the
-    functional difference radius rather than being counted twice as marginals.
+    Uncertainty is propagated with published per-argument sensitivity bounds:
+    every active row is charged ``Lambda_f * (2 * level_radius +
+    difference_radius)``. A missing term is shared unobserved mass: its level
+    is ``[0, 1]`` and its CRN-paired difference is exactly ``[0, 0]``. The
+    zero difference removes only the direct channel; under a nonlinear frozen
+    family (``P_MEAN`` with ``p > 1``, ``MEAN_SOFT_BOTTLENECK``) the shared
+    level still sets the exchange rate ``dL/dd`` at ``c + D`` versus ``c``
+    for every other certified difference, so the row keeps its
+    ``2 * Lambda_f * level_radius`` charge. This is single-counted level
+    oscillation, still strictly tighter than double-counted marginals; an
+    exact cancellation claim would be valid only for a linear composition.
 
     Parameters
     ----------
@@ -336,10 +359,12 @@ def certify_paired_difference(
     sensitivities = _sensitivity_bounds(exact, profile)
     error_terms: List[float] = []
     for subterm_id, region in effective.items():
-        if region.difference.lo == 0.0 and region.difference.hi == 0.0:
-            # L(c + 0) - L(c) is identically zero for every shared level;
-            # this is the load-bearing cancellation missing from marginals.
-            continue
+        # No linearity skip for D == [0, 0] rows: a zero certified paired
+        # difference cancels the direct channel only. The row's shared level
+        # still moves sup |dL/dd_i(c + D) - dL/dd_i(c)| for the nonlinear
+        # frozen families, so it is charged the full oscillation bound
+        # 2 * Lambda_f * level_radius (the triangle-inequality bound the
+        # observed rows already carry).
         level_radius = 0.5 * region.level.width
         difference_radius = 0.5 * region.difference.width
         error_terms.append(sensitivities[subterm_id] * (2.0 * level_radius + difference_radius))
@@ -403,10 +428,21 @@ def _validate_race_inputs(
         isinstance(true_score_budget, bool) or true_score_budget < 0
     ):
         raise ValueError("true-score budget must be a nonnegative integer or None")
+    allocation_ids = set()
     for candidate in candidates:
         unknown_pairs = sorted(set(candidate.paired_differences) - set(lookup))
         if unknown_pairs:
             raise ValueError(f"paired certificates name unknown candidates: {unknown_pairs}")
+        allocation_ids.add(candidate.loss_interval.confidence_id)
+        for certificate in candidate.paired_differences.values():
+            allocation_ids.add(certificate.interval.confidence_id)
+    if len(allocation_ids) > 1:
+        # 6.2b's simultaneous coverage is claimed across candidates, facets,
+        # and rounds; intervals from different allocations cannot race.
+        raise ValueError(
+            "race requires one confidence allocation across all candidate "
+            f"intervals and paired certificates, got: {sorted(allocation_ids)}"
+        )
     return lookup
 
 
@@ -488,7 +524,11 @@ def race_candidates(
     remains, no true score is requested. Multiple survivors necessarily lack
     a certified separation from the best admissible set and are escalated.
     When the true-score budget cannot cover that whole overlap set, selection
-    fails closed to the incumbent.
+    fails closed to the incumbent unless the incumbent itself carries a
+    certified elimination, in which case the race returns a typed
+    inconclusive result (``winner_id=None``). An empty survivor set raises
+    :class:`InconsistentCertificateError`. All candidate intervals and paired
+    certificates must share one confidence allocation.
 
     Parameters
     ----------
@@ -540,6 +580,17 @@ def race_candidates(
         ]
         reason_prefix = "overlap_escalation"
 
+    if not survivors:
+        raise InconsistentCertificateError(
+            "certified eliminations excluded every candidate; sound "
+            "certificates cannot do this, so the certificate version has "
+            "failed: "
+            + ", ".join(
+                f"{record.candidate_id} by {record.against_id} ({record.rule.value})"
+                for record in eliminations
+            )
+        )
+
     if len(survivors) == 1:
         return RaceResult(
             winner_id=survivors[0].candidate_id,
@@ -553,6 +604,20 @@ def race_candidates(
     required = len(survivors)
     budget = required if true_score_budget is None else true_score_budget
     if budget < required:
+        eliminated_ids = {record.candidate_id for record in eliminations}
+        if incumbent_id in eliminated_ids:
+            # A certifiably eliminated incumbent is not an admissible
+            # fallback winner: the same result would certify its winner as
+            # strictly worse than a published row. Fail to a typed
+            # inconclusive outcome instead.
+            return RaceResult(
+                winner_id=None,
+                eliminations=eliminations,
+                escalated_ids=(),
+                true_losses=MappingProxyType({}),
+                budget_exhausted=True,
+                reason="budget_exhausted_no_selection",
+            )
         return RaceResult(
             winner_id=incumbent_id,
             eliminations=eliminations,
