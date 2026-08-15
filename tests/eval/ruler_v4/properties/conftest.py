@@ -213,6 +213,50 @@ def reingest_scaled(scene: Scene, factor: float, *, position_only: bool) -> Scen
     return result.scene
 
 
+def build_crossing_field_scene(top_y: float) -> Scene:
+    """Build one near-manifold crossing pair among seven spectator edges.
+
+    The spectators inflate the U07 opportunity normalizer so the registry's
+    closed-form jump bound evaluates strictly below its 1.0 clamp -- the
+    property test on the bound is falsifiable only in that regime.
+
+    Parameters
+    ----------
+    top_y : float
+        Upper endpoint height of the near-vertical edge; the sign selects
+        the side of the crossing manifold.
+
+    Returns
+    -------
+    Scene
+        Validated deterministic eighteen-node scene with nine edges.
+    """
+
+    coordinates = [[-2.0, 0.0], [2.0, 0.0], [0.0, -2.0], [0.0, top_y]]
+    for spectator in range(7):
+        left = 10.0 + 3.0 * spectator
+        coordinates.append([left, 4.0])
+        coordinates.append([left + 2.0, 5.0])
+    positions = torch.tensor(coordinates, dtype=torch.float64)
+    edges = tuple((2 * index, 2 * index + 1) for index in range(positions.shape[0] // 2))
+    routes = tuple(
+        Route(index, torch.stack((positions[source], positions[target])))
+        for index, (source, target) in enumerate(edges)
+    )
+    result = ingest(
+        GraphSemantics(
+            node_ids=tuple(f"n{index}" for index in range(positions.shape[0])),
+            edges=edges,
+            required_primitives=frozenset({"nodes", "routes"}),
+        ),
+        DrawingScene(positions, routes),
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes"})),
+    )
+    assert isinstance(result, ValidScene)
+    return result.scene
+
+
 def build_crossing_scene(top_x: float, top_y: float) -> Scene:
     """Build two nonincident routes near the crossing event manifold.
 

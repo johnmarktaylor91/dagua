@@ -16,7 +16,7 @@ from dagua.eval.ruler_v4.edges import U07
 from dagua.eval.ruler_v4.events import evaluate_jump_bound, load_event_registry
 from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
 
-from .conftest import build_crossing_scene
+from .conftest import build_crossing_field_scene, build_crossing_scene
 
 
 def _crossing_weights() -> WeightTable:
@@ -49,25 +49,43 @@ def test_cc1_off_manifold_perturbation_is_lipschitz_bounded() -> None:
 
 
 def test_cc1_crossing_event_respects_bound_and_limits_verdict() -> None:
-    """Crossing the declared manifold closes its bound and blocks a strict win."""
+    """The measured crossing jump respects its declared sub-clamp bound.
 
-    before = U07(build_crossing_scene(top_x=0.0, top_y=-0.001))
-    after = U07(build_crossing_scene(top_x=0.0, top_y=0.001))
+    The scene carries seven spectator edges so the U07 opportunity
+    normalizer (Z' = eligible + 1 = 37, x0 = 0.25) puts the registry's
+    closed-form bound strictly below its 1.0 clamp; the bound-respect and
+    verdict assertions are falsifiable in this regime (the P2 reviews found
+    the old zeroed context saturated the bound at exactly 1.0, making both
+    assertions vacuous on a [0, 1]-valued facet).
+    """
+
+    before = U07(build_crossing_field_scene(top_y=-0.001))
+    after = U07(build_crossing_field_scene(top_y=0.001))
     registry = load_event_registry()
     event = next(item for item in registry.entries if item.event_id == "U7.crossing-parity")
+    # Honest graph-local inputs: facet defaults gamma=1.0/lambda_T=0.5, the
+    # registry's own sibling-repeat coefficient r_r=1, no existing events at
+    # the birth point (Dtilde=0), and the scene's opportunity normalizer.
+    assert before.raw["eligible_pairs"] == 36
     context = {
-        "lambda_T": 0.0,
-        "gamma": 0.0,
-        "r_r": 0.0,
-        "r_d": 0.0,
+        "lambda_T": 0.5,
+        "gamma": 1.0,
+        "r_r": 1.0,
+        "r_d": 1.0,
         "Dtilde": 0.0,
         "D0": 1.0,
-        "Z_prime": 1.0,
-        "x0": 1.0,
+        "Z_prime": 37.0,
+        "x0": 0.25,
     }
+    bound = evaluate_jump_bound(event, context)
+    assert 0.0 < bound < 1.0
     assert before.value is not None
     assert after.value is not None
-    assert after.value - before.value <= evaluate_jump_bound(event, context)
+    assert int(before.raw["crossing_count"]) == 0
+    assert int(after.raw["crossing_count"]) == 1
+    jump = after.value - before.value
+    assert jump > 0.0
+    assert jump <= bound
 
     profile = CompositionProfile(CompositionFamily.P_MEAN, power=1.0)
     first_composition = compose({"U07": before}, _crossing_weights(), profile)
@@ -80,8 +98,9 @@ def test_cc1_crossing_event_respects_bound_and_limits_verdict() -> None:
         registry,
     )
 
+    assert comparison.decision_margin > 0.0
     assert comparison.verdict is ComparisonVerdict.EVENT_MARGIN_LIMITED
-    assert comparison.event_margin == evaluate_jump_bound(event, context)
+    assert comparison.event_margin == bound
 
 
 def test_cc1_strict_win_requires_margin_greater_than_bound() -> None:
