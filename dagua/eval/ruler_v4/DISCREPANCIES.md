@@ -99,3 +99,22 @@ the production port; none of the entries below overrides a contract.
     failure-behavior authority: unknown declared classes are INVALID; undeclared graphs
     still score against the unit target. Resolving the section 6 wording is a
     contract-owner item.
+21. U03 section 4 weights centers equally within each degree tercile, while section 7
+    runs the tercile blend "over the fade-transformed per-center defects ... at
+    INPUT-ONLY node-mass weights". The two clauses conflict on mass-declaring graphs.
+    Production follows section 4 (centers equal-weighted within tercile); terciles
+    combine at equal mass and components by node mass per section 7. Reconciling the
+    section 7 center-weight wording is a contract-owner item.
+22. U20a's E2 residual frame requires the declared flow axis for its construction, but
+    the exemption's trigger clause is "when GraphSemantics declares ranks/layers" with
+    no axis condition. For a ranks-declared, axis-undeclared graph production keeps the
+    no-fabrication posture (matching U32's `RANK_AXIS_ABSENT` and the U22/U23 declared-
+    axis rule): E2 is not applied, so a correct column of such a graph scores the raw
+    quotient. E2-uncomputable-without-axis is a contract gap; the scheduler owner may
+    prefer a typed sub-term drop over the raw score.
+23. U08's golden-exactness envelope `_ANGULAR_ZERO_ENVELOPE = 1e-12` snaps a pair defect
+    at or below 1e-12 to exactly 0.0 in production so the contract's exact-zero golden is
+    reachable. The constant appears nowhere in U08.md; it sits inside the ecosystem's
+    5.8 numerical envelope (U08 itself tolerates 1e-9 there) and can only ever lower a
+    defect by <= 1e-12, but it is an unfrozen score-path constant pending contract-owner
+    adoption.
