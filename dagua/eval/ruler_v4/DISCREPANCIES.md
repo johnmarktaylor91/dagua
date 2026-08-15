@@ -269,3 +269,16 @@ the production port; none of the entries below overrides a contract.
     not rename -- this result with the ledger and JND machinery. Sub-JND margins
     therefore remain publishable as MARGIN_RULE_* by this seam alone; no consumer may
     treat them as certified strict wins.
+35. V4_SPEC_r4 CC-13/6.2b make every unobserved or under-sampled facet enter a tier's
+    composite as its FULL FEASIBLE INTERVAL, while 3.6's PM-1 denominator renormalizes
+    INAPPLICABLE terms away; phase 2's point-valued `compose` originally collapsed both
+    absence classes into renormalization, so absence of observation improved the score
+    (a two-row 0.2/0.6 table scored 0.4 observed but 0.2 with the bad row unobserved).
+    The two classes are now separated at the composition seam: NA renormalization is
+    the inapplicable branch only (every phase-1 NA source is input-side, keeping the
+    denominator out of the drawing's control, CC-2), and any absence reason in the
+    `UNOBSERVED` class refuses point composition outright -- the honest point-value
+    handling of a width-maximal interval row is escalation, not a number. Certified
+    per-term interval propagation through `compose` (6.2) remains the phase-3 item
+    MODULARITY.md already names; this seam guarantees no cheap tier can ever route
+    unobserved mass through the renormalizing branch in the meantime.

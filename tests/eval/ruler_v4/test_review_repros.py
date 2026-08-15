@@ -1037,3 +1037,74 @@ def test_low_mass_catastrophic_group_stays_visible_in_the_bottleneck() -> None:
     assert result.l_bottleneck is not None
     assert result.l_bottleneck > 0.85
     assert result.l_total > 0.3
+
+
+# --- P2REVIEW_OPUS major (composition.py:361-370, 407-415): compose ---
+# collapsed CC-13 unobserved absence into inapplicable-NA renormalization,
+# so marking the bad row of a 0.2/0.6 table unobserved improved l_total
+# from 0.4 to 0.2. Unobserved mass now refuses point composition.
+
+
+def test_unobserved_absence_refuses_point_composition() -> None:
+    """CC-13: unobserved mass forces escalation instead of renormalizing."""
+
+    from dagua.eval.ruler_v4.composition import (
+        CompositionFamily,
+        CompositionProfile,
+        compose,
+    )
+    from dagua.eval.ruler_v4.scene import na_result, value_result
+    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+
+    table = WeightTable(
+        entries=(
+            SubtermWeight("A.loss", "A", "S", 1.0),
+            SubtermWeight("B.loss", "B", "X", 1.0),
+        ),
+        d_power=0,
+    )
+    profile = CompositionProfile(CompositionFamily.P_MEAN, power=1.0)
+
+    with pytest.raises(ValueError, match="CC-13"):
+        compose(
+            {
+                "A": value_result(0.2, {"A.loss": 0.2}),
+                "B": na_result("UNOBSERVED:TIER_BUDGET_ZERO"),
+            },
+            table,
+            profile,
+        )
+
+    # A VALUE facet dropping one row for budget reasons refuses too.
+    with pytest.raises(ValueError, match="CC-13"):
+        compose(
+            {
+                "A": value_result(
+                    0.2,
+                    {"A.loss": 0.2},
+                    {"dropped_subterms": ("A.extra:UNOBSERVED_BUDGET",)},
+                ),
+                "B": value_result(0.6, {"B.loss": 0.6}),
+            },
+            WeightTable(
+                entries=(
+                    SubtermWeight("A.loss", "A", "S", 1.0),
+                    SubtermWeight("A.extra", "A", "S", 1.0),
+                    SubtermWeight("B.loss", "B", "X", 1.0),
+                ),
+                d_power=0,
+            ),
+            profile,
+        )
+
+    # Input-side inapplicability still renormalizes (3.6): that branch is
+    # the designed behavior, not the reviewed defect.
+    inapplicable = compose(
+        {
+            "A": value_result(0.2, {"A.loss": 0.2}),
+            "B": na_result("WEIGHTS_ABSENT"),
+        },
+        table,
+        profile,
+    )
+    assert inapplicable.l_total == pytest.approx(0.2)
