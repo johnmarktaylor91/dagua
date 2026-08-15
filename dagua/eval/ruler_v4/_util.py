@@ -123,7 +123,10 @@ def smoothstep(value: torch.Tensor) -> torch.Tensor:
     """
 
     clipped = torch.clamp(value, 0.0, 1.0)
-    return clipped**3 * (clipped * (6.0 * clipped - 15.0) + 10.0)
+    # The quintic can overshoot 1.0 by one ULP just below the upper knot; the
+    # promised [0, 1] range is load-bearing (defect terms of the form
+    # 1 - smoothstep(...) must never go negative under the blend domain guard).
+    return torch.clamp(clipped**3 * (clipped * (6.0 * clipped - 15.0) + 10.0), 0.0, 1.0)
 
 
 def soft_pos(value: float, constant: float = 0.5) -> float:
