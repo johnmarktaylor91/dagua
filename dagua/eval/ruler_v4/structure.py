@@ -1381,8 +1381,19 @@ def U22(scene: Scene) -> FacetResult:
         # pre-bans.
         return invalid_result("unknown_declared_class")
     if declared_class is not None and ranks is None:
+        # Section 6's kappa_class constants are elongation magnitudes
+        # (direction-free convention, A_obs >= 1). In the declared-axis
+        # branch `observed` is signed breadth/depth, so each constant maps
+        # through its class's elongation direction: a path/chain elongates
+        # ALONG the flow axis (depth), so kappa_class = 8 is a
+        # breadth/depth target of 1/8; a tree's max(1, b/d) and a grid's
+        # declared width/height are already breadth-over-depth quantities
+        # and pass through unchanged. In the direction-free branch
+        # (axis is None) observed >= 1 folds every target onto the same
+        # side of unity, so the reciprocal is a no-op there. See
+        # DISCREPANCIES.md entry 30.
         if declared_class in {"path", "chain"}:
-            target *= 8.0
+            target *= 8.0 if axis is None else 1.0 / 8.0
         elif declared_class == "tree":
             if scene.graph.tree_depths is None:
                 return invalid_result("unknown_declared_class")
@@ -1395,7 +1406,12 @@ def U22(scene: Scene) -> FacetResult:
             if scene.graph.lattice_dimensions is None:
                 return invalid_result("unknown_declared_class")
             width, height = scene.graph.lattice_dimensions
-            target *= width / height
+            aspect = width / height
+            # Direction-free observed is >= 1 by construction, so the
+            # declared aspect folds onto the same side of unity there
+            # (the DISCREPANCIES.md entry 26 fold); the signed frame
+            # takes it as declared.
+            target *= aspect if axis is not None else max(aspect, 1.0 / aspect)
     excess = soft_pos(abs(math.log(observed / target)) - math.log(3.0))
     defect = excess / (1.0 + excess)
     return value_result(

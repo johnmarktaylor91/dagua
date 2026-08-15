@@ -174,3 +174,18 @@ the production port; none of the entries below overrides a contract.
     and escalates the knife edge rather than freezing an uncontracted tolerance. (The
     composite is shielded at full collapse because sub-terms (i) and (iii) saturate;
     the jump is score-visible in the published, manifest-weighted sub-term.)
+30. U22 section 6's class-exemption table states its kappa_class constants in the
+    direction-free elongation convention (`A_obs = h_max/h_min >= 1`: a path is a tree
+    with `b = 1, d = n`, so `path -> 8` and `tree -> max(1, b/d) = 1` cannot share a
+    signed ratio), while section 5's declared-axis bullet makes `A_obs` signed
+    (breadth over depth) and never contemplates a declared axis plus a declared class
+    with no ranks (the mirror of entry 26's ranks-without-axis case). Production maps
+    each constant through its class's elongation direction: `path`/`chain` elongate
+    along the flow axis, so kappa 8 enters the signed frame as a breadth/depth target
+    of 1/8; `tree`'s `max(1, b/d)` and `lattice`/`grid`'s declared `width/height` are
+    already breadth-over-depth quantities and enter unchanged; in the direction-free
+    branch every target folds onto the `>= 1` side of unity (entry 26's fold, which
+    for the class table only ever moves a sub-unit grid aspect). Residue kept as
+    frozen: for a deep tree (`b < d`) the table's `max(1, .)` fold pins the target at
+    square in both frames, so the signed frame cannot express "should draw deep";
+    granting a depth-side tree exemption is a contract-owner item.

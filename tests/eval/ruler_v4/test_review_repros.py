@@ -553,3 +553,75 @@ def test_u22_ranks_only_graph_keeps_layer_profile_target() -> None:
     profile = 2.0 / 5.0
     assert facet.raw["target"] == pytest.approx(1.0 / profile, abs=0.0)
     assert facet.raw["measurement"] == "frozen_direction_set"
+
+
+# --- P4REVERIFY5_OPUS blocker: the r4 BLOCKER-2 fix flipped `observed` for ---
+# the whole declared-axis branch, but section 6's class table is stated in the
+# direction-free elongation convention, so the path/chain kappa was read
+# backwards: a declared path drawn correctly ALONG its declared flow axis
+# scored 0.791 while the same path drawn ACROSS it scored 0.011.
+
+
+def _declared_class_scene(
+    positions: torch.Tensor,
+    declared_graph_class: str,
+    flow_axis: Optional[Tuple[float, float]] = (0.0, 1.0),
+    **metadata: object,
+) -> Scene:
+    """Ingest an edgeless scene that declares a graph class.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Node positions with shape ``[N, 2]``.
+    declared_graph_class : str
+        Frozen exemption-table class string.
+    flow_axis : tuple[float, float] or None
+        Declared flow axis, if any.
+    **metadata : object
+        Extra GraphSemantics fields (``tree_depths``, ``lattice_dimensions``).
+
+    Returns
+    -------
+    Scene
+        Validated static scene.
+    """
+
+    graph = GraphSemantics(
+        tuple(f"n{index}" for index in range(positions.shape[0])),
+        (),
+        flow_axis=flow_axis,
+        declared_graph_class=declared_graph_class,
+        **metadata,
+    )
+    result = ingest(
+        graph,
+        DrawingScene(positions),
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes"})),
+    )
+    assert isinstance(result, ValidScene)
+    return result.scene
+
+
+def test_u22_declared_path_rewards_drawing_along_its_declared_axis() -> None:
+    """The P4REVERIFY5 live pair: along-axis 0.011-ish, across-axis 0.791-ish.
+
+    kappa_class = 8 (U22.md sec 6 table) is an elongation magnitude; a
+    path elongates along the declared flow axis, so in the signed
+    breadth/depth frame the target is 1/8 (DISCREPANCIES.md entry 30).
+    The pinned values are the reviewer's measured pair, which the
+    r4 BLOCKER-2 fix had exactly swapped.
+    """
+
+    from dagua.eval.ruler_v4.structure import U22
+
+    along = torch.tensor([[0.0, 3.0 * index] for index in range(10)], dtype=torch.float64)
+    across = torch.tensor([[3.0 * index, 0.0] for index in range(10)], dtype=torch.float64)
+    correct = U22(_declared_class_scene(along, "path"))
+    wrong = U22(_declared_class_scene(across, "path"))
+    assert correct.raw["target"] == pytest.approx(1.0 / 8.0, abs=0.0)
+    assert correct.value == pytest.approx(0.010723, abs=1e-6)
+    assert wrong.value == pytest.approx(0.791270, abs=1e-6)
+    # The regression's signature was this exact pair, swapped.
+    assert correct.value < 0.02 < 0.75 < wrong.value
