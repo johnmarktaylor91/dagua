@@ -261,7 +261,10 @@ def U33(scene: Scene) -> FacetResult:
     depths = scene.graph.tree_depths
     mode = scene.graph.tree_layout
     if parents is None or depths is None or mode is None:
-        return invalid_result("TREE_SEMANTICS_ABSENT")
+        # Contract: "Absence is NA:TREE_SEMANTICS_ABSENT; malformed
+        # parent/depth/order data are invalid" (U33.md sec "Input schema
+        # and applicability"). DISCREPANCIES entry 41.
+        return na_result("TREE_SEMANTICS_ABSENT")
     if mode not in {"layered", "radial"}:
         return invalid_result("invalid_tree_layout")
     if len(parents) != scene.node_count or len(depths) != scene.node_count:
@@ -276,7 +279,9 @@ def U33(scene: Scene) -> FacetResult:
         else:
             children[parent].append(node)
     if not roots or all(not child_nodes for child_nodes in children.values()):
-        return invalid_result("TREE_SEMANTICS_ABSENT")
+        # A declared but trivial tree is not "a nontrivial declared rooted
+        # tree/forest": outside applicability, hence NA (DISCREPANCIES 41).
+        return na_result("TREE_SEMANTICS_ABSENT")
     if mode == "layered":
         if scene.graph.flow_axis is None:
             return invalid_result("tree_depth_axis_absent")
