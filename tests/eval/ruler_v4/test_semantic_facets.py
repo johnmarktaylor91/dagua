@@ -339,8 +339,16 @@ def test_u40_identical_frames_have_zero_temporal_headline() -> None:
     assert result.raw["temporal_headline"] == result.temporal_headline
 
 
-def test_u41_certified_triangle_has_zero_face_proxy_debt() -> None:
-    """U41's certified equilateral triangle has no crossings or edge imbalance."""
+def test_u41_certified_triangle_pins_convexity_and_area_balance() -> None:
+    """U41's certified triangle is perfectly convex and pays only area balance.
+
+    The sole face equals its convex hull, so ``L_conv`` is sigmoid tails; the
+    facet value is NOT zero because area balance is deliberately
+    scale-sensitive (U41.md sec 4): the unit-scale face is far smaller than
+    ``a_ref = A_ref / F0``. Both sub-terms and the value are pinned to the
+    contract closed forms from fixture geometry and ingestion-published
+    primitives, independently of the facet's own outputs.
+    """
 
     height = 3.0**0.5
     positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [1.0, height]], dtype=torch.float64)
@@ -355,12 +363,21 @@ def test_u41_certified_triangle_has_zero_face_proxy_debt() -> None:
     assert result.raw["F0"] == 1
     assert result.raw["arrangement_face_count"] == 1
     assert result.raw["faces"][0]["convexity_defect"] == pytest.approx(0.0, abs=0.0)
-    # The facet value carries U41's frozen 0.60/0.40 sub-term mass exactly,
-    # and the certified convex face leaves only sigmoid tails in L_conv.
     assert result.subterms["U41.L_conv"] == pytest.approx(0.0, abs=1e-12)
-    assert result.value == pytest.approx(
-        0.60 * result.subterms["U41.L_conv"] + 0.40 * result.subterms["U41.L_area"], abs=0.0
+    # Contract quantities (U41.md secs 4, 6; U21.md A_ref with phi_target
+    # = 0.10 and one component): a_f is the fixture triangle's closed-form
+    # area, a_ref derives from the ingestion-published node boxes.
+    face_area = math.sqrt(3.0)
+    primitive_area = sum(
+        float(4.0 * box.half_extents[0] * box.half_extents[1]) for box in scene.node_boxes
     )
+    area_reference = primitive_area / 0.10
+    assert result.raw["a_ref"] == pytest.approx(area_reference, rel=1e-12)
+    balance_burden = abs(face_area - area_reference) / (face_area + area_reference)
+    expected_area_loss = 1.0 - math.exp(-balance_burden)
+    assert result.subterms["U41.L_area"] == pytest.approx(expected_area_loss, rel=1e-12)
+    # Frozen 0.60/0.40 mass (U41.md sec 7) over independently derived terms.
+    assert result.value == pytest.approx(0.40 * expected_area_loss, abs=1e-12)
 
 
 def test_u42_default_v4_style_has_typed_channel_absence() -> None:
