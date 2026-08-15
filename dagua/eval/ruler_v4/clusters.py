@@ -12,10 +12,24 @@ from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
 
+from dagua.eval.ruler_v4._tracing import (
+    Scalar,
+    as_float,
+    keep,
+    p_abs,
+    p_exp,
+    p_log,
+    p_max,
+    p_min,
+    p_sqrt,
+    p_sum,
+    tracing_active,
+)
 from dagua.eval.ruler_v4._util import (
     ALPHA_GRID,
     aabb_pair,
     blend_with_weights,
+    compose_facet_rows,
     global_blend,
     mean_result,
     resolved_routes,
@@ -38,20 +52,200 @@ from dagua.eval.ruler_v4.scene import (
 _U30_PAD_TARGET_U = 0.50
 
 
+def _scalar_tensor(value: Scalar) -> torch.Tensor:
+    """Promote one scalar to a float64 tensor, preserving any graph."""
+
+    if isinstance(value, torch.Tensor):
+        return value
+    return torch.tensor(float(value), dtype=torch.float64)
+
+
+def _p_sin(value: Scalar) -> Scalar:
+    """Sine; ``math.sin`` on floats, ``torch.sin`` on tensors."""
+
+    if isinstance(value, torch.Tensor):
+        return torch.sin(value)
+    return math.sin(value)
+
+
+def _p_cos(value: Scalar) -> Scalar:
+    """Cosine; ``math.cos`` on floats, ``torch.cos`` on tensors."""
+
+    if isinstance(value, torch.Tensor):
+        return torch.cos(value)
+    return math.cos(value)
+
+
+def _p_acos(value: Scalar) -> Scalar:
+    """Arccosine; ``math.acos`` on floats, ``torch.acos`` on tensors."""
+
+    if isinstance(value, torch.Tensor):
+        return torch.acos(value)
+    return math.acos(value)
+
+
+def _p_atan2(numerator: Scalar, denominator: Scalar) -> Scalar:
+    """Two-argument arctangent; ``math.atan2`` on floats, ``torch.atan2`` on tensors."""
+
+    if isinstance(numerator, torch.Tensor) or isinstance(denominator, torch.Tensor):
+        return torch.atan2(_scalar_tensor(numerator), _scalar_tensor(denominator))
+    return math.atan2(numerator, denominator)
+
+
+def _p_mod(value: Scalar, modulus: float) -> Scalar:
+    """Modulo; Python ``%`` on floats, ``torch.remainder`` on tensors."""
+
+    if isinstance(value, torch.Tensor):
+        return torch.remainder(value, modulus)
+    return value % modulus
+
+
+def _p_prod(values: Sequence[Scalar]) -> Scalar:
+    """Product; ``math.prod`` on floats, a left-to-right product with tensors."""
+
+    items = list(values)
+    if any(isinstance(item, torch.Tensor) for item in items):
+        result: Scalar = 1.0
+        for item in items:
+            result = result * item
+        return result
+    return math.prod(items)
+
+
+def _smooth_fade(value: Scalar) -> Scalar:
+    """Evaluate the shared quintic-smoothstep fade on one float64 scalar.
+
+    Parameters
+    ----------
+    value : float or torch.Tensor
+        Fade argument in the gate's own units.
+
+    Returns
+    -------
+    float or torch.Tensor
+        ``float(smoothstep(tensor(value, float64)))`` on the exact path (the
+        historical expression, bit-identical), or the live smoothstep tensor
+        inside a trace.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return smoothstep(value)
+    return float(smoothstep(torch.tensor(value, dtype=torch.float64)))
+
+
+def _smooth_fade32(value: Scalar) -> Scalar:
+    """Evaluate the quintic fade through the historical float32 construction.
+
+    The U25/U26 fade sites build ``torch.tensor(x)`` without a dtype, so the
+    historical value carries a float32 round-trip. The tensor branch mirrors
+    that quantization differentiably (cast down, fade, cast back up), which
+    preserves the float path's value bit-for-bit.
+
+    Parameters
+    ----------
+    value : float or torch.Tensor
+        Fade argument in the gate's own units.
+
+    Returns
+    -------
+    float or torch.Tensor
+        Fade with the float32 round-trip preserved on both branches.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return smoothstep(value.to(torch.float32)).to(torch.float64)
+    return float(smoothstep(torch.tensor(value)))
+
+
+def _norm_or_zero(vector: torch.Tensor) -> Scalar:
+    """Keep a Euclidean norm, detaching only the exact-zero boundary.
+
+    ``vector_norm`` has an undefined (NaN) gradient at the zero vector; every
+    consumer reads the distance through an even or hinged kernel whose slope
+    at exact coincidence is zero, so the detached 0.0 is the exact
+    subgradient there.
+
+    Parameters
+    ----------
+    vector : torch.Tensor
+        Difference vector with shape ``[2]``.
+
+    Returns
+    -------
+    float or torch.Tensor
+        ``keep(norm)`` off the boundary, the float 0.0 exactly on it.
+    """
+
+    norm = keep(torch.linalg.vector_norm(vector))
+    if as_float(norm) == 0.0:
+        return 0.0
+    return norm
+
+
+def _row_norms_or_zero(matrix: torch.Tensor) -> torch.Tensor:
+    """Return per-row Euclidean norms with the exact-zero rows detached.
+
+    Parameters
+    ----------
+    matrix : torch.Tensor
+        Difference vectors with shape ``[K, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Row norms with shape ``[K]``; exact-zero rows carry the constant
+        zero (the exact subgradient of every even downstream kernel) so the
+        live rows' backward stays NaN-free.
+    """
+
+    zero_rows = torch.linalg.vector_norm(matrix.detach(), dim=1) == 0.0
+    if not bool(zero_rows.any()):
+        return torch.linalg.vector_norm(matrix, dim=1)
+    safe = torch.where(zero_rows.unsqueeze(1), torch.ones_like(matrix), matrix)
+    return torch.where(
+        zero_rows,
+        torch.zeros((), dtype=matrix.dtype),
+        torch.linalg.vector_norm(safe, dim=1),
+    )
+
+
+def _pow_or_zero(base: Scalar, exponent: float) -> Scalar:
+    """Return ``base ** exponent`` with the saturated constant at zero.
+
+    Parameters
+    ----------
+    base : float or torch.Tensor
+        Nonnegative power base.
+    exponent : float
+        Positive frozen exponent below one.
+
+    Returns
+    -------
+    float or torch.Tensor
+        ``base ** exponent``. A traced base at exactly zero returns the
+        constant zero, avoiding ``0 ** w``'s infinite backward; the value is
+        identical.
+    """
+
+    if isinstance(base, torch.Tensor) and float(base.detach().item()) <= 0.0:
+        return torch.zeros((), dtype=torch.float64)
+    return base**exponent
+
+
 def _interim_cluster_severity(
-    defect: float,
-    overlap_area: float,
+    defect: Scalar,
+    overlap_area: Scalar,
     subject_area: float,
     *,
     subject_is_lower: bool,
-) -> float:
+) -> Scalar:
     """Apply contract-bounded z-order severity to an unresolved cluster pair.
 
     Parameters
     ----------
-    defect : float
+    defect : float or torch.Tensor
         Unadjusted intersecting-pair defect.
-    overlap_area : float
+    overlap_area : float or torch.Tensor
         Pair overlap area in scene units squared.
     subject_area : float
         Area of the scored cluster label.
@@ -60,7 +254,7 @@ def _interim_cluster_severity(
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Effective burden between one-half and the unadjusted defect.
 
     Notes
@@ -70,9 +264,9 @@ def _interim_cluster_severity(
     same-kind canonical order are already frozen.
     """
 
-    if overlap_area <= 0.0:
+    if as_float(overlap_area) <= 0.0:
         return defect
-    occluded = min(1.0, overlap_area / subject_area) if subject_is_lower else 0.0
+    occluded = p_min(1.0, overlap_area / subject_area) if subject_is_lower else 0.0
     return defect * (0.5 + 0.5 * occluded)
 
 
@@ -158,23 +352,28 @@ def _induced_diameter(scene: Scene, members: Sequence[int]) -> int:
     return diameter
 
 
-def _lower_quantile(values: Sequence[float], quantile: float) -> float:
+def _lower_quantile(values: Sequence[Scalar], quantile: float) -> Scalar:
     """Return a deterministic lower empirical quantile.
 
     Parameters
     ----------
-    values : sequence[float]
+    values : sequence[float or torch.Tensor]
         Nonempty finite sample.
     quantile : float
         Quantile level in ``[0, 1]``.
 
     Returns
     -------
-    float
-        Lower-order-statistic quantile.
+    float or torch.Tensor
+        Lower-order-statistic quantile; a live tensor when any input is
+        (the selection is an order statistic, a.e. differentiable).
     """
 
-    tensor = torch.tensor(list(values), dtype=torch.float64)
+    items = list(values)
+    if any(isinstance(item, torch.Tensor) for item in items):
+        stacked = torch.stack([_scalar_tensor(item) for item in items])
+        return torch.quantile(stacked, quantile, interpolation="lower")
+    tensor = torch.tensor(items, dtype=torch.float64)
     return float(torch.quantile(tensor, quantile, interpolation="lower"))
 
 
@@ -225,18 +424,18 @@ class _ClusterRegion:
     ----------
     boxes : tuple[BoxGeometry, ...]
         Fixed member primitive boxes.
-    radius : float
-        Median local-spacing inflation radius.
+    radius : float or torch.Tensor
+        Median local-spacing inflation radius; a live tensor inside a trace.
     bounds : BoxGeometry
         Axis-aligned broad-phase bounds of the union.
     """
 
     boxes: Tuple[BoxGeometry, ...]
-    radius: float
+    radius: Scalar
     bounds: BoxGeometry
 
 
-def _cluster_spacing(scene: Scene, members: Sequence[int]) -> float:
+def _cluster_spacing(scene: Scene, members: Sequence[int]) -> Scalar:
     """Return the cluster region's median k-nearest-member spacing.
 
     Parameters
@@ -248,17 +447,20 @@ def _cluster_spacing(scene: Scene, members: Sequence[int]) -> float:
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Lower median of the ``ceil(sqrt(n))``-th neighbour distances.
     """
 
     neighbor_rank = min(len(members) - 1, math.ceil(math.sqrt(len(members))))
-    scales: List[float] = []
+    scales: List[Scalar] = []
     for member in members:
         distances = sorted(
-            float(torch.linalg.vector_norm(scene.positions[member] - scene.positions[other]))
-            for other in members
-            if other != member
+            (
+                _norm_or_zero(scene.positions[member] - scene.positions[other])
+                for other in members
+                if other != member
+            ),
+            key=as_float,
         )
         scales.append(distances[max(0, neighbor_rank - 1)])
     return _lower_quantile(scales, 0.5)
@@ -327,29 +529,29 @@ def _frame_box(frame: RobustFrame, owner: int = -1) -> BoxGeometry:
     return BoxGeometry(frame.center, frame.half_extents, owner)
 
 
-def _signed_box_to_inflated_box(left: BoxGeometry, right: BoxGeometry, radius: float) -> float:
+def _signed_box_to_inflated_box(left: BoxGeometry, right: BoxGeometry, radius: Scalar) -> Scalar:
     """Return signed clearance from one AABB to a rounded inflated AABB.
 
     Parameters
     ----------
     left, right : BoxGeometry
         Query and region-member boxes.
-    radius : float
+    radius : float or torch.Tensor
         Minkowski-disc inflation radius of ``right``.
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Positive clearance, zero contact, or negative penetration depth.
     """
 
     delta = torch.abs(left.center - right.center) - (left.half_extents + right.half_extents)
-    outside = float(torch.linalg.vector_norm(torch.clamp(delta, min=0.0)))
-    inside = min(max(float(delta[0]), float(delta[1])), 0.0)
+    outside = _norm_or_zero(torch.clamp(delta, min=0.0))
+    inside = p_min(p_max(keep(delta[0]), keep(delta[1])), 0.0)
     return outside + inside - radius
 
 
-def _signed_box_region(box: BoxGeometry, region: _ClusterRegion) -> float:
+def _signed_box_region(box: BoxGeometry, region: _ClusterRegion) -> Scalar:
     """Return signed clearance from an AABB to an offset-union region.
 
     Parameters
@@ -361,16 +563,19 @@ def _signed_box_region(box: BoxGeometry, region: _ClusterRegion) -> float:
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Minimum signed clearance to any union member.
     """
 
-    return min(_signed_box_to_inflated_box(box, member, region.radius) for member in region.boxes)
+    return min(
+        (_signed_box_to_inflated_box(box, member, region.radius) for member in region.boxes),
+        key=as_float,
+    )
 
 
 def _segment_box_interval(
     start: torch.Tensor, end: torch.Tensor, center: torch.Tensor, half_extents: torch.Tensor
-) -> Tuple[float, float] | None:
+) -> Tuple[Scalar, Scalar] | None:
     """Clip a segment to an axis-aligned rectangle in parameter space.
 
     Parameters
@@ -383,32 +588,35 @@ def _segment_box_interval(
     Returns
     -------
     tuple[float, float] or None
-        Closed parameter interval within ``[0, 1]``, if nonempty.
+        Closed parameter interval within ``[0, 1]``, if nonempty; live
+        endpoints inside a trace.
     """
 
     direction = end - start
     lower = center - half_extents
     upper = center + half_extents
-    entry = 0.0
-    exit_ = 1.0
+    entry: Scalar = 0.0
+    exit_: Scalar = 1.0
     for axis in range(2):
-        delta = float(direction[axis])
-        if delta == 0.0:
-            if float(start[axis]) < float(lower[axis]) or float(start[axis]) > float(upper[axis]):
+        delta = keep(direction[axis])
+        if as_float(delta) == 0.0:
+            if as_float(start[axis]) < as_float(lower[axis]) or as_float(start[axis]) > as_float(
+                upper[axis]
+            ):
                 return None
             continue
-        first = (float(lower[axis]) - float(start[axis])) / delta
-        second = (float(upper[axis]) - float(start[axis])) / delta
-        entry = max(entry, min(first, second))
-        exit_ = min(exit_, max(first, second))
-        if entry > exit_:
+        first = (keep(lower[axis]) - keep(start[axis])) / delta
+        second = (keep(upper[axis]) - keep(start[axis])) / delta
+        entry = p_max(entry, p_min(first, second))
+        exit_ = p_min(exit_, p_max(first, second))
+        if as_float(entry) > as_float(exit_):
             return None
     return entry, exit_
 
 
 def _segment_circle_interval(
-    start: torch.Tensor, end: torch.Tensor, center: torch.Tensor, radius: float
-) -> Tuple[float, float] | None:
+    start: torch.Tensor, end: torch.Tensor, center: torch.Tensor, radius: Scalar
+) -> Tuple[Scalar, Scalar] | None:
     """Clip a segment to a circle in parameter space.
 
     Parameters
@@ -417,32 +625,39 @@ def _segment_circle_interval(
         Segment endpoints with shape ``[2]``.
     center : torch.Tensor
         Circle center.
-    radius : float
+    radius : float or torch.Tensor
         Nonnegative circle radius.
 
     Returns
     -------
     tuple[float, float] or None
-        Closed parameter interval within ``[0, 1]``, if nonempty.
+        Closed parameter interval within ``[0, 1]``, if nonempty; live
+        endpoints inside a trace.
     """
 
     direction = end - start
     offset = start - center
-    a = float(torch.dot(direction, direction))
-    if a == 0.0:
-        return (0.0, 1.0) if float(torch.dot(offset, offset)) <= radius * radius else None
-    b = 2.0 * float(torch.dot(offset, direction))
-    c = float(torch.dot(offset, offset)) - radius * radius
+    a = keep(torch.dot(direction, direction))
+    if as_float(a) == 0.0:
+        return (0.0, 1.0) if as_float(torch.dot(offset, offset)) <= as_float(radius) ** 2 else None
+    b = 2.0 * keep(torch.dot(offset, direction))
+    c = keep(torch.dot(offset, offset)) - radius * radius
     discriminant = b * b - 4.0 * a * c
-    if discriminant < 0.0:
+    if as_float(discriminant) < 0.0:
         return None
-    root = math.sqrt(max(0.0, discriminant))
-    entry = max(0.0, (-b - root) / (2.0 * a))
-    exit_ = min(1.0, (-b + root) / (2.0 * a))
-    return (entry, exit_) if entry <= exit_ else None
+    if as_float(discriminant) == 0.0:
+        # sqrt backward at exact tangency is infinite; the historical value
+        # there is exactly zero, whose downstream slope is what both interval
+        # endpoints share, so the detached constant is the honest arm.
+        root: Scalar = 0.0
+    else:
+        root = p_sqrt(p_max(0.0, discriminant))
+    entry = p_max(0.0, (-b - root) / (2.0 * a))
+    exit_ = p_min(1.0, (-b + root) / (2.0 * a))
+    return (entry, exit_) if as_float(entry) <= as_float(exit_) else None
 
 
-def _merge_interval_measure(intervals: Sequence[Tuple[float, float]]) -> float:
+def _merge_interval_measure(intervals: Sequence[Tuple[Scalar, Scalar]]) -> Scalar:
     """Return the measure of a union of intervals in ``[0, 1]``.
 
     Parameters
@@ -452,27 +667,54 @@ def _merge_interval_measure(intervals: Sequence[Tuple[float, float]]) -> float:
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Union length in parameter units.
     """
 
     if not intervals:
         return 0.0
-    ordered = sorted(intervals)
-    total = 0.0
+    ordered = sorted(intervals, key=lambda item: (as_float(item[0]), as_float(item[1])))
+    total: Scalar = 0.0
     start, end = ordered[0]
     for next_start, next_end in ordered[1:]:
-        if next_start <= end:
-            end = max(end, next_end)
+        if as_float(next_start) <= as_float(end):
+            end = p_max(end, next_end)
         else:
             total += end - start
             start, end = next_start, next_end
     return total + end - start
 
 
+def _inflated_half_extents(half_extents: torch.Tensor, radius: Scalar, axis: int) -> torch.Tensor:
+    """Inflate one box's half extents by the region radius along one axis.
+
+    Parameters
+    ----------
+    half_extents : torch.Tensor
+        Positive half extents with shape ``[2]``.
+    radius : float or torch.Tensor
+        Offset-union inflation radius.
+    axis : int
+        Inflated axis, zero or one.
+
+    Returns
+    -------
+    torch.Tensor
+        Inflated half extents; the float branch keeps the historical
+        constant-tensor construction, the tensor branch stacks the live
+        radius into the same values.
+    """
+
+    if isinstance(radius, torch.Tensor):
+        offset = (radius, torch.zeros((), dtype=torch.float64))
+        return half_extents + torch.stack(offset if axis == 0 else offset[::-1])
+    values = [radius, 0.0] if axis == 0 else [0.0, radius]
+    return half_extents + torch.tensor(values, dtype=torch.float64)
+
+
 def _segment_region_fraction(
     start: torch.Tensor, end: torch.Tensor, region: _ClusterRegion
-) -> float:
+) -> Scalar:
     """Return the exact arc fraction of one segment inside an offset-OBB union.
 
     Parameters
@@ -484,24 +726,24 @@ def _segment_region_fraction(
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Fraction of the segment covered by the union.
     """
 
-    intervals: List[Tuple[float, float]] = []
+    intervals: List[Tuple[Scalar, Scalar]] = []
     radius = region.radius
     for box in region.boxes:
         horizontal = _segment_box_interval(
             start,
             end,
             box.center,
-            box.half_extents + torch.tensor([radius, 0.0], dtype=torch.float64),
+            _inflated_half_extents(box.half_extents, radius, 0),
         )
         vertical = _segment_box_interval(
             start,
             end,
             box.center,
-            box.half_extents + torch.tensor([0.0, radius], dtype=torch.float64),
+            _inflated_half_extents(box.half_extents, radius, 1),
         )
         if horizontal is not None:
             intervals.append(horizontal)
@@ -519,8 +761,8 @@ def _segment_region_fraction(
 
 
 def _merge_angular_intervals(
-    intervals: Sequence[Tuple[float, float]], full_turn: float
-) -> List[Tuple[float, float]]:
+    intervals: Sequence[Tuple[Scalar, Scalar]], full_turn: float
+) -> List[Tuple[Scalar, Scalar]]:
     """Merge angular intervals already split onto one canonical turn.
 
     Parameters
@@ -533,79 +775,90 @@ def _merge_angular_intervals(
     Returns
     -------
     list[tuple[float, float]]
-        Sorted disjoint covered intervals.
+        Sorted disjoint covered intervals; live endpoints inside a trace.
     """
 
     if not intervals:
         return []
-    ordered = sorted((max(0.0, left), min(full_turn, right)) for left, right in intervals)
+    ordered = sorted(
+        ((p_max(0.0, left), p_min(full_turn, right)) for left, right in intervals),
+        key=lambda item: (as_float(item[0]), as_float(item[1])),
+    )
     merged = [ordered[0]]
     for left, right in ordered[1:]:
         previous_left, previous_right = merged[-1]
-        if left <= previous_right:
-            merged[-1] = (previous_left, max(previous_right, right))
+        if as_float(left) <= as_float(previous_right):
+            merged[-1] = (previous_left, p_max(previous_right, right))
         else:
             merged.append((left, right))
     return merged
 
 
-def _equal_disc_union_area_perimeter(centers: torch.Tensor, radius: float) -> Tuple[float, float]:
+def _equal_disc_union_area_perimeter(
+    centers: torch.Tensor, radius: Scalar
+) -> Tuple[Scalar, Scalar]:
     """Compute exact area and perimeter of an equal-disc union from exposed arcs.
 
     Parameters
     ----------
     centers : torch.Tensor
         Disc centers with shape ``[K, 2]`` and float64 coordinates.
-    radius : float
+    radius : float or torch.Tensor
         Shared positive disc radius.
 
     Returns
     -------
     tuple[float, float]
-        Analytic union area and perimeter.
+        Analytic union area and perimeter; live tensors inside a trace.
     """
 
     full_turn = 2.0 * math.pi
-    area_integral = 0.0
-    perimeter = 0.0
+    area_integral: Scalar = 0.0
+    perimeter: Scalar = 0.0
     for index, center in enumerate(centers):
-        covered: List[Tuple[float, float]] = []
+        covered: List[Tuple[Scalar, Scalar]] = []
         duplicate_covered = False
         for other_index, other in enumerate(centers):
             if other_index == index:
                 continue
             delta = other - center
-            distance = float(torch.linalg.vector_norm(delta))
-            if distance == 0.0:
+            distance = _norm_or_zero(delta)
+            if as_float(distance) == 0.0:
                 if other_index < index:
                     duplicate_covered = True
                     break
                 continue
-            if distance >= 2.0 * radius:
+            if as_float(distance) >= 2.0 * as_float(radius):
                 continue
-            angle = math.atan2(float(delta[1]), float(delta[0])) % full_turn
-            half_width = math.acos(min(1.0, distance / (2.0 * radius)))
+            angle = _p_mod(_p_atan2(keep(delta[1]), keep(delta[0])), full_turn)
+            cosine = p_min(1.0, distance / (2.0 * radius))
+            if as_float(cosine) >= 1.0:
+                # acos has an infinite slope at the clamp boundary; the
+                # historical float value there is exactly acos(1) = 0.
+                half_width: Scalar = math.acos(1.0)
+            else:
+                half_width = _p_acos(cosine)
             left = angle - half_width
             right = angle + half_width
-            if left < 0.0:
+            if as_float(left) < 0.0:
                 covered.extend(((left + full_turn, full_turn), (0.0, right)))
-            elif right > full_turn:
+            elif as_float(right) > full_turn:
                 covered.extend(((left, full_turn), (0.0, right - full_turn)))
             else:
                 covered.append((left, right))
         if duplicate_covered:
             continue
         merged = _merge_angular_intervals(covered, full_turn)
-        exposed: List[Tuple[float, float]] = []
-        cursor = 0.0
+        exposed: List[Tuple[Scalar, Scalar]] = []
+        cursor: Scalar = 0.0
         for left, right in merged:
-            if cursor < left:
+            if as_float(cursor) < as_float(left):
                 exposed.append((cursor, left))
-            cursor = max(cursor, right)
-        if cursor < full_turn:
+            cursor = p_max(cursor, right)
+        if as_float(cursor) < full_turn:
             exposed.append((cursor, full_turn))
-        center_x = float(center[0])
-        center_y = float(center[1])
+        center_x = keep(center[0])
+        center_y = keep(center[1])
         for left, right in exposed:
             width = right - left
             perimeter += radius * width
@@ -613,11 +866,11 @@ def _equal_disc_union_area_perimeter(centers: torch.Tensor, radius: float) -> Tu
                 radius * radius * width
                 + radius
                 * (
-                    center_x * (math.sin(right) - math.sin(left))
-                    - center_y * (math.cos(right) - math.cos(left))
+                    center_x * (_p_sin(right) - _p_sin(left))
+                    - center_y * (_p_cos(right) - _p_cos(left))
                 )
             )
-    return abs(area_integral), perimeter
+    return p_abs(area_integral), perimeter
 
 
 def _region_contains_points(region: _ClusterRegion, points: torch.Tensor) -> torch.Tensor:
@@ -646,7 +899,9 @@ def _region_contains_points(region: _ClusterRegion, points: torch.Tensor) -> tor
     return contained
 
 
-def _region_vertical_intervals(region: _ClusterRegion, x_value: float) -> List[Tuple[float, float]]:
+def _region_vertical_intervals(
+    region: _ClusterRegion, x_value: float
+) -> List[Tuple[Scalar, Scalar]]:
     """Return merged vertical sections of one rounded-box union.
 
     Parameters
@@ -659,37 +914,44 @@ def _region_vertical_intervals(region: _ClusterRegion, x_value: float) -> List[T
     Returns
     -------
     list[tuple[float, float]]
-        Disjoint closed y intervals in increasing order.
+        Disjoint closed y intervals in increasing order; live endpoints
+        inside a trace.
     """
 
-    intervals: List[Tuple[float, float]] = []
+    intervals: List[Tuple[Scalar, Scalar]] = []
     radius = region.radius
     for box in region.boxes:
-        horizontal_excess = max(
-            abs(x_value - float(box.center[0])) - float(box.half_extents[0]),
+        horizontal_excess = p_max(
+            p_abs(x_value - keep(box.center[0])) - float(box.half_extents[0]),
             0.0,
         )
-        if horizontal_excess > radius:
+        if as_float(horizontal_excess) > as_float(radius):
             continue
-        extension = math.sqrt(max(0.0, radius * radius - horizontal_excess**2))
+        squared = p_max(0.0, radius * radius - horizontal_excess**2)
+        if as_float(squared) == 0.0:
+            # sqrt backward at exact tangency is infinite; the historical
+            # float value there is exactly zero.
+            extension: Scalar = 0.0
+        else:
+            extension = p_sqrt(squared)
         intervals.append(
             (
-                float(box.center[1] - box.half_extents[1]) - extension,
-                float(box.center[1] + box.half_extents[1]) + extension,
+                keep(box.center[1] - box.half_extents[1]) - extension,
+                keep(box.center[1] + box.half_extents[1]) + extension,
             )
         )
-    intervals.sort()
-    merged: List[Tuple[float, float]] = []
+    intervals.sort(key=lambda item: (as_float(item[0]), as_float(item[1])))
+    merged: List[Tuple[Scalar, Scalar]] = []
     for lower, upper in intervals:
-        if not merged or lower > merged[-1][1]:
+        if not merged or as_float(lower) > as_float(merged[-1][1]):
             merged.append((lower, upper))
         else:
             previous_lower, previous_upper = merged[-1]
-            merged[-1] = (previous_lower, max(previous_upper, upper))
+            merged[-1] = (previous_lower, p_max(previous_upper, upper))
     return merged
 
 
-def _region_top_at_x(region: _ClusterRegion, x_value: float) -> float:
+def _region_top_at_x(region: _ClusterRegion, x_value: float) -> Scalar:
     """Return the upper boundary of a rounded-box union at one x-coordinate.
 
     Parameters
@@ -701,7 +963,7 @@ def _region_top_at_x(region: _ClusterRegion, x_value: float) -> float:
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Highest region-boundary ordinate at the requested coordinate. When
         the vertical line misses the union (a cluster drawn as separated
         lumps whose robust-core center falls in the gap), the boundary at
@@ -714,17 +976,17 @@ def _region_top_at_x(region: _ClusterRegion, x_value: float) -> float:
     if not intervals and region.boxes:
         candidates = []
         for box in region.boxes:
-            lower = float(box.center[0] - box.half_extents[0]) - region.radius
-            upper = float(box.center[0] + box.half_extents[0]) + region.radius
+            lower = as_float(box.center[0] - box.half_extents[0]) - as_float(region.radius)
+            upper = as_float(box.center[0] + box.half_extents[0]) + as_float(region.radius)
             candidates.append(min(max(x_value, lower), upper))
         nearest = min(candidates, key=lambda value: abs(value - x_value))
         intervals = _region_vertical_intervals(region, nearest)
     if not intervals:
-        return float(region.bounds.center[1] + region.bounds.half_extents[1])
-    return max(upper for _, upper in intervals)
+        return keep(region.bounds.center[1] + region.bounds.half_extents[1])
+    return max((upper for _, upper in intervals), key=as_float)
 
 
-def _signed_top_padding(box: BoxGeometry, region: _ClusterRegion) -> float:
+def _signed_top_padding(box: BoxGeometry, region: _ClusterRegion) -> Scalar:
     """Measure signed inward padding from a label's near edge to the region top.
 
     Parameters
@@ -736,7 +998,7 @@ def _signed_top_padding(box: BoxGeometry, region: _ClusterRegion) -> float:
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Positive inset inside the boundary, zero at contact, and negative outside.
     """
 
@@ -745,7 +1007,7 @@ def _signed_top_padding(box: BoxGeometry, region: _ClusterRegion) -> float:
     return boundary - near_edge
 
 
-def _interval_measure(intervals: Sequence[Tuple[float, float]]) -> float:
+def _interval_measure(intervals: Sequence[Tuple[Scalar, Scalar]]) -> Scalar:
     """Return total length of disjoint intervals.
 
     Parameters
@@ -755,16 +1017,16 @@ def _interval_measure(intervals: Sequence[Tuple[float, float]]) -> float:
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Nonnegative total length.
     """
 
-    return sum(upper - lower for lower, upper in intervals)
+    return p_sum([upper - lower for lower, upper in intervals])
 
 
 def _interval_intersection_measure(
-    left: Sequence[Tuple[float, float]], right: Sequence[Tuple[float, float]]
-) -> float:
+    left: Sequence[Tuple[Scalar, Scalar]], right: Sequence[Tuple[Scalar, Scalar]]
+) -> Scalar:
     """Return the length of the intersection of two interval unions.
 
     Parameters
@@ -774,18 +1036,18 @@ def _interval_intersection_measure(
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Nonnegative intersection length.
     """
 
     left_index = 0
     right_index = 0
-    total = 0.0
+    total: Scalar = 0.0
     while left_index < len(left) and right_index < len(right):
-        lower = max(left[left_index][0], right[right_index][0])
-        upper = min(left[left_index][1], right[right_index][1])
-        total += max(0.0, upper - lower)
-        if left[left_index][1] < right[right_index][1]:
+        lower = p_max(left[left_index][0], right[right_index][0])
+        upper = p_min(left[left_index][1], right[right_index][1])
+        total += p_max(0.0, upper - lower)
+        if as_float(left[left_index][1]) < as_float(right[right_index][1]):
             left_index += 1
         else:
             right_index += 1
@@ -793,17 +1055,22 @@ def _interval_intersection_measure(
 
 
 def _adaptive_simpson(
-    function: Callable[[float], float],
+    function: Callable[[float], Scalar],
     left: float,
     right: float,
     tolerance: float,
     depth: int = 20,
-) -> float:
+) -> Scalar:
     """Integrate one continuous scalar function by deterministic adaptive Simpson.
+
+    The subdivision schedule (panel bounds and refinement decisions) is
+    decided on detached values, exactly as the float path decides it; the
+    integrand values flow live, so the quadrature-weighted combination
+    carries the a.e.-exact gradient of the same closed form.
 
     Parameters
     ----------
-    function : callable[[float], float]
+    function : callable[[float], float or torch.Tensor]
         Continuous integrand.
     left, right : float
         Finite integration bounds.
@@ -814,7 +1081,7 @@ def _adaptive_simpson(
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Deterministic integral estimate.
     """
 
@@ -827,22 +1094,22 @@ def _adaptive_simpson(
     def refine(
         lower: float,
         upper: float,
-        lower_value: float,
-        center_value: float,
-        upper_value: float,
-        estimate: float,
+        lower_value: Scalar,
+        center_value: Scalar,
+        upper_value: Scalar,
+        estimate: Scalar,
         local_tolerance: float,
         remaining_depth: int,
-    ) -> float:
+    ) -> Scalar:
         """Recursively refine one Simpson panel.
 
         Parameters
         ----------
         lower, upper : float
             Panel bounds.
-        lower_value, center_value, upper_value : float
+        lower_value, center_value, upper_value : float or torch.Tensor
             Cached integrand values.
-        estimate : float
+        estimate : float or torch.Tensor
             Parent Simpson estimate.
         local_tolerance : float
             Panel absolute error target.
@@ -851,7 +1118,7 @@ def _adaptive_simpson(
 
         Returns
         -------
-        float
+        float or torch.Tensor
             Refined panel integral.
         """
 
@@ -867,7 +1134,7 @@ def _adaptive_simpson(
             (upper - center) * (center_value + 4.0 * right_center_value + upper_value) / 6.0
         )
         combined = left_estimate + right_estimate
-        if remaining_depth == 0 or abs(combined - estimate) <= 15.0 * local_tolerance:
+        if remaining_depth == 0 or as_float(p_abs(combined - estimate)) <= 15.0 * local_tolerance:
             return combined + (combined - estimate) / 15.0
         return refine(
             lower,
@@ -903,7 +1170,7 @@ def _adaptive_simpson(
 
 def _region_relation_area(
     left: _ClusterRegion, right: _ClusterRegion | None = None
-) -> Tuple[float, float]:
+) -> Tuple[Scalar, Scalar]:
     """Measure rounded-box union area and optional intersection continuously.
 
     Parameters
@@ -922,7 +1189,8 @@ def _region_relation_area(
     -----
     Exact rounded-box vertical sections are integrated between every arc/flat transition.
     Adaptive Simpson refinement targets relative area error below ``1e-10`` without a
-    score-visible raster grid.
+    score-visible raster grid. Breakpoints and refinement are detached decisions;
+    the integrated section lengths flow live.
     """
 
     regions = (left,) if right is None else (left, right)
@@ -932,10 +1200,10 @@ def _region_relation_area(
             for region in regions
             for box in region.boxes
             for offset in (
-                -float(box.half_extents[0]) - region.radius,
+                -float(box.half_extents[0]) - as_float(region.radius),
                 -float(box.half_extents[0]),
                 float(box.half_extents[0]),
-                float(box.half_extents[0]) + region.radius,
+                float(box.half_extents[0]) + as_float(region.radius),
             )
         }
     )
@@ -945,7 +1213,7 @@ def _region_relation_area(
     )
     interval_tolerance = 1e-11 * scale / max(1, len(breakpoints) - 1)
 
-    def left_length(x_value: float) -> float:
+    def left_length(x_value: float) -> Scalar:
         """Return the primary region's vertical union length.
 
         Parameters
@@ -955,21 +1223,23 @@ def _region_relation_area(
 
         Returns
         -------
-        float
+        float or torch.Tensor
             Vertical union length.
         """
 
         return _interval_measure(_region_vertical_intervals(left, x_value))
 
-    area = sum(
-        _adaptive_simpson(left_length, lower, upper, interval_tolerance)
-        for lower, upper in zip(breakpoints[:-1], breakpoints[1:])
-        if upper > lower
+    area = p_sum(
+        [
+            _adaptive_simpson(left_length, lower, upper, interval_tolerance)
+            for lower, upper in zip(breakpoints[:-1], breakpoints[1:])
+            if upper > lower
+        ]
     )
     if right is None:
         return area, 0.0
 
-    def overlap_length(x_value: float) -> float:
+    def overlap_length(x_value: float) -> Scalar:
         """Return the two regions' vertical intersection length.
 
         Parameters
@@ -979,7 +1249,7 @@ def _region_relation_area(
 
         Returns
         -------
-        float
+        float or torch.Tensor
             Vertical intersection length.
         """
 
@@ -988,15 +1258,17 @@ def _region_relation_area(
             _region_vertical_intervals(right, x_value),
         )
 
-    overlap = sum(
-        _adaptive_simpson(overlap_length, lower, upper, interval_tolerance)
-        for lower, upper in zip(breakpoints[:-1], breakpoints[1:])
-        if upper > lower
+    overlap = p_sum(
+        [
+            _adaptive_simpson(overlap_length, lower, upper, interval_tolerance)
+            for lower, upper in zip(breakpoints[:-1], breakpoints[1:])
+            if upper > lower
+        ]
     )
-    return area, min(area, max(0.0, overlap))
+    return area, p_min(area, p_max(0.0, overlap))
 
 
-def _region_depth_outside(child: _ClusterRegion, parent: _ClusterRegion) -> float:
+def _region_depth_outside(child: _ClusterRegion, parent: _ClusterRegion) -> Scalar:
     """Estimate one-sided Hausdorff depth of a child region outside its parent.
 
     Parameters
@@ -1006,7 +1278,7 @@ def _region_depth_outside(child: _ClusterRegion, parent: _ClusterRegion) -> floa
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Maximum positive signed distance among exact rounded-box extremal candidates.
     """
 
@@ -1020,11 +1292,11 @@ def _region_depth_outside(child: _ClusterRegion, parent: _ClusterRegion) -> floa
     for box in child.boxes:
         candidates.extend(box.center + corners * box.half_extents)
         candidates.extend(box.center + directions * (box.half_extents + child.radius))
-    maximum = 0.0
+    maximum: Scalar = 0.0
     for point in candidates:
         query = BoxGeometry(point, torch.zeros(2, dtype=torch.float64), -1)
-        maximum = max(maximum, _signed_box_region(query, parent))
-    return max(0.0, maximum)
+        maximum = p_max(maximum, _signed_box_region(query, parent))
+    return p_max(0.0, maximum)
 
 
 def _cluster_budget(scene: Scene, members: Sequence[int]) -> float:
@@ -1092,54 +1364,53 @@ def U25(scene: Scene) -> FacetResult:
         return na_result("clusters_too_small", {"declared_cluster_count": len(_clusters(scene))})
 
     frame = robust_frame(scene.positions, scene.intrinsic_unit)
-    core_diagonal = 2.0 * float(torch.linalg.vector_norm(frame.half_extents))
+    core_diagonal = 2.0 * keep(torch.linalg.vector_norm(frame.half_extents))
     masses = _node_masses(scene)
-    defects: List[float] = []
+    defects: List[Scalar] = []
     cluster_masses: List[float] = []
-    statistics: Dict[str, object] = {"D_core": core_diagonal, "clusters": {}}
+    statistics: Dict[str, object] = {"D_core": as_float(core_diagonal), "clusters": {}}
     for name, members in clusters.items():
         points = scene.positions[list(members)]
         center = torch.median(points, dim=0).values
-        radii = torch.linalg.vector_norm(points - center, dim=1)
-        radius = float(torch.median(radii))
+        radii = _row_norms_or_zero(points - center)
+        radius = keep(torch.median(radii))
         radius_q90 = float(torch.quantile(radii, 0.9, interpolation="lower"))
         fraction = len(members) / scene.node_count
         diameter = _induced_diameter(scene, members)
         elongation = 1.0 + 0.5 * max(0.0, diameter / math.sqrt(len(members)) - 1.0)
         reference = 0.5 * math.sqrt(fraction) * elongation
-        ratio = radius / max(core_diagonal, torch.finfo(torch.float64).tiny)
-        if ratio <= 0.0:
-            median_defect = 0.0
+        ratio = radius / p_max(core_diagonal, torch.finfo(torch.float64).tiny)
+        if as_float(ratio) <= 0.0:
+            median_defect: Scalar = 0.0
         else:
-            excess = soft_pos(math.log(ratio / (2.0 * reference)))
+            excess = soft_pos(p_log(ratio / (2.0 * reference)))
             median_defect = excess / (1.0 + excess)
 
-        member_defects: List[float] = []
+        member_defects: List[Scalar] = []
         member_masses: List[float] = []
         denominator = 2.0 * reference * core_diagonal
-        for member, member_radius in zip(members, radii.tolist()):
-            if member_radius <= 0.0:
-                member_excess = 0.0
+        member_radii = list(radii) if tracing_active() else radii.tolist()
+        for member, member_radius in zip(members, member_radii):
+            if as_float(member_radius) <= 0.0:
+                member_excess: Scalar = 0.0
             else:
-                member_excess = soft_pos(math.log(member_radius / denominator))
-            member_defects.append(
-                1.0 - float(smoothstep(torch.tensor(1.0 / (1.0 + member_excess))))
-            )
+                member_excess = soft_pos(p_log(member_radius / denominator))
+            member_defects.append(1.0 - _smooth_fade32(1.0 / (1.0 + member_excess)))
             member_masses.append(masses[member])
         tail = global_blend(member_defects, member_masses)
-        full_defect = 1.0 - (1.0 - median_defect) ** 0.7 * (1.0 - tail) ** 0.3
+        full_defect = 1.0 - _pow_or_zero(1.0 - median_defect, 0.7) * _pow_or_zero(1.0 - tail, 0.3)
         defects.append(full_defect)
         cluster_masses.append(sum(masses[member] for member in members))
         statistics["clusters"][name] = {
             "median_center": center.tolist(),
-            "R_c": radius,
+            "R_c": as_float(radius),
             "R_c_q90": radius_q90,
-            "rho_c": ratio,
+            "rho_c": as_float(ratio),
             "f_c": fraction,
             "diameter": diameter,
             "rho_ref": reference,
-            "member_tail": tail,
-            "defect": full_defect,
+            "member_tail": as_float(tail),
+            "defect": as_float(full_defect),
         }
     defect = global_blend(defects, cluster_masses)
     statistics["cluster_count"] = len(defects)
@@ -1156,11 +1427,11 @@ def U26(scene: Scene) -> FacetResult:
         return na_result("insufficient_declared_clusters")
 
     frame = robust_frame(scene.positions, scene.intrinsic_unit)
-    core_diagonal = 2.0 * float(torch.linalg.vector_norm(frame.half_extents))
+    core_diagonal = 2.0 * keep(torch.linalg.vector_norm(frame.half_extents))
     masses = _node_masses(scene)
-    incidence_defects: List[float] = []
+    incidence_defects: List[Scalar] = []
     incidence_masses: List[float] = []
-    incidence_by_node_cluster: Dict[Tuple[int, str], float] = {}
+    incidence_by_node_cluster: Dict[Tuple[int, str], Scalar] = {}
     memberships: Dict[int, Set[str]] = {node: set() for node in range(scene.node_count)}
     for name, members in clusters.items():
         member_set = set(members)
@@ -1170,24 +1441,25 @@ def U26(scene: Scene) -> FacetResult:
         for node in members:
             memberships[node].add(name)
             own_distances = [
-                float(torch.linalg.vector_norm(scene.positions[node] - scene.positions[other]))
+                _norm_or_zero(scene.positions[node] - scene.positions[other])
                 for other in members
                 if other != node
             ]
             own_q = _lower_quantile(own_distances, 0.75)
             foreign_distance = min(
                 (
-                    float(torch.linalg.vector_norm(scene.positions[node] - scene.positions[other]))
+                    _norm_or_zero(scene.positions[node] - scene.positions[other])
                     for other in foreign
                 ),
                 default=core_diagonal,
+                key=as_float,
             )
-            margin = (foreign_distance - own_q) / max(core_diagonal, 1e-12)
-            defect = 1.0 - float(smoothstep(torch.tensor((margin + target) / (2.0 * target))))
+            margin = (foreign_distance - own_q) / p_max(core_diagonal, 1e-12)
+            defect = 1.0 - _smooth_fade32((margin + target) / (2.0 * target))
             incidence_defects.append(defect)
             incidence_masses.append(masses[node])
             incidence_by_node_cluster[(node, name)] = defect
-    values: Dict[str, float] = {
+    values: Dict[str, Scalar] = {
         "U26.i": global_blend(incidence_defects, incidence_masses),
     }
 
@@ -1213,7 +1485,7 @@ def U26(scene: Scene) -> FacetResult:
 
         return min(memberships[node], key=lambda name: (len(clusters[name]), name))
 
-    strata: Dict[Tuple[Tuple[int, int], Tuple[int, int]], Dict[str, List[float]]] = {}
+    strata: Dict[Tuple[Tuple[int, int], Tuple[int, int]], Dict[str, List[Scalar]]] = {}
     clustered = [node for node, names in memberships.items() if names]
     for offset, left in enumerate(clustered):
         for right in clustered[offset + 1 :]:
@@ -1241,12 +1513,12 @@ def U26(scene: Scene) -> FacetResult:
                 )
             key = (tuple(sorted((degree_buckets[left], degree_buckets[right]))), size_pair)
             record = strata.setdefault(key, {"same": [], "cross": [], "fractions": []})
-            distance = float(
-                torch.linalg.vector_norm(scene.positions[left] - scene.positions[right])
-            ) / max(core_diagonal, 1e-12)
+            distance = _norm_or_zero(scene.positions[left] - scene.positions[right]) / p_max(
+                core_diagonal, 1e-12
+            )
             record[arm].append(distance)
             record["fractions"].append(sum(fractions) / 2.0)
-    control_defects: List[float] = []
+    control_defects: List[Scalar] = []
     control_weights: List[float] = []
     for record in strata.values():
         same = record["same"]
@@ -1254,22 +1526,23 @@ def U26(scene: Scene) -> FacetResult:
         if len(same) < 20 or len(cross) < 20:
             continue
         contrast = _lower_quantile(cross, 0.5) - _lower_quantile(same, 0.5)
-        fraction_bar = sum(record["fractions"]) / len(record["fractions"])
+        fraction_bar = sum(as_float(item) for item in record["fractions"]) / len(
+            record["fractions"]
+        )
         control_defects.append(
-            1.0
-            - float(
-                smoothstep(torch.tensor(contrast / (0.10 * math.sqrt(max(fraction_bar, 1e-12)))))
-            )
+            1.0 - _smooth_fade32(contrast / (0.10 * math.sqrt(max(fraction_bar, 1e-12))))
         )
         control_weights.append(float(len(same) + len(cross)))
     if control_defects:
         weight_total = sum(control_weights)
-        values["U26.ii"] = sum(
-            defect * weight / weight_total
-            for defect, weight in zip(control_defects, control_weights)
+        values["U26.ii"] = p_sum(
+            [
+                defect * weight / weight_total
+                for defect, weight in zip(control_defects, control_weights)
+            ]
         )
 
-    boundary_defects: List[float] = []
+    boundary_defects: List[Scalar] = []
     boundary_masses: List[float] = []
     for node, name in incidence_by_node_cluster:
         member_set = set(clusters[name])
@@ -1291,7 +1564,7 @@ def U26(scene: Scene) -> FacetResult:
         "U26",
         values,
         {
-            "D_core": core_diagonal,
+            "D_core": as_float(core_diagonal),
             "incidence_count": len(incidence_defects),
             "matched_stratum_count": len(control_defects),
             "boundary_incidence_count": len(boundary_defects),
@@ -1327,11 +1600,11 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
     if not member_clusters:
         return na_result("cluster_too_small_for_region")
     regions = _regions(scene)
-    node_intrusions_by_grid: List[List[float]] = [[] for _ in range(12)]
+    node_intrusions_by_grid: List[List[Scalar]] = [[] for _ in range(12)]
     node_intrusion_masses: List[float] = []
-    member_outside: List[float] = []
+    member_outside: List[Scalar] = []
     member_masses: List[float] = []
-    route_intrusions: List[float] = []
+    route_intrusions: List[Scalar] = []
     masses = _node_masses(scene)
     cluster_masses = {
         name: sum(masses[member] for member in members) for name, members in member_clusters.items()
@@ -1356,11 +1629,9 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
         for node in scene.node_boxes:
             if node.owner in member_set:
                 continue
-            penetration = max(0.0, -_signed_box_region(node, region))
-            absolute = 1.0 - math.exp(-penetration / (0.25 * scene.intrinsic_unit))
-            excess = 1.0 - float(
-                smoothstep(torch.tensor(1.0 - penetration / budget, dtype=torch.float64))
-            )
+            penetration = p_max(0.0, -_signed_box_region(node, region))
+            absolute = 1.0 - p_exp(-penetration / (0.25 * scene.intrinsic_unit))
+            excess = 1.0 - _smooth_fade(1.0 - penetration / budget)
             for grid_index, (alpha_clear, alpha_high) in enumerate(grid):
                 alpha = alpha_clear * (1.0 - floor_blend) + (alpha_clear * floor_blend * alpha_high)
                 node_intrusions_by_grid[grid_index].append(
@@ -1376,19 +1647,18 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             source, target = scene.graph.edges[route.edge_index]
             if source in member_set or target in member_set:
                 continue
-            lengths = torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1)
-            total_length = float(torch.sum(lengths))
-            if total_length == 0.0:
+            lengths = _row_norms_or_zero(route.points[1:] - route.points[:-1])
+            total_length = keep(torch.sum(lengths))
+            if as_float(total_length) == 0.0:
                 continue
-            inside_length = 0.0
-            for index, segment_length in enumerate(lengths.tolist()):
+            inside_length: Scalar = 0.0
+            segment_lengths = list(lengths) if tracing_active() else lengths.tolist()
+            for index, segment_length in enumerate(segment_lengths):
                 inside_length += segment_length * _segment_region_fraction(
                     route.points[index], route.points[index + 1], region
                 )
             ratio = inside_length / total_length
-            route_intrusions.append(
-                1.0 - float(smoothstep(torch.tensor(1.0 - ratio / 0.25, dtype=torch.float64)))
-            )
+            route_intrusions.append(1.0 - _smooth_fade(1.0 - ratio / 0.25))
 
     for name, members in member_clusters.items():
         region = regions[name]
@@ -1397,18 +1667,8 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             if not others:
                 continue
             leave_one_out = _ClusterRegion(others, region.radius, region.bounds)
-            outside = max(0.0, _signed_box_region(scene.node_boxes[member], leave_one_out))
-            member_outside.append(
-                1.0
-                - float(
-                    smoothstep(
-                        torch.tensor(
-                            1.0 - outside / (2.0 * scene.intrinsic_unit),
-                            dtype=torch.float64,
-                        )
-                    )
-                )
-            )
+            outside = p_max(0.0, _signed_box_region(scene.node_boxes[member], leave_one_out))
+            member_outside.append(1.0 - _smooth_fade(1.0 - outside / (2.0 * scene.intrinsic_unit)))
             member_masses.append(masses[member] * cluster_masses[name])
 
     member_value = global_blend(member_outside, member_masses) if member_outside else None
@@ -1422,26 +1682,28 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
     ]
     route_value = global_blend(route_intrusions, route_weights) if route_intrusions else None
     grid_values: List[float] = []
-    grid_subterms: List[Dict[str, float]] = []
+    grid_rows: List[Tuple[Scalar, Dict[str, Scalar]]] = []
     for intrusion_values in node_intrusions_by_grid:
-        values: Dict[str, float] = {}
+        values: Dict[str, Scalar] = {}
         if intrusion_values:
             values["U27.i"] = global_blend(intrusion_values, node_intrusion_masses)
         if member_value is not None:
             values["U27.ii"] = member_value
         if route_value is not None:
             values["U27.iii"] = route_value
-        result = mean_result("U27", values)
-        if result.value is not None:
-            grid_values.append(result.value)
-            grid_subterms.append(dict(result.subterms))
+        # The row composition runs unpublished per grid row; only the
+        # selected row reaches value_result (and, in a trace, the buffer).
+        row_value = compose_facet_rows("U27", values)
+        if row_value is not None:
+            grid_values.append(as_float(row_value))
+            grid_rows.append((row_value, values))
     if not grid_values:
         return na_result("no_foreign_nodes")
     upper_index = max(range(len(grid_values)), key=grid_values.__getitem__)
     raw = {
         "grid_envelope": (min(grid_values), max(grid_values)),
         "grid_values": tuple(grid_values),
-        "upper_subterms": grid_subterms[upper_index],
+        "upper_subterms": {key: as_float(item) for key, item in grid_rows[upper_index][1].items()},
         "foreign_incidence_count": len(node_intrusion_masses),
         "member_incidence_count": len(member_outside),
         "route_incidence_count": len(route_intrusions),
@@ -1454,7 +1716,8 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             "alpha_grid_name": ALPHA_GRID[selected_offset][0],
         }
     )
-    return value_result(grid_values[selected_offset], grid_subterms[selected_offset], raw)
+    selected_value, selected_subterms = grid_rows[selected_offset]
+    return value_result(selected_value, selected_subterms, raw)
 
 
 def U28(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
@@ -1495,11 +1758,11 @@ def U28(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
     regions = _regions(scene)
     masses = _node_masses(scene)
     area_cache = {name: _region_relation_area(region)[0] for name, region in regions.items()}
-    containment_by_grid: List[List[float]] = [[] for _ in range(12)]
+    containment_by_grid: List[List[Scalar]] = [[] for _ in range(12)]
     containment_masses: List[float] = []
-    sibling_overlap: List[float] = []
+    sibling_overlap: List[Scalar] = []
     sibling_masses: List[float] = []
-    size_relation: List[float] = []
+    size_relation: List[Scalar] = []
     size_masses: List[float] = []
     children_by_parent: Dict[str, list[str]] = {}
     for child, parent in scene.graph.cluster_parents.items():
@@ -1510,10 +1773,10 @@ def U28(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
         area_child = area_cache[child]
         area_parent = area_cache[parent]
         _, overlap_with_parent = _region_relation_area(regions[child], regions[parent])
-        escaped = max(0.0, 1.0 - overlap_with_parent / max(area_child, 1e-12))
+        escaped = p_max(0.0, 1.0 - overlap_with_parent / p_max(area_child, 1e-12))
         depth = _region_depth_outside(regions[child], regions[parent])
-        absolute = 1.0 - math.exp(-depth / (0.25 * scene.intrinsic_unit))
-        excess = 1.0 - float(smoothstep(torch.tensor(1.0 - escaped / 0.10, dtype=torch.float64)))
+        absolute = 1.0 - p_exp(-depth / (0.25 * scene.intrinsic_unit))
+        excess = 1.0 - _smooth_fade(1.0 - escaped / 0.10)
         for index, alpha in enumerate(
             _alpha_grid_for_budget(scene, _cluster_budget(scene, canonical[child]))
         ):
@@ -1521,13 +1784,8 @@ def U28(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
         child_mass = sum(masses[node] for node in canonical[child])
         parent_mass = sum(masses[node] for node in canonical[parent])
         containment_masses.append(child_mass)
-        residual = math.log(area_child / area_parent) - math.log(child_mass / parent_mass)
-        size_relation.append(
-            1.0
-            - float(
-                smoothstep(torch.tensor(1.0 - abs(residual) / math.log(3.0), dtype=torch.float64))
-            )
-        )
+        residual = p_log(area_child / area_parent) - math.log(child_mass / parent_mass)
+        size_relation.append(1.0 - _smooth_fade(1.0 - p_abs(residual) / math.log(3.0)))
         size_masses.append(child_mass)
         children_by_parent.setdefault(parent, []).append(child)
     for children in children_by_parent.values():
@@ -1536,11 +1794,8 @@ def U28(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 left_area = area_cache[left]
                 right_area = area_cache[right]
                 _, overlap_area = _region_relation_area(regions[left], regions[right])
-                fraction = overlap_area / max(min(left_area, right_area), 1e-12)
-                sibling_overlap.append(
-                    1.0
-                    - float(smoothstep(torch.tensor(1.0 - fraction / 0.15, dtype=torch.float64)))
-                )
+                fraction = overlap_area / p_max(p_min(left_area, right_area), 1e-12)
+                sibling_overlap.append(1.0 - _smooth_fade(1.0 - fraction / 0.15))
                 sibling_masses.append(
                     min(
                         sum(masses[node] for node in canonical[left]),
@@ -1552,27 +1807,29 @@ def U28(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
     sibling_value = global_blend(sibling_overlap, sibling_masses) if sibling_overlap else None
     size_value = global_blend(size_relation, size_masses) if size_relation else None
     grid_values: List[float] = []
-    grid_subterms: List[Dict[str, float]] = []
+    grid_rows: List[Tuple[Scalar, Dict[str, Scalar]]] = []
     for containment in containment_by_grid:
-        values: Dict[str, float] = {}
+        values: Dict[str, Scalar] = {}
         if containment:
             values["U28.i"] = global_blend(containment, containment_masses)
         if sibling_value is not None:
             values["U28.ii"] = sibling_value
         if size_value is not None:
             values["U28.iii"] = size_value
-        result = mean_result("U28", values)
-        if result.value is not None:
-            grid_values.append(result.value)
-            grid_subterms.append(dict(result.subterms))
+        # The row composition runs unpublished per grid row; only the
+        # selected row reaches value_result (and, in a trace, the buffer).
+        row_value = compose_facet_rows("U28", values)
+        if row_value is not None:
+            grid_values.append(as_float(row_value))
+            grid_rows.append((row_value, values))
     upper_index = max(range(len(grid_values)), key=grid_values.__getitem__)
     raw = {
         "grid_envelope": (min(grid_values), max(grid_values)),
         "grid_values": tuple(grid_values),
-        "upper_subterms": grid_subterms[upper_index],
+        "upper_subterms": {key: as_float(item) for key, item in grid_rows[upper_index][1].items()},
         "parent_child_count": len(size_relation),
         "sibling_pair_count": len(sibling_overlap),
-        "region_areas": area_cache,
+        "region_areas": {name: as_float(area) for name, area in area_cache.items()},
     }
     if selected_offset is None:
         return na_result("alpha_grid_unselected", raw)
@@ -1582,7 +1839,8 @@ def U28(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             "alpha_grid_name": ALPHA_GRID[selected_offset][0],
         }
     )
-    return value_result(grid_values[selected_offset], grid_subterms[selected_offset], raw)
+    selected_value, selected_subterms = grid_rows[selected_offset]
+    return value_result(selected_value, selected_subterms, raw)
 
 
 def U29(scene: Scene) -> FacetResult:
@@ -1596,29 +1854,29 @@ def U29(scene: Scene) -> FacetResult:
             "clusters_too_small_for_shape", {"declared_cluster_count": len(_clusters(scene))}
         )
     masses = _node_masses(scene)
-    defects: List[float] = []
+    defects: List[Scalar] = []
     cluster_masses: List[float] = []
     statistics: Dict[str, object] = {"clusters": {}}
     for name, members in clusters.items():
         spacing = _cluster_spacing(scene, members)
-        radius = max(spacing, 0.05 * scene.intrinsic_unit)
+        radius = p_max(spacing, 0.05 * scene.intrinsic_unit)
         centers = scene.positions[list(members)]
         area, perimeter = _equal_disc_union_area_perimeter(centers, radius)
-        quotient = perimeter * perimeter / (4.0 * math.pi * max(area, 1e-300))
+        quotient = perimeter * perimeter / (4.0 * math.pi * p_max(area, 1e-300))
         diameter = _induced_diameter(scene, members)
         reference = 1.0 + diameter / math.sqrt(len(members))
-        excess = soft_pos(math.log(quotient / (1.5 * reference)))
+        excess = soft_pos(p_log(quotient / (1.5 * reference)))
         defect = excess / (1.0 + excess)
         defects.append(defect)
         cluster_masses.append(sum(masses[member] for member in members))
         statistics["clusters"][name] = {
-            "area": area,
-            "perimeter": perimeter,
-            "Q": quotient,
+            "area": as_float(area),
+            "perimeter": as_float(perimeter),
+            "Q": as_float(quotient),
             "Q_ref": reference,
             "diameter": diameter,
-            "radius": radius,
-            "defect": defect,
+            "radius": as_float(radius),
+            "defect": as_float(defect),
         }
     value = global_blend(defects, cluster_masses)
     statistics["cluster_count"] = len(defects)
@@ -1657,10 +1915,10 @@ def U30(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
     for name in labels:
         label_masses[name] = sum(masses[node] for node in clusters[name])
 
-    association: List[float] = []
+    association: List[Scalar] = []
     association_masses: List[float] = []
-    padding_by_grid: List[List[float]] = [[] for _ in range(12)]
-    occlusion_by_grid: List[List[float]] = [[] for _ in range(12)]
+    padding_by_grid: List[List[Scalar]] = [[] for _ in range(12)]
+    occlusion_by_grid: List[List[Scalar]] = [[] for _ in range(12)]
     all_masses: List[float] = []
     for name, label in labels.items():
         region = regions[name]
@@ -1673,24 +1931,15 @@ def U30(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             if other_name != name
         ]
         if foreign_clearances:
-            margin = (min(foreign_clearances) - own_clearance) / budget
-            association.append(
-                1.0 - float(smoothstep(torch.tensor((margin + 1.0) / 2.0, dtype=torch.float64)))
-            )
+            margin = (min(foreign_clearances, key=as_float) - own_clearance) / budget
+            association.append(1.0 - _smooth_fade((margin + 1.0) / 2.0))
             association_masses.append(label_masses[name])
         pad = _signed_top_padding(label, region)
         pad_target = _U30_PAD_TARGET_U * scene.intrinsic_unit
-        deviation = abs(pad - pad_target)
-        absolute = 1.0 - math.exp(-max(0.0, own_clearance) / (0.25 * scene.intrinsic_unit))
-        excess = 1.0 - float(
-            smoothstep(
-                torch.tensor(
-                    1.0 - deviation / pad_target,
-                    dtype=torch.float64,
-                )
-            )
-        )
-        obstacle_defects_by_grid: List[List[float]] = [[] for _ in range(12)]
+        deviation = p_abs(pad - pad_target)
+        absolute = 1.0 - p_exp(-p_max(0.0, own_clearance) / (0.25 * scene.intrinsic_unit))
+        excess = 1.0 - _smooth_fade(1.0 - deviation / pad_target)
+        obstacle_defects_by_grid: List[List[Scalar]] = [[] for _ in range(12)]
         label_area = float(4.0 * torch.prod(label.half_extents))
         obstacles = [(box, False) for box in scene.node_boxes]
         obstacles.extend((box, False) for box in scene.node_label_boxes)
@@ -1703,13 +1952,11 @@ def U30(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 float(4.0 * torch.prod(label.half_extents)),
                 float(4.0 * torch.prod(obstacle.half_extents)),
             )
-            absolute_occlusion = 1.0 - math.exp(
+            absolute_occlusion = 1.0 - p_exp(
                 -overlap_area / (0.05 * scene.intrinsic_unit * scene.intrinsic_unit)
             )
-            excess_occlusion = (
-                1.0
-                if signed <= 0.0
-                else 1.0 - float(smoothstep(torch.tensor(signed / budget, dtype=torch.float64)))
+            excess_occlusion: Scalar = (
+                1.0 if as_float(signed) <= 0.0 else 1.0 - _smooth_fade(signed / budget)
             )
             for grid_index, alpha in enumerate(alpha_grid):
                 pair_defect = alpha * absolute_occlusion + (1.0 - alpha) * excess_occlusion
@@ -1728,18 +1975,19 @@ def U30(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 else scene.style.route_stroke_width * scene.style.coordinate_scale
             )
             centerline_clearance = min(
-                _box_segment_clearance(label, start, end)
-                for start, end in zip(route.points[:-1], route.points[1:])
+                (
+                    _box_segment_clearance(label, start, end)
+                    for start, end in zip(route.points[:-1], route.points[1:])
+                ),
+                key=as_float,
             )
             signed = centerline_clearance - width / 2.0
             overlap_area = _route_box_overlap_area(route.points, label, width)
-            absolute_occlusion = 1.0 - math.exp(
+            absolute_occlusion = 1.0 - p_exp(
                 -overlap_area / (0.05 * scene.intrinsic_unit * scene.intrinsic_unit)
             )
             excess_occlusion = (
-                1.0
-                if signed <= 0.0
-                else 1.0 - float(smoothstep(torch.tensor(signed / budget, dtype=torch.float64)))
+                1.0 if as_float(signed) <= 0.0 else 1.0 - _smooth_fade(signed / budget)
             )
             for grid_index, alpha in enumerate(alpha_grid):
                 pair_defect = alpha * absolute_occlusion + (1.0 - alpha) * excess_occlusion
@@ -1753,28 +2001,30 @@ def U30(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 )
         for grid_index, alpha in enumerate(alpha_grid):
             padding_by_grid[grid_index].append(alpha * absolute + (1.0 - alpha) * excess)
-            survival = math.prod(1.0 - defect for defect in obstacle_defects_by_grid[grid_index])
+            survival = _p_prod([1.0 - defect for defect in obstacle_defects_by_grid[grid_index]])
             occlusion_by_grid[grid_index].append(1.0 - survival)
         all_masses.append(label_masses[name])
 
     association_value = global_blend(association, association_masses) if association else None
     grid_values: List[float] = []
-    grid_subterms: List[Dict[str, float]] = []
+    grid_rows: List[Tuple[Scalar, Dict[str, Scalar]]] = []
     for padding, occlusion in zip(padding_by_grid, occlusion_by_grid):
-        values: Dict[str, float] = {}
+        values: Dict[str, Scalar] = {}
         if association_value is not None:
             values["U30.i"] = association_value
         values["U30.ii"] = global_blend(padding, all_masses)
         values["U30.iii"] = global_blend(occlusion, all_masses)
-        result = mean_result("U30", values)
-        if result.value is not None:
-            grid_values.append(result.value)
-            grid_subterms.append(dict(result.subterms))
+        # The row composition runs unpublished per grid row; only the
+        # selected row reaches value_result (and, in a trace, the buffer).
+        row_value = compose_facet_rows("U30", values)
+        if row_value is not None:
+            grid_values.append(as_float(row_value))
+            grid_rows.append((row_value, values))
     upper_index = max(range(len(grid_values)), key=grid_values.__getitem__)
     raw = {
         "grid_envelope": (min(grid_values), max(grid_values)),
         "grid_values": tuple(grid_values),
-        "upper_subterms": grid_subterms[upper_index],
+        "upper_subterms": {key: as_float(item) for key, item in grid_rows[upper_index][1].items()},
         "label_count": len(labels),
         "derived_label_boxes": labels,
     }
@@ -1786,4 +2036,5 @@ def U30(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             "alpha_grid_name": ALPHA_GRID[selected_offset][0],
         }
     )
-    return value_result(grid_values[selected_offset], grid_subterms[selected_offset], raw)
+    selected_value, selected_subterms = grid_rows[selected_offset]
+    return value_result(selected_value, selected_subterms, raw)
