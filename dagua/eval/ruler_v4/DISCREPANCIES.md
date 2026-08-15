@@ -84,3 +84,10 @@ the production port; none of the entries below overrides a contract.
     current ingestion schema because a derived straight chord cannot distinguish them.
     They are typed `MISSING_REQUIRED_PRIMITIVE`; admitting default render-truth routes for
     those graph classes requires a route-schema extension.
+19. `STYLECONTRACT_FAIRFIELD.md` field 6 places a cluster label at the region top above
+    the robust-core center x but does not define the region top when that vertical line
+    misses the region entirely (a cluster drawn as separated lumps with the core center
+    in the gap). Production evaluates the boundary at the nearest covered x, falling back
+    to the region-bounds top; both fallbacks are input-only functions of the derived
+    region, so scattered clusters ingest and are scored (and punished by U29/U30) rather
+    than aborting the scene.

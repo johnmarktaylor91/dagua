@@ -701,17 +701,25 @@ def _region_top_at_x(region: _ClusterRegion, x_value: float) -> float:
     Returns
     -------
     float
-        Highest region-boundary ordinate at the requested coordinate.
-
-    Raises
-    ------
-    ValueError
-        If the requested vertical line does not intersect the region.
+        Highest region-boundary ordinate at the requested coordinate. When
+        the vertical line misses the union (a cluster drawn as separated
+        lumps whose robust-core center falls in the gap), the boundary at
+        the nearest covered x is used, else the top of the region bounds.
+        Both fallbacks are input-only: they read the same derived region
+        every caller already holds, never the drawing being judged.
     """
 
     intervals = _region_vertical_intervals(region, x_value)
+    if not intervals and region.boxes:
+        candidates = []
+        for box in region.boxes:
+            lower = float(box.center[0] - box.half_extents[0]) - region.radius
+            upper = float(box.center[0] + box.half_extents[0]) + region.radius
+            candidates.append(min(max(x_value, lower), upper))
+        nearest = min(candidates, key=lambda value: abs(value - x_value))
+        intervals = _region_vertical_intervals(region, nearest)
     if not intervals:
-        raise ValueError("cluster robust-core center does not intersect its derived region")
+        return float(region.bounds.center[1] + region.bounds.half_extents[1])
     return max(upper for _, upper in intervals)
 
 
