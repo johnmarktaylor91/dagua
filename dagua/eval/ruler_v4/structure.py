@@ -1322,7 +1322,11 @@ def U22(scene: Scene) -> FacetResult:
         cross = torch.tensor([-axis[1], axis[0]], dtype=torch.float64)
         axis_extent = robust_projection(scene.positions @ axis, scene.intrinsic_unit)
         cross_extent = robust_projection(scene.positions @ cross, scene.intrinsic_unit)
-        observed = axis_extent.half_extent / cross_extent.half_extent
+        # A_obs is breadth over depth: the sec 6 target max_layer_width /
+        # n_layers pairs "40 nodes in 12 layers" with "SHOULD draw wide"
+        # (> 1 means wider than deep), so the observed ratio must put the
+        # cross-axis (breadth) extent in the numerator.
+        observed = cross_extent.half_extent / axis_extent.half_extent
         floor_bound = axis_extent.floor_bound or cross_extent.floor_bound
         if ranks is not None:
             rank_tensor = torch.tensor(ranks, dtype=torch.long)
