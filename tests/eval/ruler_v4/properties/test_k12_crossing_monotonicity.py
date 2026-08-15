@@ -83,9 +83,14 @@ def _certified_planar_scene(bowtie: bool):
 
 
 def test_combined_crossing_and_face_metamorph_strictly_worsens_composite() -> None:
-    """5.5 r3 combined K12 metamorph: a crossing on a certified-planar row
-    must worsen the crossing-plus-face composite (the exchange-rate disease's
-    regression test -- face relief may never pay for a priced crossing)."""
+    """Combined applicability: a crossing on a certified-planar row worsens
+    the crossing-plus-face composite when BOTH facets degrade together.
+
+    On this bowtie fixture U41 worsens alongside U07, so a monotonicity
+    inversion in either facet fails the assertion -- but the 5.5 r3
+    exchange-rate disease (face relief paying for a priced crossing) needs a
+    fixture where the added crossing genuinely REDUCES face debt, which this
+    is not (DISCREPANCIES entry 37)."""
 
     from dagua.eval.ruler_v4.packing import U41
     from dagua.eval.ruler_v4.scene import ResultState
