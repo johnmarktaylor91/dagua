@@ -1,5 +1,16 @@
 """RULER V4 facet, composition, and ordinal-headline primitives."""
 
+from dagua.eval.ruler_v4.certification import (
+    CertifiedCompositionInterval,
+    CertifiedInterval,
+    GradientSanityResult,
+    RankFidelityResult,
+    certify_gradient_sanity,
+    certify_rank_fidelity,
+    certify_scene_batch,
+    compose_certified_intervals,
+    exact_term_intervals,
+)
 from dagua.eval.ruler_v4.composition import (
     ComparisonResult,
     ComparisonVerdict,
@@ -12,6 +23,16 @@ from dagua.eval.ruler_v4.composition import (
 )
 from dagua.eval.ruler_v4.headline import HeadlineProfile, HeadlineResult, ordinal_headline
 from dagua.eval.ruler_v4.ingestion import ingest, ingest_record, ingest_temporal
+from dagua.eval.ruler_v4.racing import (
+    EliminationRecord,
+    EliminationRule,
+    PairedDifferenceCertificate,
+    PairedTermRegion,
+    RaceCandidate,
+    RaceResult,
+    certify_paired_difference,
+    race_candidates,
+)
 from dagua.eval.ruler_v4.registry import FACET_FUNCTIONS, evaluate_facet, validate_registry
 from dagua.eval.ruler_v4.scene import (
     DrawingScene,
@@ -39,6 +60,15 @@ from dagua.eval.ruler_v4.score import (
     score_scene,
     validate_parameter_provenance,
 )
+from dagua.eval.ruler_v4.surrogate import (
+    CompilationRule,
+    CompiledSurrogateManifest,
+    SoftScoreResult,
+    SoftTermResult,
+    SurrogateTermTrace,
+    compile_surrogate_manifest,
+    score_v4_soft,
+)
 from dagua.eval.ruler_v4.weight_table import (
     DofAccount,
     ParameterProvenance,
@@ -50,15 +80,22 @@ from dagua.eval.ruler_v4.weight_table import (
 __all__ = [
     "ComparisonResult",
     "ComparisonVerdict",
+    "CompilationRule",
+    "CompiledSurrogateManifest",
+    "CertifiedCompositionInterval",
+    "CertifiedInterval",
     "CompositionFamily",
     "CompositionProfile",
     "CompositionResult",
     "DofAccount",
     "DrawingScene",
+    "EliminationRecord",
+    "EliminationRule",
     "FACET_FUNCTIONS",
     "FacetBreakdown",
     "FacetResult",
     "GraphSemantics",
+    "GradientSanityResult",
     "HeadlineProfile",
     "HeadlineResult",
     "InvalidScene",
@@ -66,13 +103,21 @@ __all__ = [
     "ObservationProfile",
     "OutputType",
     "ParameterProvenance",
+    "PairedDifferenceCertificate",
+    "PairedTermRegion",
     "PriorMassDisclosure",
+    "RaceCandidate",
+    "RaceResult",
+    "RankFidelityResult",
     "Route",
     "Scene",
     "ScoreResult",
     "ScoringProfiles",
     "StyleContract",
+    "SoftScoreResult",
+    "SoftTermResult",
     "SubtermWeight",
+    "SurrogateTermTrace",
     "TemporalScene",
     "TemporalTransition",
     "TypeMMeasurement",
@@ -82,14 +127,23 @@ __all__ = [
     "ValidTemporalScene",
     "WeightTable",
     "compare_with_event_margin",
+    "certify_gradient_sanity",
+    "certify_paired_difference",
+    "certify_rank_fidelity",
+    "certify_scene_batch",
+    "compile_surrogate_manifest",
     "compose",
+    "compose_certified_intervals",
     "evaluate_facet",
+    "exact_term_intervals",
     "ingest",
     "ingest_record",
     "ingest_temporal",
     "ordinal_headline",
+    "race_candidates",
     "score",
     "score_scene",
+    "score_v4_soft",
     "validate_parameter_provenance",
     "validate_registry",
 ]
