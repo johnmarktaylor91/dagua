@@ -19,6 +19,7 @@ from dagua.eval.ruler_v4.scene import (
     DrawingScene,
     GraphSemantics,
     ObservationProfile,
+    ResultState,
     Route,
     Scene,
     StyleContract,
@@ -110,3 +111,34 @@ def test_u20a_exact_declared_axis_column_scores_zero() -> None:
     facet = U20a(_node_scene(positions, ranks=tuple(range(6)), flow_axis=(0.0, 1.0)))
     assert facet.subterms["U20a.ii"] == pytest.approx(0.0, abs=0.0)
     assert facet.value == pytest.approx(0.0, abs=0.0)
+
+
+# --- P4REVERIFY3_FABLE blocker 3: a declared cluster drawn as separated ---
+# lumps must ingest and be scored (and punished), never abort the scene.
+
+
+def test_scattered_cluster_scene_ingests_and_every_facet_evaluates() -> None:
+    """A two-lump cluster whose core center misses the region stays scorable."""
+
+    from dagua.eval.ruler_v4 import FACET_FUNCTIONS, evaluate_facet
+
+    points = [[float(index % 5), float(index // 5)] for index in range(15)]
+    points += [[100.0 + float(index % 5), float(index // 5)] for index in range(15)]
+    positions = torch.tensor(points, dtype=torch.float64)
+    graph = GraphSemantics(
+        tuple(f"n{index}" for index in range(30)),
+        (),
+        clusters={"lump": tuple(range(30))},
+    )
+    result = ingest(
+        graph,
+        DrawingScene(positions),
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes", "cluster_labels"})),
+    )
+    assert isinstance(result, ValidScene)
+    for facet_id in sorted(FACET_FUNCTIONS):
+        evaluate_facet(facet_id, result.scene)
+    punished = evaluate_facet("U30", result.scene, alpha_grid_index=1)
+    assert punished.state is ResultState.VALUE
+    assert punished.value is not None and punished.value > 0.0
