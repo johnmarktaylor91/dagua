@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dagua.eval.ruler_v4.scene import Scene
 from dagua.eval.ruler_v4.score import OutputType, ScoringProfiles, score
-from dagua.eval.ruler_v4.weights import WeightTable
+from dagua.eval.ruler_v4.weight_table import WeightTable
 
 from .conftest import reingest_scaled
 

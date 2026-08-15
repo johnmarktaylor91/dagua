@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from dagua.eval.ruler_v4.headline import HeadlineProfile, ordinal_headline
-from dagua.eval.ruler_v4.weights import PriorMassDisclosure
+from dagua.eval.ruler_v4.weight_table import PriorMassDisclosure
 
 
 def _disclosure(*, partial: bool = False) -> PriorMassDisclosure:

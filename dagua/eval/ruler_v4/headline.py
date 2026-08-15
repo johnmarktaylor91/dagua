@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from dagua.eval.ruler_v4.weights import PriorMassDisclosure
+from dagua.eval.ruler_v4.weight_table import PriorMassDisclosure
 
 
 @dataclass(frozen=True)

@@ -40,3 +40,21 @@ def test_zero_onset_event_bound_is_zero() -> None:
 
     event = load_event_registry().by_facet("U18")[0]
     assert evaluate_jump_bound(event) == 0.0
+
+
+def test_amended_formula_string_refuses_the_stale_hardcoded_evaluator() -> None:
+    """P2 tripwire: a regenerated registry formula cannot silently evaluate."""
+
+    import pytest
+
+    from dagua.eval.ruler_v4.events import EventManifold, JumpBound, evaluate_jump_bound
+
+    drifted = EventManifold(
+        "U41",
+        "U41_FACE_SPLIT",
+        "arrangement face split",
+        True,
+        JumpBound("closed_form", formula="min(1, 0.70*min(1,3/max(1,F0)))"),
+    )
+    with pytest.raises(ValueError, match="registry drift"):
+        evaluate_jump_bound(drifted, {"F0": 100.0})

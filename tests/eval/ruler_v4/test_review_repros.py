@@ -647,7 +647,7 @@ def _relabel_probe_table(groups: Tuple[str, ...]):
         Four unit-mass rows.
     """
 
-    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+    from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 
     return WeightTable(
         entries=tuple(
@@ -686,7 +686,7 @@ def test_p_mean_sees_a_catastrophic_row_inside_a_populated_group() -> None:
 
     from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile, compose
     from dagua.eval.ruler_v4.scene import value_result
-    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+    from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 
     table = WeightTable(
         entries=tuple(SubtermWeight(f"A.{index}", "A", "one_group", 1.0) for index in range(9)),
@@ -715,7 +715,7 @@ def test_fitted_profile_scalars_cannot_hide_from_the_dof_account() -> None:
     from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile
     from dagua.eval.ruler_v4.headline import HeadlineProfile
     from dagua.eval.ruler_v4.score import ScoringProfiles, validate_parameter_provenance
-    from dagua.eval.ruler_v4.weights import ParameterProvenance, SubtermWeight, WeightTable
+    from dagua.eval.ruler_v4.weight_table import ParameterProvenance, SubtermWeight, WeightTable
 
     table = WeightTable(
         entries=(
@@ -779,7 +779,7 @@ def test_provenance_for_an_inactive_scalar_is_refused() -> None:
     from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile
     from dagua.eval.ruler_v4.headline import HeadlineProfile
     from dagua.eval.ruler_v4.score import ScoringProfiles, validate_parameter_provenance
-    from dagua.eval.ruler_v4.weights import ParameterProvenance, WeightTable
+    from dagua.eval.ruler_v4.weight_table import ParameterProvenance, WeightTable
 
     profiles = ScoringProfiles(
         composition=CompositionProfile(CompositionFamily.P_MEAN, power=1.0),
@@ -818,7 +818,7 @@ def test_idless_event_occurrences_sum_into_the_cc1_margin() -> None:
     )
     from dagua.eval.ruler_v4.events import load_event_registry
     from dagua.eval.ruler_v4.scene import value_result
-    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+    from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 
     table = WeightTable(entries=(SubtermWeight("A.1", "A", "g", 1.0),), d_power=0)
     base = compose(
@@ -882,7 +882,7 @@ def test_se_pair_arm_blocks_a_margin_verdict_when_supplied() -> None:
     )
     from dagua.eval.ruler_v4.events import load_event_registry
     from dagua.eval.ruler_v4.scene import value_result
-    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+    from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 
     table = WeightTable(entries=(SubtermWeight("A.1", "A", "g", 1.0),), d_power=0)
     base = compose(
@@ -923,7 +923,7 @@ def test_margin_rule_verdicts_are_scoped_names_not_certified_wins() -> None:
     )
     from dagua.eval.ruler_v4.events import load_event_registry
     from dagua.eval.ruler_v4.scene import value_result
-    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+    from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 
     table = WeightTable(entries=(SubtermWeight("A.1", "A", "g", 1.0),), d_power=0)
     base = compose(
@@ -973,7 +973,7 @@ def _bottleneck_composition(groups: Tuple[str, ...], losses: Tuple[float, ...]):
 
     from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile, compose
     from dagua.eval.ruler_v4.scene import value_result
-    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+    from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 
     table = WeightTable(
         entries=tuple(
@@ -1013,7 +1013,7 @@ def test_low_mass_catastrophic_group_stays_visible_in_the_bottleneck() -> None:
 
     from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile, compose
     from dagua.eval.ruler_v4.scene import value_result
-    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+    from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 
     table = WeightTable(
         entries=(
@@ -1054,7 +1054,7 @@ def test_unobserved_absence_refuses_point_composition() -> None:
         compose,
     )
     from dagua.eval.ruler_v4.scene import na_result, value_result
-    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+    from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 
     table = WeightTable(
         entries=(
