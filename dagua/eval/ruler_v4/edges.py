@@ -19,6 +19,7 @@ from dagua.eval.ruler_v4._util import (
     global_blend,
     mean_result,
     proper_intersection,
+    resolved_ranks,
     resolved_routes,
     route_segments,
     smoothstep,
@@ -794,17 +795,24 @@ def U11(scene: Scene) -> FacetResult:
     row_two: List[float] = []
     row_three: List[float] = []
     row_four: List[float] = []
-    terminal_records: DefaultDict[int, List[Tuple[torch.Tensor, torch.Tensor]]] = defaultdict(list)
+    terminal_records: DefaultDict[int, List[Tuple[torch.Tensor, Optional[torch.Tensor]]]] = (
+        defaultdict(list)
+    )
     raw_edges: List[Dict[str, float]] = []
     routes = resolved_routes(scene)
+    ranks = resolved_ranks(scene)
     for route in routes:
         points = route.points
         vectors = points[1:] - points[:-1]
         lengths = torch.linalg.vector_norm(vectors, dim=1)
         arc = float(torch.sum(lengths))
+        source, target = scene.graph.edges[route.edge_index]
+        source_tangent = _first_nonzero_tangent(points, False)
+        target_tangent = _first_nonzero_tangent(points, True)
+        terminal_records[source].append((points[0], source_tangent))
+        terminal_records[target].append((points[-1], target_tangent))
         if arc == 0.0:
             continue
-        source, target = scene.graph.edges[route.edge_index]
         chord_vector = points[-1] - points[0]
         chord = float(torch.linalg.vector_norm(chord_vector))
         chord_direction = (
@@ -862,9 +870,7 @@ def U11(scene: Scene) -> FacetResult:
             log_ratio = math.log(arc / baseline_length)
             row_three.append(1.0 - math.exp(-_zero_hinge(log_ratio, 0.05) / math.log(2.0)))
         feedback = scene.graph.feedback is not None and scene.graph.feedback[route.edge_index]
-        same_rank = (
-            scene.graph.ranks is not None and scene.graph.ranks[source] == scene.graph.ranks[target]
-        )
+        same_rank = ranks is not None and ranks[source] == ranks[target]
         if (
             scene.graph.directed
             and scene.graph.flow_axis is not None
@@ -879,12 +885,6 @@ def U11(scene: Scene) -> FacetResult:
                 if float(length) > 0.0
             )
             row_four.append(1.0 - math.exp(-(counterflow / arc) / 0.25))
-        source_tangent = _first_nonzero_tangent(points, False)
-        target_tangent = _first_nonzero_tangent(points, True)
-        if source_tangent is not None:
-            terminal_records[source].append((points[0], source_tangent))
-        if target_tangent is not None:
-            terminal_records[target].append((points[-1], target_tangent))
         raw_edges.append(
             {
                 "edge": float(route.edge_index),
@@ -911,30 +911,46 @@ def U11(scene: Scene) -> FacetResult:
         for records in terminal_records.values():
             if len(records) < 2:
                 continue
-            confusability = [
-                math.exp(
-                    -(
-                        (
-                            float(torch.linalg.vector_norm(left[0] - right[0]))
-                            / (scene.intrinsic_unit / 4.0)
+            confusability = []
+            for left_index, left in enumerate(records):
+                for right in records[left_index + 1 :]:
+                    if left[1] is None or right[1] is None:
+                        confusability.append(0.0)
+                        continue
+                    confusability.append(
+                        math.exp(
+                            -(
+                                (
+                                    float(torch.linalg.vector_norm(left[0] - right[0]))
+                                    / (scene.intrinsic_unit / 4.0)
+                                )
+                                ** 2
+                            )
                         )
-                        ** 2
+                        * math.exp(-((_segment_angle(left[1], right[1]) / math.radians(15.0)) ** 2))
                     )
-                )
-                * math.exp(-((_segment_angle(left[1], right[1]) / math.radians(15.0)) ** 2))
-                for left_index, left in enumerate(records)
-                for right in records[left_index + 1 :]
-            ]
             node_defects.append(sum(confusability) / len(confusability))
             node_weights.append(float(len(records)))
         if node_defects:
             values["U11.v"] = global_blend(node_defects, node_weights)
+    dropped_subterms = []
+    if scene.graph.edge_styles is None:
+        dropped_subterms.append("U11.ii:no_declared_style")
+    feedback_count = sum(scene.graph.feedback or ())
     return FacetResult(
         ResultState.VALUE,
         None,
         None,
         values,
-        {"self_intersection_count": self_crossings, "edges": tuple(raw_edges)},
+        {
+            "self_intersection_count": self_crossings,
+            "edges": tuple(raw_edges),
+            "dropped_subterms": tuple(dropped_subterms),
+            "feedback_edge_count": feedback_count,
+            "feedback_edge_coverage": feedback_count / scene.edge_count
+            if scene.edge_count
+            else 0.0,
+        },
     )
 
 
@@ -1436,18 +1452,17 @@ def U13(scene: Scene) -> FacetResult:
             left_points = left.points
             right_points = right.points
             if shared_nodes:
-                shared = min(shared_nodes)
                 left_edge = scene.graph.edges[left.edge_index]
                 right_edge = scene.graph.edges[right.edge_index]
                 left_points = _trim_polyline(
                     left_points,
-                    2.0 * scene.intrinsic_unit if left_edge[0] == shared else 0.0,
-                    2.0 * scene.intrinsic_unit if left_edge[1] == shared else 0.0,
+                    2.0 * scene.intrinsic_unit if left_edge[0] in shared_nodes else 0.0,
+                    2.0 * scene.intrinsic_unit if left_edge[1] in shared_nodes else 0.0,
                 )
                 right_points = _trim_polyline(
                     right_points,
-                    2.0 * scene.intrinsic_unit if right_edge[0] == shared else 0.0,
-                    2.0 * scene.intrinsic_unit if right_edge[1] == shared else 0.0,
+                    2.0 * scene.intrinsic_unit if right_edge[0] in shared_nodes else 0.0,
+                    2.0 * scene.intrinsic_unit if right_edge[1] in shared_nodes else 0.0,
                 )
             contribution = _parallel_route_integral(left_points, right_points, scene.intrinsic_unit)
             contributions.append(contribution)
@@ -1456,11 +1471,10 @@ def U13(scene: Scene) -> FacetResult:
     for source, target in scene.graph.edges:
         degrees[source] += 1
         degrees[target] += 1
-    opportunity = scene.edge_count + sum(degree * (degree - 1) / 2.0 for degree in degrees)
+    opportunity = int(scene.edge_count + sum(degree * (degree - 1) / 2.0 for degree in degrees))
     raw_sum = sum(contributions)
-    normalized = raw_sum / opportunity
     values: Dict[str, float] = {
-        "U13.i": normalized / (normalized + 0.05),
+        "U13.i": _raw_u13_blend(contributions, opportunity),
     }
     bundle_defects: List[float] = []
     if scene.graph.edge_bundles is not None:
@@ -1495,6 +1509,63 @@ def U13(scene: Scene) -> FacetResult:
             "bundle_end_defects": tuple(bundle_defects),
         },
     )
+
+
+def _raw_u13_blend(values: List[float], opportunity: int) -> float:
+    """Aggregate U13 pair integrals through its mean/tail/smoothmax blend.
+
+    Parameters
+    ----------
+    values : list[float]
+        Nonnegative admitted pair integrals.
+    opportunity : int
+        Frozen input-only normalizer for the mean component. Tail components use
+        the contract's full route-pair population, including measured zeros.
+
+    Returns
+    -------
+    float
+        Contract-blended ambiguity defect.
+    """
+
+    if opportunity <= 0:
+        return 0.0
+    if not values:
+        return 0.0
+    population = sorted(values)
+    mean = sum(population) / opportunity
+    tail_mass = 0.10 * len(population)
+    remaining = tail_mass
+    tail_sum = 0.0
+    for value in reversed(population):
+        selected = min(1.0, remaining)
+        tail_sum += selected * value
+        remaining -= selected
+        if remaining <= 0.0:
+            break
+    cvar = tail_sum / tail_mass
+    maximum = population[-1]
+    smooth_maximum = maximum + 0.05 * math.log(
+        sum(math.exp((value - maximum) / 0.05) for value in population) / len(population)
+    )
+
+    def saturate(value: float) -> float:
+        """Apply U13's common ``x/(x+0.05)`` saturation.
+
+        Parameters
+        ----------
+        value : float
+            Nonnegative raw aggregate.
+
+        Returns
+        -------
+        float
+            Bounded component burden.
+        """
+
+        return value / (value + 0.05) if value > 0.0 else 0.0
+
+    return 0.65 * saturate(mean) + 0.25 * saturate(cvar) + 0.10 * saturate(smooth_maximum)
 
 
 def _trim_polyline(points: torch.Tensor, start_trim: float, end_trim: float) -> torch.Tensor:
@@ -2021,14 +2092,24 @@ def U16(scene: Scene) -> FacetResult:
             overlap_area = overlap_fraction * min(label_area, obstacle_area)
             overlap_sum += overlap_area / min(label_area, obstacle_area)
         for edge_index, route in route_by_edge.items():
-            if edge_index == label.owner:
-                continue
             width = (
                 scene.style.edge_stroke_widths[edge_index]
                 if scene.style.edge_stroke_widths
                 else scene.style.route_stroke_width * scene.style.coordinate_scale
             )
-            overlap_sum += _route_box_ink_area(route.points, label, width) / label_area
+            if edge_index == label.owner:
+                label_height = 2.0 * float(label.half_extents[1])
+                _, anchor = _point_polyline_projection(label.center, route.points)
+                route_area = _route_box_ink_area(
+                    route.points,
+                    label,
+                    width,
+                    excluded_center=anchor,
+                    excluded_radius=label_height,
+                )
+            else:
+                route_area = _route_box_ink_area(route.points, label, width)
+            overlap_sum += route_area / label_area
         overlap_sums.append(overlap_sum)
         overlap_defects.append(overlap_sum / (overlap_sum + 0.25))
 
@@ -2088,23 +2169,52 @@ def _point_polyline_distance(point: torch.Tensor, points: torch.Tensor) -> float
         Minimum Euclidean distance.
     """
 
-    distances: List[float] = []
+    distance, _ = _point_polyline_projection(point, points)
+    return distance
+
+
+def _point_polyline_projection(
+    point: torch.Tensor, points: torch.Tensor
+) -> Tuple[float, torch.Tensor]:
+    """Return distance and nearest point on a flattened polyline.
+
+    Parameters
+    ----------
+    point : torch.Tensor
+        Query point with shape ``[2]``.
+    points : torch.Tensor
+        Polyline vertices with shape ``[P, 2]``.
+
+    Returns
+    -------
+    tuple[float, torch.Tensor]
+        Minimum distance and its canonical first nearest projection.
+    """
+
+    candidates: List[Tuple[float, torch.Tensor]] = []
     for start, end in zip(points[:-1], points[1:]):
         direction = end - start
         denominator = float(torch.dot(direction, direction))
         if denominator == 0.0:
-            distances.append(float(torch.linalg.vector_norm(point - start)))
+            candidates.append((float(torch.linalg.vector_norm(point - start)), start))
             continue
         parameter = min(
             1.0,
             max(0.0, float(torch.dot(point - start, direction)) / denominator),
         )
         projection = start + parameter * direction
-        distances.append(float(torch.linalg.vector_norm(point - projection)))
-    return min(distances)
+        candidates.append((float(torch.linalg.vector_norm(point - projection)), projection))
+    return min(candidates, key=lambda item: item[0])
 
 
-def _route_box_ink_area(points: torch.Tensor, box: BoxGeometry, width: float) -> float:
+def _route_box_ink_area(
+    points: torch.Tensor,
+    box: BoxGeometry,
+    width: float,
+    *,
+    excluded_center: Optional[torch.Tensor] = None,
+    excluded_radius: float = 0.0,
+) -> float:
     """Return flattened route-ribbon area whose centerline lies inside a box.
 
     Parameters
@@ -2115,6 +2225,10 @@ def _route_box_ink_area(points: torch.Tensor, box: BoxGeometry, width: float) ->
         Axis-aligned label obstacle.
     width : float
         Positive ribbon width.
+    excluded_center : torch.Tensor or None
+        Optional anchor center whose local exemption disk is removed.
+    excluded_radius : float
+        Radius of the local anchor exemption disk.
 
     Returns
     -------
@@ -2146,5 +2260,20 @@ def _route_box_ink_area(points: torch.Tensor, box: BoxGeometry, width: float) ->
             if entry > exit_:
                 break
         if entry <= exit_:
-            length += (exit_ - entry) * float(torch.linalg.vector_norm(direction))
+            admitted = exit_ - entry
+            if excluded_center is not None and excluded_radius > 0.0:
+                offset = start - excluded_center
+                quadratic_a = float(torch.dot(direction, direction))
+                quadratic_b = 2.0 * float(torch.dot(offset, direction))
+                quadratic_c = float(torch.dot(offset, offset)) - excluded_radius**2
+                discriminant = quadratic_b**2 - 4.0 * quadratic_a * quadratic_c
+                if quadratic_a > 0.0 and discriminant >= 0.0:
+                    root = math.sqrt(discriminant)
+                    circle_entry = (-quadratic_b - root) / (2.0 * quadratic_a)
+                    circle_exit = (-quadratic_b + root) / (2.0 * quadratic_a)
+                    admitted -= max(
+                        0.0,
+                        min(exit_, circle_exit) - max(entry, circle_entry),
+                    )
+            length += max(0.0, admitted) * float(torch.linalg.vector_norm(direction))
     return min(length * width, float(4.0 * torch.prod(box.half_extents)))

@@ -48,6 +48,7 @@ U20b, U23, U24, U29, U30, U34, U37, U39, U40, and U42.
   golden for every contract id. Family coverage lives in `test_structure.py`,
   `test_edges.py`, `test_legibility.py`, `test_clusters.py`, and
   `test_semantic_facets.py`.
-- Negative ingestion inventory: every dispatch id is paired with a typed malformed-scene
-  rejection, with focused negative cases for topology, producer extents, routes, axes,
-  certified symmetries, thickness maps, multiedge completeness, and temporal declarations.
+- Negative ingestion inventory: shared validation paths have focused typed-rejection
+  cases for topology, producer extents, routes, axes, certified symmetries, thickness
+  maps, multiedge completeness, and temporal declarations. This is path coverage, not
+  a claim that all 45 dispatch ids have a separate malformed-scene fixture.

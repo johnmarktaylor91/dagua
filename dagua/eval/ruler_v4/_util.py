@@ -166,7 +166,11 @@ def bounded(value: float) -> float:
 
 
 def mean_result(
-    facet_id: str, values: Mapping[str, float], raw: Optional[Mapping[str, object]] = None
+    facet_id: str,
+    values: Mapping[str, float],
+    raw: Optional[Mapping[str, object]] = None,
+    *,
+    renormalize_missing: bool = True,
 ) -> FacetResult:
     """Build a facet value with its frozen row-composition operator.
 
@@ -178,6 +182,9 @@ def mean_result(
         Scored sub-term values.
     raw : mapping[str, object] or None
         Published raw statistics.
+    renormalize_missing : bool
+        Whether to redistribute absent row mass over the applicable rows. Set
+        false only where a facet contract explicitly freezes absent mass.
 
     Returns
     -------
@@ -198,15 +205,57 @@ def mean_result(
     mass = sum(applicable.values())
     if mass <= 0.0:
         return na_result(f"{facet_id.lower()}_no_objects", raw)
-    normalized = {key: weight / mass for key, weight in applicable.items()}
+    effective = (
+        {key: weight / mass for key, weight in applicable.items()}
+        if renormalize_missing
+        else applicable
+    )
     if facet_id in _NOISY_OR_FACETS:
         survival = 1.0
-        for key, weight in normalized.items():
+        for key, weight in effective.items():
             survival *= (1.0 - float(values[key])) ** weight
         result = 1.0 - survival
     else:
-        result = sum(normalized[key] * float(values[key]) for key in normalized)
+        result = sum(effective[key] * float(values[key]) for key in effective)
     return value_result(result, values, raw)
+
+
+def resolved_ranks(scene: Scene) -> Optional[Tuple[int, ...]]:
+    """Return declared ranks or deterministic longest-path DAG ranks.
+
+    Parameters
+    ----------
+    scene : Scene
+        Canonical graph scene.
+
+    Returns
+    -------
+    tuple[int, ...] or None
+        Declared ranks when present, derived ranks for a directed acyclic graph,
+        or ``None`` for an undirected or cyclic graph without declarations.
+    """
+
+    if scene.graph.ranks is not None:
+        return scene.graph.ranks
+    if not scene.graph.directed:
+        return None
+    incoming = [0] * scene.node_count
+    outgoing: List[List[int]] = [[] for _ in range(scene.node_count)]
+    for source, target in scene.graph.edges:
+        incoming[target] += 1
+        outgoing[source].append(target)
+    queue = deque(index for index, count in enumerate(incoming) if count == 0)
+    ranks = [0] * scene.node_count
+    visited = 0
+    while queue:
+        source = queue.popleft()
+        visited += 1
+        for target in sorted(outgoing[source]):
+            ranks[target] = max(ranks[target], ranks[source] + 1)
+            incoming[target] -= 1
+            if incoming[target] == 0:
+                queue.append(target)
+    return tuple(ranks) if visited == scene.node_count else None
 
 
 def _weighted_interval_mean(

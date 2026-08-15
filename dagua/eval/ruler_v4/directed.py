@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections import defaultdict, deque
 from typing import DefaultDict, Dict, List, Optional, Tuple, Union
@@ -16,6 +17,7 @@ from dagua.eval.ruler_v4._util import (
     global_blend,
     mean_result,
     pava,
+    resolved_ranks,
     resolved_routes,
 )
 from dagua.eval.ruler_v4.scene import (
@@ -82,7 +84,7 @@ def U31(scene: Scene) -> FacetResult:
     if axis is None or not scene.graph.directed or scene.edge_count == 0:
         return na_result("DIRECTION_OR_AXIS_ABSENT")
     feedback = _feedback_mask(scene)
-    ranks = scene.graph.ranks if scene.graph.ranks is not None else _derived_ranks(scene)
+    ranks = resolved_ranks(scene)
     routes = {route.edge_index: route for route in resolved_routes(scene)}
     burdens: List[float] = []
     forward_burdens: List[float] = []
@@ -134,7 +136,7 @@ def U32(scene: Scene) -> FacetResult:
         return na_result("RANK_AXIS_ABSENT")
     rank_values = scene.graph.ranks
     if rank_values is None:
-        rank_values = _derived_ranks(scene)
+        rank_values = resolved_ranks(scene)
     if rank_values is None:
         return na_result("NO_CANONICAL_DERIVED_RANK")
     ranks = torch.tensor(rank_values, dtype=torch.long)
@@ -236,41 +238,6 @@ def _midpoint_median(values: torch.Tensor) -> torch.Tensor:
     return (ordered[count // 2 - 1] + ordered[count // 2]) / 2.0
 
 
-def _derived_ranks(scene: Scene) -> Optional[Tuple[int, ...]]:
-    """Derive longest-path source ranks for a directed acyclic graph.
-
-    Parameters
-    ----------
-    scene : Scene
-        Directed graph scene without declared ranks.
-
-    Returns
-    -------
-    tuple[int, ...] or None
-        Canonical ranks, or ``None`` when the graph is cyclic or undirected.
-    """
-
-    if not scene.graph.directed:
-        return None
-    incoming = [0] * scene.node_count
-    outgoing: DefaultDict[int, List[int]] = defaultdict(list)
-    for source, target in scene.graph.edges:
-        incoming[target] += 1
-        outgoing[source].append(target)
-    queue = deque(index for index, count in enumerate(incoming) if count == 0)
-    ranks = [0] * scene.node_count
-    visited = 0
-    while queue:
-        source = queue.popleft()
-        visited += 1
-        for target in sorted(outgoing[source]):
-            ranks[target] = max(ranks[target], ranks[source] + 1)
-            incoming[target] -= 1
-            if incoming[target] == 0:
-                queue.append(target)
-    return tuple(ranks) if visited == scene.node_count else None
-
-
 def U33(scene: Scene) -> FacetResult:
     """Tree quality bundle. Frozen SHA-256: b9ea391f1645e98497c216a76ba3c1b0d69901cdf5d54c42872376a7ea4e7feb."""
 
@@ -318,7 +285,9 @@ def _u33_layered(scene: Scene, children: DefaultDict[int, List[int]]) -> FacetRe
     """
 
     axis = torch.tensor(scene.graph.flow_axis, dtype=torch.float64)
-    cross = torch.tensor([-axis[1], axis[0]], dtype=torch.float64)
+    # The declared page direction is top-to-bottom; its clockwise perpendicular
+    # therefore makes declared sibling order increase left-to-right.
+    cross = torch.tensor([axis[1], -axis[0]], dtype=torch.float64)
     subtree_cache: Dict[int, List[int]] = {}
 
     def subtree(node: int) -> List[int]:
@@ -385,15 +354,24 @@ def _u33_layered(scene: Scene, children: DefaultDict[int, List[int]]) -> FacetRe
             cosine = float(torch.dot(delta / length, cross).item()) if length > 0.0 else 0.0
             order_losses.append(_stable_sigmoid((math.cos(math.radians(70.0)) - cosine) / 0.03))
     values = {
-        "U33.layered.1": global_blend(separation_losses, separation_weights)
-        if separation_losses
-        else 0.0,
         "U33.layered.2": global_blend(centering_losses),
         "U33.layered.3": global_blend(depth_losses),
     }
+    if separation_losses:
+        values["U33.layered.1"] = global_blend(separation_losses, separation_weights)
     if scene.graph.ordered_children:
-        values["U33.layered.4"] = global_blend(order_losses) if order_losses else 0.0
-    return mean_result("U33", values, {"tree_layout": "layered"})
+        if order_losses:
+            values["U33.layered.4"] = global_blend(order_losses)
+    dropped = []
+    if not separation_losses:
+        dropped.append("U33.layered.1:no_sibling_subtree_pairs")
+    if scene.graph.ordered_children and not order_losses:
+        dropped.append("U33.layered.4:no_consecutive_declared_child_pairs")
+    return mean_result(
+        "U33",
+        values,
+        {"tree_layout": "layered", "dropped_subterms": tuple(dropped)},
+    )
 
 
 def _u33_radial(
@@ -480,11 +458,15 @@ def _u33_radial(
                     - math.exp(-(((fraction - target) / (target + 1.0 / len(root_children))) ** 2))
                 )
                 sector_weights.append(float(mass))
-    values = {
-        "U33.radial.1": global_blend(radial_losses),
-        "U33.radial.2": global_blend(sector_losses, sector_weights) if sector_losses else 0.0,
-    }
-    return mean_result("U33", values, {"tree_layout": "radial"})
+    values = {"U33.radial.1": global_blend(radial_losses)}
+    if sector_losses:
+        values["U33.radial.2"] = global_blend(sector_losses, sector_weights)
+    dropped = () if sector_losses else ("U33.radial.2:no_multi_child_root",)
+    return mean_result(
+        "U33",
+        values,
+        {"tree_layout": "radial", "dropped_subterms": dropped},
+    )
 
 
 def _tree_depths(scene: Scene) -> Optional[List[int]]:
@@ -735,7 +717,8 @@ def U34(scene: Scene) -> FacetResult:
     mono_losses: List[float] = []
     continuity_losses: List[float] = []
     path_losses: List[float] = []
-    for path_nodes, path_edges in paths:
+    path_weights: List[float] = []
+    for path_nodes, path_edges, path_weight in paths:
         deltas = []
         junction_vectors: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         for edge_position, edge_index in enumerate(path_edges):
@@ -778,13 +761,14 @@ def U34(scene: Scene) -> FacetResult:
         mono_losses.append(mono_loss)
         continuity_losses.append(continuity_loss)
         path_losses.append(0.40 * back_loss + 0.35 * mono_loss + 0.25 * continuity_loss)
+        path_weights.append(path_weight)
     values = {
-        "U34.L_back": global_blend(back_losses),
-        "U34.L_mono": global_blend(mono_losses),
-        "U34.L_cont": global_blend(continuity_losses),
+        "U34.L_back": global_blend(back_losses, path_weights),
+        "U34.L_mono": global_blend(mono_losses, path_weights),
+        "U34.L_cont": global_blend(continuity_losses, path_weights),
     }
     return value_result(
-        global_blend(path_losses),
+        global_blend(path_losses, path_weights),
         values,
         {"path_count": len(paths)},
     )
@@ -818,7 +802,7 @@ def _soft_positive(value: float, temperature: float) -> float:
 
 def _canonical_source_sink_paths(
     scene: Scene,
-) -> List[Tuple[List[int], List[int]]]:
+) -> List[Tuple[List[int], List[int], float]]:
     """Enumerate canonical shortest directed source-to-sink paths.
 
     Parameters
@@ -828,8 +812,9 @@ def _canonical_source_sink_paths(
 
     Returns
     -------
-    list[tuple[list[int], list[int]]]
-        Node and edge indices for every reachable source-sink pair.
+    list[tuple[list[int], list[int], float]]
+        Node and edge indices plus inverse-inclusion mass for each sampled
+        reachable source-sink pair.
     """
 
     incoming = [0] * scene.node_count
@@ -843,20 +828,53 @@ def _canonical_source_sink_paths(
         else [node for node, degree in enumerate(incoming) if degree == 0]
     )
     sinks = {node for node in range(scene.node_count) if not outgoing[node]}
-    result = []
+    source_population = len(sources)
+    if source_population > 64:
+        sources = sorted(
+            sources,
+            key=lambda source: hashlib.sha256(
+                f"{scene.profile_hash}:U34-source:{source}".encode()
+            ).digest(),
+        )[:64]
+    source_probability = min(1.0, 64.0 / source_population) if source_population else 1.0
+    result: List[Tuple[List[int], List[int], float]] = []
     for source in sources:
         predecessor: Dict[int, Tuple[int, int]] = {}
+        predecessor_key: Dict[int, bytes] = {}
         distance = {source: 0}
         queue = deque([source])
         while queue:
             node = queue.popleft()
             for target, edge_index in sorted(outgoing[node]):
                 candidate = distance[node] + 1
-                if target not in distance:
+                tie_key = hashlib.sha256(
+                    f"{scene.profile_hash}:{source}:{target}:{edge_index}".encode()
+                ).digest()
+                if target not in distance or (
+                    candidate == distance[target] and tie_key < predecessor_key[target]
+                ):
                     distance[target] = candidate
                     predecessor[target] = (node, edge_index)
-                    queue.append(target)
-        for sink in sorted(sinks & set(distance)):
+                    predecessor_key[target] = tie_key
+                    if target not in queue:
+                        queue.append(target)
+        reachable = sorted(sinks & set(distance) - {source})
+        selected: List[Tuple[int, float]] = []
+        if len(reachable) <= 64:
+            selected = [(sink, 1.0) for sink in reachable]
+        else:
+            bands = ((1, 2), (3, 4), (5, 8), (9, math.inf))
+            for lower, upper in bands:
+                members = [sink for sink in reachable if lower <= distance[sink] <= upper]
+                chosen = sorted(
+                    members,
+                    key=lambda sink: hashlib.sha256(
+                        f"{scene.profile_hash}:U34-sink:{source}:{sink}".encode()
+                    ).digest(),
+                )[:16]
+                probability = min(1.0, 16.0 / len(members)) if members else 1.0
+                selected.extend((sink, probability) for sink in chosen)
+        for sink, sink_probability in selected:
             if sink == source:
                 continue
             nodes = [sink]
@@ -867,7 +885,8 @@ def _canonical_source_sink_paths(
                 nodes.append(parent)
                 edges.append(edge_index)
                 cursor = parent
-            result.append((list(reversed(nodes)), list(reversed(edges))))
+            weight = 1.0 / (source_probability * sink_probability)
+            result.append((list(reversed(nodes)), list(reversed(edges)), weight))
     return result
 
 

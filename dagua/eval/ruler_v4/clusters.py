@@ -24,6 +24,7 @@ from dagua.eval.ruler_v4._util import (
     soft_pos,
 )
 from dagua.eval.ruler_v4.frames import RobustFrame, robust_frame
+from dagua.eval.ruler_v4.legibility import _box_segment_clearance, _route_box_overlap_area
 from dagua.eval.ruler_v4.scene import (
     BoxGeometry,
     FacetResult,
@@ -32,6 +33,46 @@ from dagua.eval.ruler_v4.scene import (
     na_result,
     value_result,
 )
+
+_U30_PAD_TARGET_U = 0.50
+
+
+def _interim_cluster_label_severity(
+    defect: float,
+    overlap_area: float,
+    subject_area: float,
+    *,
+    subject_is_lower: bool,
+) -> float:
+    """Apply the contract-bounded z-order severity to a U30 label pair.
+
+    Parameters
+    ----------
+    defect : float
+        Unadjusted intersecting-pair defect.
+    overlap_area : float
+        Pair overlap area in scene units squared.
+    subject_area : float
+        Area of the scored cluster label.
+    subject_is_lower : bool
+        Whether the scored label is below the obstacle in stored order.
+
+    Returns
+    -------
+    float
+        Effective burden between one-half and the unadjusted defect.
+
+    Notes
+    -----
+    TODO(scheduler-owner): replace the node-label/cluster-label relative-order
+    branch when the primitive-id grammar is frozen. The default class order and
+    same-kind canonical order are already frozen.
+    """
+
+    if overlap_area <= 0.0:
+        return defect
+    occluded = min(1.0, overlap_area / subject_area) if subject_is_lower else 0.0
+    return defect * (0.5 + 0.5 * occluded)
 
 
 def _clusters(scene: Scene, minimum_size: int = 1) -> Dict[str, Tuple[int, ...]]:
@@ -1175,6 +1216,9 @@ def U26(scene: Scene) -> FacetResult:
             "incidence_count": len(incidence_defects),
             "matched_stratum_count": len(control_defects),
             "boundary_incidence_count": len(boundary_defects),
+            "dropped_subterms": ("U26.ii:no_matched_control_stratum",)
+            if not control_defects
+            else (),
         },
     )
 
@@ -1200,7 +1244,8 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
     if not scene.graph.clusters:
         return na_result("no_declared_clusters")
     clusters = _clusters(scene, 3)
-    if not clusters:
+    member_clusters = _clusters(scene, 2)
+    if not member_clusters:
         return na_result("cluster_too_small_for_region")
     regions = _regions(scene)
     node_intrusions_by_grid: List[List[float]] = [[] for _ in range(12)]
@@ -1209,6 +1254,9 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
     member_masses: List[float] = []
     route_intrusions: List[float] = []
     masses = _node_masses(scene)
+    cluster_masses = {
+        name: sum(masses[member] for member in members) for name, members in member_clusters.items()
+    }
     grid = tuple((alpha_clear, alpha_high) for _, alpha_clear, alpha_high in ALPHA_GRID)
     for name, members in clusters.items():
         member_set = set(members)
@@ -1237,9 +1285,29 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             for grid_index, (alpha_clear, alpha_high) in enumerate(grid):
                 alpha = alpha_clear * (1.0 - floor_blend) + (alpha_clear * floor_blend * alpha_high)
                 node_intrusions_by_grid[grid_index].append(
-                    alpha * absolute + (1.0 - alpha) * excess
+                    0.5 * (alpha * absolute + (1.0 - alpha) * excess)
                 )
-            node_intrusion_masses.append(masses[node.owner])
+            node_intrusion_masses.append(masses[node.owner] * cluster_masses[name])
+        for route in resolved_routes(scene):
+            source, target = scene.graph.edges[route.edge_index]
+            if source in member_set or target in member_set:
+                continue
+            lengths = torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1)
+            total_length = float(torch.sum(lengths))
+            if total_length == 0.0:
+                continue
+            inside_length = 0.0
+            for index, segment_length in enumerate(lengths.tolist()):
+                inside_length += segment_length * _segment_region_fraction(
+                    route.points[index], route.points[index + 1], region
+                )
+            ratio = inside_length / total_length
+            route_intrusions.append(
+                1.0 - float(smoothstep(torch.tensor(1.0 - ratio / 0.25, dtype=torch.float64)))
+            )
+
+    for name, members in member_clusters.items():
+        region = regions[name]
         for member in members:
             others = tuple(box for box in region.boxes if box.owner != member)
             if not others:
@@ -1257,27 +1325,18 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                     )
                 )
             )
-            member_masses.append(masses[member])
-        for route in resolved_routes(scene):
-            source, target = scene.graph.edges[route.edge_index]
-            if source in member_set and target in member_set:
-                continue
-            lengths = torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1)
-            total_length = float(torch.sum(lengths))
-            if total_length == 0.0:
-                continue
-            inside_length = 0.0
-            for index, segment_length in enumerate(lengths.tolist()):
-                inside_length += segment_length * _segment_region_fraction(
-                    route.points[index], route.points[index + 1], region
-                )
-            ratio = inside_length / total_length
-            route_intrusions.append(
-                1.0 - float(smoothstep(torch.tensor(1.0 - ratio / 0.25, dtype=torch.float64)))
-            )
+            member_masses.append(masses[member] * cluster_masses[name])
 
     member_value = global_blend(member_outside, member_masses) if member_outside else None
-    route_value = global_blend(route_intrusions) if route_intrusions else None
+    route_weights = [
+        cluster_masses[name]
+        for name, members in clusters.items()
+        for route in resolved_routes(scene)
+        if not set(scene.graph.edges[route.edge_index]) & set(members)
+        and float(torch.sum(torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1)))
+        > 0.0
+    ]
+    route_value = global_blend(route_intrusions, route_weights) if route_intrusions else None
     grid_values: List[float] = []
     grid_subterms: List[Dict[str, float]] = []
     for intrusion_values in node_intrusions_by_grid:
@@ -1536,21 +1595,25 @@ def U30(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             )
             association_masses.append(label_masses[name])
         pad = max(0.0, -own_clearance)
-        deviation = abs(pad - 0.50 * scene.intrinsic_unit)
+        pad_target = _U30_PAD_TARGET_U * scene.intrinsic_unit
+        deviation = abs(pad - pad_target)
         absolute = 1.0 - math.exp(-max(0.0, own_clearance) / (0.25 * scene.intrinsic_unit))
         excess = 1.0 - float(
             smoothstep(
                 torch.tensor(
-                    1.0 - deviation / max(0.50 * scene.intrinsic_unit, 0.5 * scene.intrinsic_unit),
+                    1.0 - deviation / pad_target,
                     dtype=torch.float64,
                 )
             )
         )
         obstacle_defects_by_grid: List[List[float]] = [[] for _ in range(12)]
-        obstacles = list(scene.node_boxes) + [
-            other for other_name, other in labels.items() if other_name != name
-        ]
-        for obstacle in obstacles:
+        label_area = float(4.0 * torch.prod(label.half_extents))
+        obstacles = [(box, False) for box in scene.node_boxes]
+        obstacles.extend((box, False) for box in scene.node_label_boxes)
+        obstacles.extend(
+            (other, name < other_name) for other_name, other in labels.items() if other_name != name
+        )
+        for obstacle, subject_is_lower in obstacles:
             signed, overlap = aabb_pair(label, obstacle)
             overlap_area = overlap * min(
                 float(4.0 * torch.prod(label.half_extents)),
@@ -1565,8 +1628,44 @@ def U30(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 else 1.0 - float(smoothstep(torch.tensor(signed / budget, dtype=torch.float64)))
             )
             for grid_index, alpha in enumerate(alpha_grid):
+                pair_defect = alpha * absolute_occlusion + (1.0 - alpha) * excess_occlusion
                 obstacle_defects_by_grid[grid_index].append(
-                    alpha * absolute_occlusion + (1.0 - alpha) * excess_occlusion
+                    _interim_cluster_label_severity(
+                        pair_defect,
+                        overlap_area,
+                        label_area,
+                        subject_is_lower=subject_is_lower,
+                    )
+                )
+        for route in resolved_routes(scene):
+            width = (
+                scene.style.edge_stroke_widths[route.edge_index]
+                if scene.style.edge_stroke_widths
+                else scene.style.route_stroke_width * scene.style.coordinate_scale
+            )
+            centerline_clearance = min(
+                _box_segment_clearance(label, start, end)
+                for start, end in zip(route.points[:-1], route.points[1:])
+            )
+            signed = centerline_clearance - width / 2.0
+            overlap_area = _route_box_overlap_area(route.points, label, width)
+            absolute_occlusion = 1.0 - math.exp(
+                -overlap_area / (0.05 * scene.intrinsic_unit * scene.intrinsic_unit)
+            )
+            excess_occlusion = (
+                1.0
+                if signed <= 0.0
+                else 1.0 - float(smoothstep(torch.tensor(signed / budget, dtype=torch.float64)))
+            )
+            for grid_index, alpha in enumerate(alpha_grid):
+                pair_defect = alpha * absolute_occlusion + (1.0 - alpha) * excess_occlusion
+                obstacle_defects_by_grid[grid_index].append(
+                    _interim_cluster_label_severity(
+                        pair_defect,
+                        overlap_area,
+                        label_area,
+                        subject_is_lower=False,
+                    )
                 )
         for grid_index, alpha in enumerate(alpha_grid):
             padding_by_grid[grid_index].append(alpha * absolute + (1.0 - alpha) * excess)

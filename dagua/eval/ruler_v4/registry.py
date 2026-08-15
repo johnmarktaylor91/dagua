@@ -89,6 +89,8 @@ def evaluate_facet(
     scene: Union[Scene, TemporalScene],
     *,
     alpha_grid_index: Optional[int] = None,
+    gamma: Optional[float] = None,
+    lambda_T: Optional[float] = None,
 ) -> FacetResult:
     """Evaluate one independent contract facet.
 
@@ -101,6 +103,12 @@ def evaluate_facet(
     alpha_grid_index : int or None
         Shared U17-family grid row. ``None`` explicitly requests the frozen
         pre-selection envelope for grid-consuming facets.
+    gamma : float or None
+        U07 fitted crossing-severity scale. ``None`` uses its documented phase-4
+        worked-example default.
+    lambda_T : float or None
+        U07 fitted tail weight. ``None`` uses its documented phase-4
+        worked-example default.
 
     Returns
     -------
@@ -120,6 +128,15 @@ def evaluate_facet(
         return U40(scene)
     if facet_id in _ALPHA_GRID_FACETS:
         return function(scene, alpha_grid_index)
+    if facet_id == "U07":
+        parameters = {}
+        if gamma is not None:
+            parameters["gamma"] = gamma
+        if lambda_T is not None:
+            parameters["lambda_T"] = lambda_T
+        return function(scene, **parameters)
+    if gamma is not None or lambda_T is not None:
+        raise TypeError("gamma and lambda_T are only valid for U07")
     return function(scene)
 
 
