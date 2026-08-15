@@ -273,6 +273,39 @@ def test_u20a_coincident_core_is_catastrophic_even_with_ranks() -> None:
     assert plain.value == declared.value == pytest.approx(1.0, abs=0.0)
 
 
+# --- P4REVERIFY4_OPUS major 2: the restored unknown-class INVALID was ---
+# gated on `ranks is None`, so a ranks-declaring graph with an unparseable
+# class string silently kept the layer-profile target. Section 13 case (c)
+# conditions INVALID on the class string alone.
+
+
+def test_u22_unknown_declared_class_is_invalid_even_with_ranks() -> None:
+    """Declaring ranks does not buy back a silent unknown-class fallback."""
+
+    from dagua.eval.ruler_v4.structure import U22
+
+    positions = torch.tensor(
+        [[0.0, 8.0 * rank] for rank in range(3) for _ in range(2)], dtype=torch.float64
+    )
+    positions[1::2, 0] = 6.0
+    graph = GraphSemantics(
+        tuple(f"n{index}" for index in range(6)),
+        (),
+        ranks=(0, 0, 1, 1, 2, 2),
+        declared_graph_class="hypercube",
+    )
+    result = ingest(
+        graph,
+        DrawingScene(positions),
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes"})),
+    )
+    assert isinstance(result, ValidScene)
+    facet = U22(result.scene)
+    assert facet.state is ResultState.INVALID
+    assert facet.reason == "unknown_declared_class"
+
+
 # --- P4REVERIFY3_OPUS major 1: a ranks-only graph keeps its input-only ---
 # layer-profile target even though no direction exists to orient the frame.
 
