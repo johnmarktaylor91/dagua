@@ -141,11 +141,36 @@ def test_u19_physical_label_fixture_pins_exact_legibility_loss() -> None:
     assert isinstance(result, ValidScene)
     facet = U19(result.scene)
     assert facet.state is ResultState.VALUE
-    ratio = facet.raw["r_l"]
+    # U21's small-N frame has x half-extent 6 here, so the 10-unit viewport
+    # gives m_phys=10/12 and r_l=(1)*(10/12)/2=5/12.
+    ratio = 5.0 / 12.0
     expected = 1.0 - ratio**3 * (ratio * (6.0 * ratio - 15.0) + 10.0)
     assert 0.0 < facet.value < 1.0
     # U19 contract golden 3: "a label at half the floor scores in (0,1)."
     assert facet.value == pytest.approx(expected, abs=1e-15)
+
+
+def test_u20a_declared_rank_column_uses_residual_frame() -> None:
+    """E2 removes rank-explained axis variance from a perfect layered column."""
+
+    positions = torch.tensor([[0.0, 4.0 * rank] for rank in range(6)], dtype=torch.float64)
+    graph = GraphSemantics(
+        tuple(f"n{rank}" for rank in range(6)),
+        (),
+        ranks=tuple(range(6)),
+        flow_axis=(0.0, 1.0),
+    )
+    result = ingest(
+        graph,
+        DrawingScene(positions),
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes"})),
+    )
+    assert isinstance(result, ValidScene)
+    facet = U20a(result.scene)
+    # U20a E2: correctly layered declared-axis collinearity is expected.
+    assert facet.subterms["U20a.ii"] == pytest.approx(0.0, abs=0.0)
+    assert facet.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u20a_total_collapse_is_worse_than_two_dimensional_spread() -> None:
@@ -172,6 +197,26 @@ def test_u20a_exempts_incident_route_features() -> None:
     assert result.value < 1.0
 
 
+def test_u20a_scores_nonadjacent_segments_of_endpoint_sharing_routes() -> None:
+    """U20a exempts only terminal-adjacent segments of routes sharing a node."""
+
+    positions = torch.tensor([[0.0, 0.0], [10.0, 10.0], [10.0, 9.0]], dtype=torch.float64)
+    graph = GraphSemantics(("n0", "n1", "n2"), ((0, 1), (0, 2)))
+    routes = (
+        Route(0, torch.tensor([[0.0, 0.0], [0.0, 10.0], [10.0, 10.0]])),
+        Route(1, torch.tensor([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [10.0, 9.0]])),
+    )
+    ingested = ingest(
+        graph,
+        DrawingScene(positions, routes),
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes"})),
+    )
+    assert isinstance(ingested, ValidScene)
+    # U20a section 3 admits non-adjacent segments even when routes share an endpoint.
+    assert U20a(ingested.scene).subterms["U20a.iii"] > 0.0
+
+
 def test_u20b_midscale_edges_lie_on_low_defect_plateau() -> None:
     """U20b's midscale edge fixture lies between short- and long-edge burdens."""
 
@@ -193,3 +238,49 @@ def test_u21_compact_symmetric_scene_has_no_sparse_or_overflow_debt() -> None:
     result = U21(_scene(positions, ((0, 1), (1, 3), (3, 2), (2, 0))))
     assert result.state is ResultState.VALUE
     assert result.value == pytest.approx(0.0, abs=0.0)
+
+
+def test_u21_route_mass_is_invariant_to_declared_edge_weights() -> None:
+    """U21 gives every escaped route unit mass regardless of weight semantics."""
+
+    positions = torch.stack((torch.arange(30, dtype=torch.float64), torch.zeros(30)), dim=1)
+    positions[-1] = torch.tensor([1000.0, 1000.0], dtype=torch.float64)
+    edges = tuple((index, index + 1) for index in range(29))
+
+    def weighted_scene(weights: Tuple[float, ...]) -> Scene:
+        """Ingest one geometry with selected semantic edge weights.
+
+        Parameters
+        ----------
+        weights : tuple[float, ...]
+            Positive declared flow weights.
+
+        Returns
+        -------
+        Scene
+            Validated routed scene.
+        """
+
+        graph = GraphSemantics(
+            tuple(f"n{index}" for index in range(30)),
+            edges,
+            edge_weights=weights,
+            weight_semantics="flow",
+        )
+        routes = tuple(
+            Route(index, torch.stack((positions[source], positions[target])))
+            for index, (source, target) in enumerate(edges)
+        )
+        ingested = ingest(
+            graph,
+            DrawingScene(positions, routes),
+            StyleContract(),
+            ObservationProfile(visible_channels=frozenset({"nodes", "routes"})),
+        )
+        assert isinstance(ingested, ValidScene)
+        return ingested.scene
+
+    unit = U21(weighted_scene(tuple(1.0 for _ in edges)))
+    skewed = U21(weighted_scene(tuple([1.0] * 28 + [100.0])))
+    # U21 section 4 freezes route-ribbon mass at one per declared edge.
+    assert skewed.raw["mass_out"] == pytest.approx(unit.raw["mass_out"], abs=0.0)

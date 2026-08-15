@@ -34,6 +34,8 @@ from dagua.eval.ruler_v4.scene import (
     value_result,
 )
 
+_ANGULAR_ZERO_ENVELOPE = 1e-12
+
 _U07_WORKED_EXAMPLE_GAMMA = 1.0
 _U07_WORKED_EXAMPLE_LAMBDA_T = 0.5
 _U11_TERMINAL_DISK_SIDES = 16
@@ -324,6 +326,8 @@ def U08(scene: Scene) -> FacetResult:
                     continue
                 delta = (records[right][0] - records[left][0]) % (2.0 * math.pi)
                 pair_defect = max(0.0, 1.0 - delta / fair_share)
+                if pair_defect <= _ANGULAR_ZERO_ENVELOPE:
+                    pair_defect = 0.0
                 weighted_exponentials += weight * math.exp(pair_defect / 0.1)
                 total_weight += weight
         if total_weight == 0.0:
@@ -915,7 +919,9 @@ def U11(scene: Scene) -> FacetResult:
             for left_index, left in enumerate(records):
                 for right in records[left_index + 1 :]:
                     if left[1] is None or right[1] is None:
-                        confusability.append(0.0)
+                        # A tangent-less terminal is the coincidence limit, not a
+                        # perfectly distinguishable pair.
+                        confusability.append(1.0)
                         continue
                     confusability.append(
                         math.exp(
@@ -2099,12 +2105,11 @@ def U16(scene: Scene) -> FacetResult:
             )
             if edge_index == label.owner:
                 label_height = 2.0 * float(label.half_extents[1])
-                _, anchor = _point_polyline_projection(label.center, route.points)
                 route_area = _route_box_ink_area(
                     route.points,
                     label,
                     width,
-                    excluded_center=anchor,
+                    excluded_center=label.center,
                     excluded_radius=label_height,
                 )
             else:

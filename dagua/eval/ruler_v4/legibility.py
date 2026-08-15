@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import math
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -14,6 +14,7 @@ from dagua.eval.ruler_v4._util import (
     ALPHA_GRID,
     aabb_pair,
     adjacency,
+    components,
     global_blend,
     mean_result,
     proper_intersection,
@@ -22,7 +23,14 @@ from dagua.eval.ruler_v4._util import (
     smoothstep,
     soft_pos,
 )
-from dagua.eval.ruler_v4.frames import overflow_defect, robust_core_positions, robust_frame
+from dagua.eval.ruler_v4.frames import (
+    declared_content_area,
+    overflow_defect,
+    point_hull_area,
+    robust_core_mask,
+    robust_core_positions,
+    robust_frame,
+)
 from dagua.eval.ruler_v4.scene import BoxGeometry, FacetResult, Scene, na_result, value_result
 
 
@@ -428,7 +436,8 @@ def U20a(scene: Scene) -> FacetResult:
     )
     feature_floor = scene.style.minimum_feature_separation * scene.intrinsic_unit
     coincidence_survival = [1.0] * scene.node_count
-    node_pair_losses = []
+    node_opportunities = scene.node_count * (scene.node_count - 1) // 2
+    node_feature_survival = {("node", node): 1.0 for node in range(scene.node_count)}
     for left in range(scene.node_count):
         for right in range(left + 1, scene.node_count):
             signed, _ = aabb_pair(scene.node_boxes[left], scene.node_boxes[right])
@@ -438,19 +447,29 @@ def U20a(scene: Scene) -> FacetResult:
             )
             coincidence_survival[left] *= 1.0 - loss
             coincidence_survival[right] *= 1.0 - loss
-            node_pair_losses.append(loss)
+            _accumulate_object_loss(
+                node_feature_survival,
+                (("node", left), ("node", right)),
+                loss,
+                node_opportunities,
+            )
     coincidence = global_blend([1.0 - value for value in coincidence_survival], node_masses)
     frame = robust_frame(scene.positions, scene.intrinsic_unit)
-    core = robust_core_positions(scene.positions)
+    core_mask = robust_core_mask(scene.positions)
+    core = scene.positions[core_mask]
     if core.shape[0] < 2:
         rank_collapse = 1.0
     else:
-        centered = core - frame.center
+        centered = _rank_residual_core(scene, core, core_mask, frame.center)
         singular = torch.linalg.svdvals(centered)
-        ratio = float(singular[1] / singular[0]) if float(singular[0]) > 0.0 else 0.0
+        ratio = float(singular[1] / singular[0]) if float(singular[0]) > 0.0 else 1.0
         rank_collapse = 1.0 - float(smoothstep(torch.tensor(ratio / 0.05, dtype=torch.float64)))
     routes = resolved_routes(scene)
-    node_route_losses = []
+    node_route_opportunities = scene.node_count * scene.edge_count
+    node_route_survival = {
+        **{("node", node): 1.0 for node in range(scene.node_count)},
+        **{("route", edge): 1.0 for edge in range(scene.edge_count)},
+    }
     for box in scene.node_boxes:
         for route in routes:
             if box.owner in scene.graph.edges[route.edge_index]:
@@ -465,22 +484,40 @@ def U20a(scene: Scene) -> FacetResult:
                 else scene.style.route_stroke_width * scene.style.coordinate_scale
             )
             clearance = max(0.0, clearance - width / 2.0)
-            node_route_losses.append(
-                1.0
-                - float(smoothstep(torch.tensor(clearance / feature_floor, dtype=torch.float64)))
+            loss = 1.0 - float(
+                smoothstep(torch.tensor(clearance / feature_floor, dtype=torch.float64))
             )
-    route_route_losses = []
+            _accumulate_object_loss(
+                node_route_survival,
+                (("node", box.owner), ("route", route.edge_index)),
+                loss,
+                node_route_opportunities,
+            )
+    route_route_opportunities = scene.edge_count * (scene.edge_count - 1) // 2
+    route_route_survival = {("route", edge): 1.0 for edge in range(scene.edge_count)}
     for left, route_left in enumerate(routes):
         for route_right in routes[left + 1 :]:
-            if set(scene.graph.edges[route_left.edge_index]) & set(
-                scene.graph.edges[route_right.edge_index]
-            ):
-                continue
-            clearance = min(
+            clearances = [
                 _segment_segment_distance(start_left, end_left, start_right, end_right)
-                for start_left, end_left in zip(route_left.points[:-1], route_left.points[1:])
-                for start_right, end_right in zip(route_right.points[:-1], route_right.points[1:])
-            )
+                for left_index, (start_left, end_left) in enumerate(
+                    zip(route_left.points[:-1], route_left.points[1:])
+                )
+                for right_index, (start_right, end_right) in enumerate(
+                    zip(route_right.points[:-1], route_right.points[1:])
+                )
+                if not _segments_are_adjacent_at_declared_endpoint(
+                    scene,
+                    route_left.edge_index,
+                    left_index,
+                    route_left.points.shape[0] - 1,
+                    route_right.edge_index,
+                    right_index,
+                    route_right.points.shape[0] - 1,
+                )
+            ]
+            if not clearances:
+                continue
+            clearance = min(clearances)
             left_width = (
                 scene.style.edge_stroke_widths[route_left.edge_index]
                 if scene.style.edge_stroke_widths
@@ -492,14 +529,19 @@ def U20a(scene: Scene) -> FacetResult:
                 else scene.style.route_stroke_width * scene.style.coordinate_scale
             )
             clearance = max(0.0, clearance - (left_width + right_width) / 2.0)
-            route_route_losses.append(
-                1.0
-                - float(smoothstep(torch.tensor(clearance / feature_floor, dtype=torch.float64)))
+            loss = 1.0 - float(
+                smoothstep(torch.tensor(clearance / feature_floor, dtype=torch.float64))
+            )
+            _accumulate_object_loss(
+                route_route_survival,
+                (("route", route_left.edge_index), ("route", route_right.edge_index)),
+                loss,
+                route_route_opportunities,
             )
     class_defects = [
-        _opportunity_product(node_pair_losses, scene.node_count * (scene.node_count - 1) // 2),
-        _opportunity_product(node_route_losses, scene.node_count * scene.edge_count),
-        _opportunity_product(route_route_losses, scene.edge_count * (scene.edge_count - 1) // 2),
+        _object_feature_blend(node_feature_survival, node_masses),
+        _object_feature_blend(node_route_survival, node_masses),
+        _object_feature_blend(route_route_survival, node_masses),
     ]
     feature_survival = 1.0
     for class_defect, exponent in zip(class_defects, (0.5, 0.3, 0.2)):
@@ -513,28 +555,147 @@ def U20a(scene: Scene) -> FacetResult:
     return mean_result("U20a", values)
 
 
-def _opportunity_product(losses: List[float], opportunity_count: int) -> float:
-    """Aggregate feature losses with an analytic opportunity exponent.
+def _rank_residual_core(
+    scene: Scene,
+    core: torch.Tensor,
+    core_mask: torch.Tensor,
+    frame_center: torch.Tensor,
+) -> torch.Tensor:
+    """Remove rank-explained declared-axis variance from retained positions.
 
     Parameters
     ----------
-    losses : list[float]
-        Admitted pair losses.
+    scene : Scene
+        Validated scene.
+    core : torch.Tensor
+        Retained positions with shape ``[K, 2]``.
+    core_mask : torch.Tensor
+        Retained-node mask with shape ``[N]``.
+    frame_center : torch.Tensor
+        U21 robust-frame center with shape ``[2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Centered raw or rank-residual positions with shape ``[K, 2]``.
+    """
+
+    if scene.graph.ranks is None or scene.graph.flow_axis is None:
+        return core - frame_center
+    axis = torch.tensor(scene.graph.flow_axis, dtype=torch.float64)
+    cross = torch.tensor([-axis[1], axis[0]], dtype=torch.float64)
+    ranks = torch.tensor(scene.graph.ranks, dtype=torch.long)[core_mask]
+    axis_projection = core @ axis
+    explained = torch.empty_like(axis_projection)
+    for rank in torch.unique(ranks, sorted=True):
+        members = ranks == rank
+        explained[members] = torch.mean(axis_projection[members])
+    residual_axis = axis_projection - explained
+    cross_projection = core @ cross
+    residual = residual_axis[:, None] * axis + cross_projection[:, None] * cross
+    residual -= torch.mean(residual, dim=0)
+    # With no within-rank axis variance, every apparent one-dimensionality is
+    # precisely the declared layering that E2 removes from this sub-term.
+    if float(torch.linalg.vector_norm(residual_axis)) <= 1e-12 * max(
+        1.0, float(torch.linalg.vector_norm(cross_projection))
+    ):
+        return torch.zeros_like(residual)
+    return residual
+
+
+def _accumulate_object_loss(
+    survival: Dict[Tuple[str, int], float],
+    owners: Tuple[Tuple[str, int], Tuple[str, int]],
+    loss: float,
+    opportunity_count: int,
+) -> None:
+    """Accumulate one analytic-opportunity feature loss onto its owners.
+
+    Parameters
+    ----------
+    survival : dict[tuple[str, int], float]
+        Mutable per-feature-owner survival products.
+    owners : tuple[tuple[str, int], tuple[str, int]]
+        Two node/route owners of the admitted feature pair.
+    loss : float
+        Pair loss in ``[0, 1]``.
     opportunity_count : int
-        Input-only analytic pair opportunity count.
+        Input-only analytic class opportunity count.
+    """
+
+    if opportunity_count <= 0:
+        return
+    factor = 0.0 if loss >= 1.0 else math.exp(math.log1p(-loss) / opportunity_count)
+    for owner in owners:
+        survival[owner] *= factor
+
+
+def _object_feature_blend(
+    survival: Dict[Tuple[str, int], float], node_masses: List[float]
+) -> float:
+    """Blend class losses after collapsing pairs onto feature-owning objects.
+
+    Parameters
+    ----------
+    survival : dict[tuple[str, int], float]
+        Per-node and per-route survival products.
+    node_masses : list[float]
+        Input-owned node masses; routes have unit mass.
 
     Returns
     -------
     float
-        ``1 - product(1-loss)^(1/n)`` or zero for an empty class.
+        Global 3.7 blend over feature-owning objects.
     """
 
-    if opportunity_count <= 0 or not losses:
+    if not survival:
         return 0.0
-    if any(loss >= 1.0 for loss in losses):
-        return 1.0
-    log_survival = sum(math.log(1.0 - loss) for loss in losses)
-    return 1.0 - math.exp(log_survival / opportunity_count)
+    owners = sorted(survival)
+    defects = [1.0 - survival[owner] for owner in owners]
+    masses = [node_masses[index] if kind == "node" else 1.0 for kind, index in owners]
+    return global_blend(defects, masses)
+
+
+def _segments_are_adjacent_at_declared_endpoint(
+    scene: Scene,
+    left_edge: int,
+    left_segment: int,
+    left_segment_count: int,
+    right_edge: int,
+    right_segment: int,
+    right_segment_count: int,
+) -> bool:
+    """Return whether two route segments meet at one shared graph endpoint.
+
+    Parameters
+    ----------
+    scene : Scene
+        Validated routed scene.
+    left_edge, right_edge : int
+        Declared edge indices.
+    left_segment, right_segment : int
+        Zero-based flattened segment indices.
+    left_segment_count, right_segment_count : int
+        Number of segments in each route.
+
+    Returns
+    -------
+    bool
+        True only for the two terminal segments adjacent at a shared endpoint.
+    """
+
+    left = scene.graph.edges[left_edge]
+    right = scene.graph.edges[right_edge]
+    for endpoint in set(left) & set(right):
+        left_touches = (endpoint == left[0] and left_segment == 0) or (
+            endpoint == left[1] and left_segment == left_segment_count - 1
+        )
+        right_touches = (endpoint == right[0] and right_segment == 0) or (
+            endpoint == right[1] and right_segment == right_segment_count - 1
+        )
+        if left_touches and right_touches:
+            return True
+    return False
 
 
 def _point_segment_distance(point: torch.Tensor, start: torch.Tensor, end: torch.Tensor) -> float:
@@ -677,11 +838,14 @@ def U21(scene: Scene) -> FacetResult:
         return na_result("insufficient_node_population")
     frame = robust_frame(scene.positions, scene.intrinsic_unit)
     primitive_area = sum(float(4.0 * torch.prod(box.half_extents)) for box in scene.node_boxes)
-    component_count = _component_count(scene)
+    component_count = len(components(scene))
     area_reference = primitive_area / 0.10 * (1.0 + 0.5 * (component_count - 1))
     sparse_raw = soft_pos(math.log(frame.area / (4.0 * area_reference)))
     sparse = sparse_raw / (1.0 + sparse_raw)
     mass_out, anchor, overflow = overflow_defect(scene, frame)
+    content_area = declared_content_area(scene)
+    hull_trim = point_hull_area(robust_core_positions(scene.positions))
+    hull_full = point_hull_area(scene.positions)
     defect = 1.0 - (1.0 - sparse) * (1.0 - overflow)
     return value_result(
         defect,
@@ -690,39 +854,13 @@ def U21(scene: Scene) -> FacetResult:
             "frame_area": frame.area,
             "frame_regime": frame.regime,
             "trim_count": frame.trim_count,
+            "A_hull_trim": hull_trim,
+            "A_hull_full": hull_full,
+            "iso": 1.0 - hull_trim / hull_full if hull_full > 0.0 else 0.0,
+            "A_content": content_area,
+            "phi_ink": content_area / frame.area,
             "mass_out": mass_out,
             "overflow_anchor": anchor,
             "degenerate_frame_coincident": all(frame.floor_bound),
         },
     )
-
-
-def _component_count(scene: Scene) -> int:
-    """Count connected components without importing another facet family.
-
-    Parameters
-    ----------
-    scene : Scene
-        Validated graph scene.
-
-    Returns
-    -------
-    int
-        Number of simple-support components.
-    """
-
-    remaining = set(range(scene.node_count))
-    neighbors = [set() for _ in range(scene.node_count)]
-    for source, target in scene.graph.edges:
-        neighbors[source].add(target)
-        neighbors[target].add(source)
-    count = 0
-    while remaining:
-        count += 1
-        frontier = [remaining.pop()]
-        while frontier:
-            node = frontier.pop()
-            for neighbor in neighbors[node] & remaining:
-                remaining.remove(neighbor)
-                frontier.append(neighbor)
-    return count

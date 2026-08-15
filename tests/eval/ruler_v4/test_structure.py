@@ -132,20 +132,23 @@ def test_u03_complete_graph_is_typed_saturated_absence() -> None:
     assert result.reason == "neighborhoods_saturated"
 
 
-def test_u03_path_pins_sigmoid_credit_and_frozen_radius_mix() -> None:
-    """U03's ten-node path pins the exact soft-credit multiradius composite."""
+def test_u03_hub_chain_pins_contiguous_degree_terciles() -> None:
+    """U03's hub-and-chain golden hand-checks degree-stratum assignment."""
 
-    positions = torch.stack((torch.arange(10, dtype=torch.float64), torch.zeros(10)), dim=1)
-    result = U03(_scene(positions, tuple((index, index + 1) for index in range(9))))
-    assert result.state is ResultState.VALUE
-    # U03 contract golden 7: assert "the FACET VALUE (the per-stratum ... blend
-    # output, not merely the member product)"; section 7 freezes absent radius mass.
-    expected = (
-        0.5 * result.subterms.get("U03.r_1", 0.0)
-        + 0.3 * result.subterms.get("U03.r_2", 0.0)
-        + 0.2 * result.subterms.get("U03.r_4", 0.0)
+    positions = torch.stack((torch.arange(9, dtype=torch.float64), torch.zeros(9)), dim=1)
+    edges = tuple((0, node) for node in range(1, 9)) + tuple(
+        (node, node + 1) for node in range(1, 8)
     )
-    assert result.value == pytest.approx(expected, abs=1e-15)
+    result = U03(_scene(positions, edges))
+    assert result.state is ResultState.VALUE
+    # U03 golden 6 requires a hand-checked hub-and-chain tercile fixture.
+    assert result.raw["degree_terciles"]["r_1.component_0"] == (
+        (1, 8, 2),
+        (3, 4, 5),
+        (6, 7, 0),
+    )
+    defects = result.raw["degree_stratum_defects"]["r_1.component_0"]
+    assert max(defects) > min(defects)
 
 
 def test_u04a_regular_cycle_has_identical_density_fields() -> None:
@@ -154,14 +157,12 @@ def test_u04a_regular_cycle_has_identical_density_fields() -> None:
     angles = torch.arange(10, dtype=torch.float64) * (2.0 * math.pi / 10.0)
     positions = 5.0 * torch.stack((torch.cos(angles), torch.sin(angles)), dim=1)
     edges = tuple((index, (index + 1) % 10) for index in range(10))
-    result = U04a(_scene(positions, edges))
-    assert result.state is ResultState.VALUE
-    # U04a contract golden 4: "Rotation golden: 36 rotations ... within published
-    # envelope"; the two frozen scale rows retain equal composition mass.
-    assert result.value == pytest.approx(
-        0.5 * result.subterms["U04a.2u"] + 0.5 * result.subterms["U04a.8u"],
-        abs=1e-15,
-    )
+    original = U04a(_scene(positions, edges))
+    translated = U04a(_scene(positions + torch.tensor([17.0, -23.0]), edges))
+    assert original.state is ResultState.VALUE
+    assert translated.state is ResultState.VALUE
+    # U04a section 11 freezes exact translation invariance through frame anchoring.
+    assert translated.value == pytest.approx(original.value, abs=1e-12)
 
 
 def test_u04b_generous_spacing_has_low_crowding() -> None:
@@ -222,12 +223,32 @@ def test_u22_wide_plateau_has_zero_cost(semantic_scene: Scene) -> None:
     assert result.raw["measurement"] == "frozen_direction_set"
 
 
+def test_u22_unknown_declared_class_uses_other_class_target() -> None:
+    """U22 routes unlisted declared classes to the table's unit target."""
+
+    positions = torch.tensor([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
+    result = U22(_scene(positions, (), {"declared_graph_class": "novel"}))
+    # U22 section 6 sends all other declared classes to target one.
+    assert result.state is ResultState.VALUE
+    assert result.raw["target"] == pytest.approx(1.0, abs=0.0)
+
+
 def test_u23_symmetric_fixture_is_balanced(semantic_scene: Scene) -> None:
     """U23 returns exact zero for a centered symmetric drawing."""
 
     result = U23(semantic_scene)
     assert result.state is ResultState.VALUE
     assert result.value == pytest.approx(0.0, abs=0.0)
+
+
+def test_u23_does_not_fabricate_axis_from_ranks() -> None:
+    """U23 uses rotation averaging when ranks have no declared world axis."""
+
+    positions = torch.tensor([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
+    edges = ((0, 1), (1, 3), (3, 2), (2, 0))
+    result = U23(_scene(positions, edges, {"ranks": (0, 0, 1, 1)}))
+    # U23 section 5 requires a declared cross-axis, never one inferred from ranks.
+    assert result.raw["measurement"] == "rotation_averaged"
 
 
 def test_u24_compact_scene_publishes_finite_ink_ratio() -> None:
