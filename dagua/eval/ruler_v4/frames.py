@@ -8,6 +8,7 @@ from typing import List, Tuple
 
 import torch
 
+from dagua.eval.ruler_v4._tracing import tracing_active
 from dagua.eval.ruler_v4._util import resolved_routes
 from dagua.eval.ruler_v4.scene import Scene
 
@@ -159,7 +160,14 @@ def robust_frame(positions: torch.Tensor, unit: float) -> RobustFrame:
 
     if positions.ndim != 2 or positions.shape[1] != 2 or positions.shape[0] == 0:
         raise ValueError("positions must have shape [N, 2] with N >= 1")
-    points = positions.detach().to(device="cpu", dtype=torch.float64)
+    # Inside a trace the frame rides the positions' autograd graph (the trim
+    # selection is order statistics: piecewise-linear, a.e. differentiable);
+    # the exact path keeps the historical detach byte-for-byte. Values are
+    # identical either way -- detach never changes them.
+    if tracing_active():
+        points = positions.to(device="cpu", dtype=torch.float64)
+    else:
+        points = positions.detach().to(device="cpu", dtype=torch.float64)
     if not bool(torch.isfinite(points).all()) or unit <= 0.0 or not math.isfinite(unit):
         raise ValueError("frame inputs must be finite and unit must be positive")
     count = points.shape[0]

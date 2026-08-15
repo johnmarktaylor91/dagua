@@ -11,12 +11,56 @@ from typing import DefaultDict, List
 
 import torch
 
+from dagua.eval.ruler_v4._tracing import (
+    Scalar,
+    as_float,
+    keep,
+    p_exp,
+    p_max,
+    p_min,
+    p_sqrt,
+    p_sum,
+)
 from dagua.eval.ruler_v4._util import global_blend, graph_distances, primary_isotonic_fit, snap_unit
 from dagua.eval.ruler_v4.scene import FacetResult, Scene, na_result, value_result
-from dagua.eval.ruler_v4.structure import _distance_strata, _stress_from_fit
+from dagua.eval.ruler_v4.structure import _distance_strata
 
 _DISTANCE_SEMANTICS = frozenset({"distance_cost", "connection_strength"})
 _LOCAL_ORDER_SEMANTICS = frozenset({"distance_cost", "connection_strength"})
+
+
+def _stratum_stress(order: torch.Tensor, layout: torch.Tensor, fitted: torch.Tensor) -> Scalar:
+    """Read one stratum's Kruskal stress from a shared isotonic fit.
+
+    The closed form is ``structure._stress_from_fit`` routed through the
+    polymorphic tracing seam: outside a trace every operation executes the
+    historical float casts byte-for-byte; inside a trace the stress rides
+    the live layout distances (U35.md: "PAVA is continuous in drawn
+    distances", so the a.e. gradient given the detached tie/block structure
+    is exact).
+
+    Parameters
+    ----------
+    order, layout, fitted : torch.Tensor
+        Equal-length graph order, layout distance, and fitted disparity vectors.
+
+    Returns
+    -------
+    float or torch.Tensor
+        Stress-1 with the frozen zero-layout convention.
+    """
+
+    denominator = keep(torch.sum(layout * layout))
+    if as_float(denominator) == 0.0:
+        return 1.0 if torch.unique(order).numel() > 1 else 0.0
+    residual = keep(torch.sum((layout - fitted) ** 2))
+    if as_float(residual) == 0.0:
+        # sqrt has an infinite backward exactly at zero. A perfect fit sits
+        # on the norm's kink, where the historical value (0.0) is taken as
+        # the constant branch (the same boundary handling as mean_result's
+        # saturated noisy-OR row); off the kink the live form applies.
+        return 0.0
+    return p_min(1.0, p_sqrt(residual / denominator))
 
 
 def U35(scene: Scene) -> FacetResult:
@@ -57,12 +101,12 @@ def U35(scene: Scene) -> FacetResult:
         cursor = 0
         for unweighted_item, weighted_item in zip(unweighted_component, weighted_component):
             count = unweighted_item[2].numel()
-            stress_one = _stress_from_fit(
+            stress_one = _stratum_stress(
                 unweighted_item[2],
                 unweighted_item[3],
                 fit_unweighted[cursor : cursor + count],
             )
-            stress_weighted = _stress_from_fit(
+            stress_weighted = _stratum_stress(
                 weighted_item[2],
                 weighted_item[3],
                 fit_weighted[cursor : cursor + count],
@@ -119,24 +163,28 @@ def U36(scene: Scene) -> FacetResult:
     node_weights = []
     comparison_count = 0
     for edge_indices in incident.values():
-        burdens = []
+        burdens: List[Scalar] = []
         for left_index, left in enumerate(edge_indices):
             for right in edge_indices[left_index + 1 :]:
                 if strengths[left] == strengths[right]:
                     continue
+                # The comparison orientation is decided on declared strengths
+                # (input-owned constants); the contract-smoothed margin
+                # sigmoid (U36.md: ell_ef = sigmoid(z/0.03)) flows live
+                # through the drawn chord lengths.
                 strong, weak = (
                     (left, right) if strengths[left] > strengths[right] else (right, left)
                 )
-                denominator = float(lengths[strong] + lengths[weak])
+                denominator = keep(lengths[strong] + lengths[weak])
                 margin = (
-                    float(lengths[strong] - lengths[weak]) / denominator
-                    if denominator > 0.0
+                    keep(lengths[strong] - lengths[weak]) / denominator
+                    if as_float(denominator) > 0.0
                     else 0.0
                 )
-                scaled = max(-60.0, min(60.0, margin / 0.03))
-                burdens.append(1.0 / (1.0 + math.exp(-scaled)))
+                scaled = p_max(-60.0, p_min(60.0, margin / 0.03))
+                burdens.append(1.0 / (1.0 + p_exp(-scaled)))
         if burdens:
-            node_defects.append(snap_unit(sum(burdens) / len(burdens)))
+            node_defects.append(snap_unit(p_sum(burdens) / len(burdens)))
             node_weights.append(float(len(burdens)))
             comparison_count += len(burdens)
     if not node_defects:

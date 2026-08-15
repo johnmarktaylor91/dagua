@@ -11,6 +11,17 @@ from typing import Dict, List, Sequence, Set, Tuple
 
 import torch
 
+from dagua.eval.ruler_v4._tracing import (
+    Scalar,
+    as_float,
+    keep,
+    p_abs,
+    p_exp,
+    p_log,
+    p_max,
+    p_min,
+    p_sum,
+)
 from dagua.eval.ruler_v4._util import (
     components,
     global_blend,
@@ -73,7 +84,7 @@ def U38(scene: Scene) -> FacetResult:
         index: [scene.node_boxes[node] for node in members]
         for index, (members, _) in enumerate(frames)
     }
-    pair_losses: Dict[Tuple[int, int], float] = {}
+    pair_losses: Dict[Tuple[int, int], Scalar] = {}
     for left_index in range(len(frames)):
         for right_index in range(left_index + 1, len(frames)):
             clearance = _visible_component_clearance(
@@ -86,7 +97,7 @@ def U38(scene: Scene) -> FacetResult:
             argument = (0.50 * scene.intrinsic_unit - clearance) / (0.10 * scene.intrinsic_unit)
             pair_losses[(left_index, right_index)] = _stable_sigmoid(argument)
     component_masses = [len(members) for members, _ in frames]
-    component_losses: List[float] = []
+    component_losses: List[Scalar] = []
     for component_index in range(len(frames)):
         numerator = 0.0
         denominator = 0.0
@@ -108,8 +119,12 @@ def U38(scene: Scene) -> FacetResult:
     component_areas = _raster_component_areas(
         boxes_by_component, routes_by_component, global_frame, scene
     )
-    occupied = sum(component_areas) / global_frame.area
-    pack = _stable_sigmoid((math.log(0.20) - math.log(occupied + 2.0**-40)) / 0.25)
+    # The raster numerator is an irreducibly discrete cell count; the frame
+    # denominator is the same closed form as ``RobustFrame.area`` kept live
+    # (the contract-smoothed L_pack sigmoid then carries the frame's a.e.
+    # position gradient).
+    occupied = sum(component_areas) / keep(4.0 * torch.prod(global_frame.half_extents))
+    pack = _stable_sigmoid((math.log(0.20) - p_log(occupied + 2.0**-40)) / 0.25)
     total_area = sum(component_areas)
     total_mass = sum(component_masses)
     area_shares = [area / total_area for area in component_areas]
@@ -134,57 +149,65 @@ def U38(scene: Scene) -> FacetResult:
         values,
         {
             "component_count": len(frames),
-            "component_losses": tuple(component_losses),
+            "component_losses": tuple(as_float(loss) for loss in component_losses),
             "component_areas": tuple(component_areas),
-            "occupied_fraction": occupied,
-            "pair_losses": pair_losses,
+            "occupied_fraction": as_float(occupied),
+            "pair_losses": {key: as_float(loss) for key, loss in pair_losses.items()},
         },
     )
 
 
-def _stable_sigmoid(value: float) -> float:
+def _stable_sigmoid(value: Scalar) -> Scalar:
     """Evaluate a numerically stable scalar logistic.
+
+    The stability branch and the +-60 clamps are read detached (both
+    branches are the same closed form and the clamp is the historical
+    saturation); the selected branch's value flows live on tensors.
 
     Parameters
     ----------
-    value : float
+    value : float or torch.Tensor
         Logistic argument.
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Value in ``[0, 1]``.
     """
 
-    if value >= 0.0:
-        return 1.0 / (1.0 + math.exp(-min(value, 60.0)))
-    exponential = math.exp(max(value, -60.0))
+    if as_float(value) >= 0.0:
+        return 1.0 / (1.0 + p_exp(-p_min(value, 60.0)))
+    exponential = p_exp(p_max(value, -60.0))
     return exponential / (1.0 + exponential)
 
 
-def _equal_cvar(values: Sequence[float], tail_fraction: float) -> float:
+def _equal_cvar(values: Sequence[Scalar], tail_fraction: float) -> Scalar:
     """Return an exact equal-mass upper-tail mean.
+
+    The descending order is decided on detached values (piecewise-constant
+    off ties); the selected tail values flow live.
 
     Parameters
     ----------
-    values : sequence[float]
+    values : sequence[float or torch.Tensor]
         Nonempty loss population.
     tail_fraction : float
         Tail mass fraction in ``(0, 1]``.
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Fractional-boundary worst-tail mean.
     """
 
-    ordered = sorted(values, reverse=True)
+    order = sorted(range(len(values)), key=lambda index: as_float(values[index]), reverse=True)
+    ordered = [values[index] for index in order]
     target = tail_fraction * len(ordered)
     if target <= 1.0:
         return ordered[0]
     whole = int(math.floor(target))
     fraction = target - whole
-    burden = sum(ordered[:whole])
+    burden = p_sum(ordered[:whole])
     if fraction > 0.0 and whole < len(ordered):
         burden += fraction * ordered[whole]
     return burden / target
@@ -196,8 +219,11 @@ def _visible_component_clearance(
     right_boxes: Sequence[BoxGeometry],
     right_routes: Sequence[Route],
     scene: Scene,
-) -> float:
+) -> Scalar:
     """Return signed clearance between two components' visible geometry.
+
+    The minimizing primitive pair is decided on detached values (the hard
+    minimum is the frozen closed form); the selected clearance flows live.
 
     Parameters
     ----------
@@ -210,16 +236,16 @@ def _visible_component_clearance(
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Minimum signed primitive clearance.
     """
 
-    candidates: List[float] = []
+    candidates: List[Scalar] = []
     for left in left_boxes:
         for right in right_boxes:
             delta = torch.abs(left.center - right.center) - (left.half_extents + right.half_extents)
-            outside = float(torch.linalg.vector_norm(torch.clamp(delta, min=0.0)))
-            inside = min(max(float(delta[0]), float(delta[1])), 0.0)
+            outside = keep(torch.linalg.vector_norm(torch.clamp(delta, min=0.0)))
+            inside = p_min(p_max(keep(delta[0]), keep(delta[1])), 0.0)
             candidates.append(outside + inside)
     half_width = scene.style.route_stroke_width * scene.style.coordinate_scale / 2.0
     for box in left_boxes:
@@ -249,7 +275,34 @@ def _visible_component_clearance(
                         )
                         - 2.0 * half_width
                     )
-    return min(candidates)
+    return _detached_min(candidates)
+
+
+def _detached_min(candidates: Sequence[Scalar]) -> Scalar:
+    """Return the minimum candidate, deciding the argmin on detached values.
+
+    Byte-identical to builtin ``min`` on the float path (first minimal
+    element wins ties); on tensors the selected value keeps its graph.
+
+    Parameters
+    ----------
+    candidates : sequence[float or torch.Tensor]
+        Nonempty scalar population.
+
+    Returns
+    -------
+    float or torch.Tensor
+        Minimum element.
+    """
+
+    best = candidates[0]
+    best_value = as_float(best)
+    for candidate in candidates[1:]:
+        value = as_float(candidate)
+        if value < best_value:
+            best = candidate
+            best_value = value
+    return best
 
 
 def _raster_component_areas(
@@ -364,41 +417,41 @@ def U41(scene: Scene) -> FacetResult:
     area_reference = (
         primitive_area / 0.10 * (1.0 + 0.5 * (len(components(scene)) - 1)) / face_opportunity
     )
-    convex_sum = 0.0
-    area_sum = 0.0
+    convex_sum: Scalar = 0.0
+    area_sum: Scalar = 0.0
     raw_faces: List[Dict[str, float]] = []
     for face in faces:
         signed_area = _polygon_signed_area(face)
-        area = abs(signed_area)
-        hull_area = abs(_polygon_signed_area(_convex_hull(face)))
-        convexity_defect = 1.0 - area / hull_area if hull_area > 0.0 else 1.0
-        reflex_terms: List[float] = []
+        area = p_abs(signed_area)
+        hull_area = p_abs(_polygon_signed_area(_convex_hull(face)))
+        convexity_defect = 1.0 - area / hull_area if as_float(hull_area) > 0.0 else 1.0
+        reflex_terms: List[Scalar] = []
         for index, point in enumerate(face):
             incoming = point - face[index - 1]
             outgoing = face[(index + 1) % len(face)] - point
-            denominator = float(
+            denominator = keep(
                 torch.linalg.vector_norm(incoming) * torch.linalg.vector_norm(outgoing)
             )
-            if denominator == 0.0:
+            if as_float(denominator) == 0.0:
                 continue
-            sine = float(incoming[0] * outgoing[1] - incoming[1] * outgoing[0]) / denominator
+            sine = keep(incoming[0] * outgoing[1] - incoming[1] * outgoing[0]) / denominator
             reflex_terms.append(_stable_sigmoid(-sine / 0.03))
-        reflex = sum(reflex_terms) / len(reflex_terms) if reflex_terms else 1.0
+        reflex = p_sum(reflex_terms) / len(reflex_terms) if reflex_terms else 1.0
         combined = 0.70 * convexity_defect + 0.30 * reflex
-        balance = abs(area - area_reference) / (area + area_reference)
+        balance = p_abs(area - area_reference) / (area + area_reference)
         convex_sum += combined / face_opportunity
         area_sum += balance / face_opportunity
         raw_faces.append(
             {
-                "area": area,
-                "hull_area": hull_area,
-                "convexity_defect": convexity_defect,
-                "reflex_burden": reflex,
-                "balance_burden": balance,
+                "area": as_float(area),
+                "hull_area": as_float(hull_area),
+                "convexity_defect": as_float(convexity_defect),
+                "reflex_burden": as_float(reflex),
+                "balance_burden": as_float(balance),
             }
         )
-    convexity = 1.0 - math.exp(-convex_sum)
-    balance = 1.0 - math.exp(-area_sum)
+    convexity = 1.0 - p_exp(-convex_sum)
+    balance = 1.0 - p_exp(-area_sum)
     values = {"U41.L_conv": convexity, "U41.L_area": balance}
     return mean_result(
         "U41",
@@ -419,8 +472,12 @@ def _segment_intersection_parameters(
     end_a: torch.Tensor,
     start_b: torch.Tensor,
     end_b: torch.Tensor,
-) -> Tuple[float, float] | None:
+) -> Tuple[Scalar, Scalar] | None:
     """Return proper intersection parameters for two segments.
+
+    The proper-crossing predicate is decided on detached values (it is the
+    registered ``U41_FACE_SPLIT`` event Boolean); the parameters themselves
+    flow live so constructed arrangement vertices ride the endpoints.
 
     Parameters
     ----------
@@ -429,19 +486,19 @@ def _segment_intersection_parameters(
 
     Returns
     -------
-    tuple[float, float] or None
+    tuple[float or torch.Tensor, float or torch.Tensor] or None
         Interior parameters on A and B, if the segments cross properly.
     """
 
     direction_a = end_a - start_a
     direction_b = end_b - start_b
-    denominator = float(direction_a[0] * direction_b[1] - direction_a[1] * direction_b[0])
-    if denominator == 0.0:
+    denominator = keep(direction_a[0] * direction_b[1] - direction_a[1] * direction_b[0])
+    if as_float(denominator) == 0.0:
         return None
     offset = start_b - start_a
-    parameter_a = float(offset[0] * direction_b[1] - offset[1] * direction_b[0]) / denominator
-    parameter_b = float(offset[0] * direction_a[1] - offset[1] * direction_a[0]) / denominator
-    if 0.0 < parameter_a < 1.0 and 0.0 < parameter_b < 1.0:
+    parameter_a = keep(offset[0] * direction_b[1] - offset[1] * direction_b[0]) / denominator
+    parameter_b = keep(offset[0] * direction_a[1] - offset[1] * direction_a[0]) / denominator
+    if 0.0 < as_float(parameter_a) < 1.0 and 0.0 < as_float(parameter_b) < 1.0:
         return parameter_a, parameter_b
     return None
 
@@ -494,7 +551,7 @@ def _arrangement_faces(scene: Scene) -> Tuple[List[List[torch.Tensor]], int] | N
     """
 
     segments = route_segments(scene)
-    split_parameters: List[List[float]] = [[0.0, 1.0] for _ in segments]
+    split_parameters: List[List[Scalar]] = [[0.0, 1.0] for _ in segments]
     crossing_count = 0
     for left_index, (edge_left, _, start_left, end_left) in enumerate(segments):
         left_terminals = set(scene.graph.edges[edge_left])
@@ -541,7 +598,15 @@ def _arrangement_faces(scene: Scene) -> Tuple[List[List[torch.Tensor]], int] | N
 
     for segment, parameters in zip(segments, split_parameters):
         _, _, start, end = segment
-        ordered = sorted(set(parameters))
+        # Deduplicate and sort on detached parameter values (exactly the
+        # historical ``sorted(set(...))`` on floats); the retained first
+        # occurrence keeps its live graph.
+        unique_parameters: Dict[float, Scalar] = {}
+        for parameter in parameters:
+            key = as_float(parameter)
+            if key not in unique_parameters:
+                unique_parameters[key] = parameter
+        ordered = [unique_parameters[key] for key in sorted(unique_parameters)]
         vertices = [point_id(start + parameter * (end - start)) for parameter in ordered]
         for left, right in zip(vertices, vertices[1:]):
             if left != right:
@@ -578,12 +643,12 @@ def _arrangement_faces(scene: Scene) -> Tuple[List[List[torch.Tensor]], int] | N
             current = (vertex, next_vertex)
         if current == start and len(cycle_ids) >= 3:
             polygon = [point_values[index] for index in cycle_ids]
-            if _polygon_signed_area(polygon) > 0.0:
+            if as_float(_polygon_signed_area(polygon)) > 0.0:
                 cycles.append(polygon)
     return cycles, crossing_count
 
 
-def _polygon_signed_area(points: Sequence[torch.Tensor]) -> float:
+def _polygon_signed_area(points: Sequence[torch.Tensor]) -> Scalar:
     """Return a polygon's signed shoelace area.
 
     Parameters
@@ -593,18 +658,24 @@ def _polygon_signed_area(points: Sequence[torch.Tensor]) -> float:
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Positive area for counter-clockwise order.
     """
 
-    return 0.5 * sum(
-        float(left[0] * right[1] - left[1] * right[0])
-        for left, right in zip(points, tuple(points[1:]) + (points[0],))
+    return 0.5 * p_sum(
+        [
+            keep(left[0] * right[1] - left[1] * right[0])
+            for left, right in zip(points, tuple(points[1:]) + (points[0],))
+        ]
     )
 
 
 def _convex_hull(points: Sequence[torch.Tensor]) -> List[torch.Tensor]:
     """Return the canonical monotone-chain convex hull.
+
+    Hull membership and orientation are decided on detached coordinates
+    (exactly the historical float-tuple chain); the returned vertices are
+    the original live point tensors, so downstream areas keep the graph.
 
     Parameters
     ----------
@@ -617,9 +688,14 @@ def _convex_hull(points: Sequence[torch.Tensor]) -> List[torch.Tensor]:
         Counter-clockwise hull vertices.
     """
 
-    unique = sorted({(float(point[0]), float(point[1])) for point in points})
+    live_points: Dict[Tuple[float, float], torch.Tensor] = {}
+    for point in points:
+        key = (float(point[0]), float(point[1]))
+        if key not in live_points:
+            live_points[key] = point
+    unique = sorted(live_points)
     if len(unique) <= 2:
-        return [torch.tensor(point, dtype=torch.float64) for point in unique]
+        return [live_points[point] for point in unique]
 
     def cross(
         origin: Tuple[float, float], left: Tuple[float, float], right: Tuple[float, float]
@@ -651,7 +727,7 @@ def _convex_hull(points: Sequence[torch.Tensor]) -> List[torch.Tensor]:
         while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0.0:
             upper.pop()
         upper.append(point)
-    return [torch.tensor(point, dtype=torch.float64) for point in lower[:-1] + upper[:-1]]
+    return [live_points[point] for point in lower[:-1] + upper[:-1]]
 
 
 @dataclass(frozen=True)
@@ -1147,8 +1223,11 @@ def _primitive_boundary_band(primitive: _ChannelPrimitive, scene: Scene) -> List
     return _primitive_polygons(primitive, scene)
 
 
-def _primitive_clearance(left: _ChannelPrimitive, right: _ChannelPrimitive, scene: Scene) -> float:
+def _primitive_clearance(left: _ChannelPrimitive, right: _ChannelPrimitive, scene: Scene) -> Scalar:
     """Return signed visible-geometry clearance between two channel primitives.
+
+    The minimizing segment is decided on detached values; the selected
+    clearance flows live where the underlying geometry helpers do.
 
     Parameters
     ----------
@@ -1159,7 +1238,7 @@ def _primitive_clearance(left: _ChannelPrimitive, right: _ChannelPrimitive, scen
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Signed clearance in scene coordinates.
     """
 
@@ -1167,31 +1246,37 @@ def _primitive_clearance(left: _ChannelPrimitive, right: _ChannelPrimitive, scen
         delta = torch.abs(left.box.center - right.box.center) - (
             left.box.half_extents + right.box.half_extents
         )
-        return float(torch.linalg.vector_norm(torch.clamp(delta, min=0.0))) + min(
-            max(float(delta[0]), float(delta[1])), 0.0
+        return keep(torch.linalg.vector_norm(torch.clamp(delta, min=0.0))) + p_min(
+            p_max(keep(delta[0]), keep(delta[1])), 0.0
         )
     if left.box is not None and right.route is not None:
         return (
-            min(
-                _box_segment_clearance(left.box, start, end)
-                for start, end in zip(right.route.points[:-1], right.route.points[1:])
+            _detached_min(
+                [
+                    _box_segment_clearance(left.box, start, end)
+                    for start, end in zip(right.route.points[:-1], right.route.points[1:])
+                ]
             )
             - _primitive_stroke_width(right, scene) / 2.0
         )
     if right.box is not None and left.route is not None:
         return (
-            min(
-                _box_segment_clearance(right.box, start, end)
-                for start, end in zip(left.route.points[:-1], left.route.points[1:])
+            _detached_min(
+                [
+                    _box_segment_clearance(right.box, start, end)
+                    for start, end in zip(left.route.points[:-1], left.route.points[1:])
+                ]
             )
             - _primitive_stroke_width(left, scene) / 2.0
         )
     assert left.route is not None and right.route is not None
     return (
-        min(
-            _segment_segment_distance(left_start, left_end, right_start, right_end)
-            for left_start, left_end in zip(left.route.points[:-1], left.route.points[1:])
-            for right_start, right_end in zip(right.route.points[:-1], right.route.points[1:])
+        _detached_min(
+            [
+                _segment_segment_distance(left_start, left_end, right_start, right_end)
+                for left_start, left_end in zip(left.route.points[:-1], left.route.points[1:])
+                for right_start, right_end in zip(right.route.points[:-1], right.route.points[1:])
+            ]
         )
         - (_primitive_stroke_width(left, scene) + _primitive_stroke_width(right, scene)) / 2.0
     )
@@ -1347,6 +1432,29 @@ def _soft_min(values: Sequence[float], temperature: float) -> float:
     )
 
 
+def _smooth01(value: Scalar) -> Scalar:
+    """Evaluate the shared quintic smoothstep on one scalar.
+
+    Byte-identical to the historical
+    ``float(smoothstep(torch.tensor(value, dtype=torch.float64)))`` on the
+    float path; a live tensor argument keeps its graph.
+
+    Parameters
+    ----------
+    value : float or torch.Tensor
+        Smoothstep argument.
+
+    Returns
+    -------
+    float or torch.Tensor
+        Smoothstep value in ``[0, 1]``.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return keep(smoothstep(value))
+    return float(smoothstep(torch.tensor(value, dtype=torch.float64)))
+
+
 def U42(scene: Scene) -> FacetResult:
     """Encoding fidelity & contrast. Frozen SHA-256: 7ee672a532e6032cab87ca1ffe35156192c1a19edf384a4db5e33803d389c94e."""
 
@@ -1373,33 +1481,25 @@ def U42(scene: Scene) -> FacetResult:
             area = float(4.0 * torch.prod(primitive.box.half_extents))
             if area > 24.0 * scene.intrinsic_unit * scene.intrinsic_unit:
                 target = 3.0
-        loss = 1.0 - float(
-            smoothstep(torch.tensor((ratio - 1.0) / (target - 1.0), dtype=torch.float64))
-        )
+        loss = 1.0 - _smooth01((ratio - 1.0) / (target - 1.0))
         contrast_losses.append(visibility[primitive.identifier] * loss)
         contrast_weights.append(primitive.mass)
-    distinguishability: List[float] = []
-    robustness: List[float] = []
+    distinguishability: List[Scalar] = []
+    robustness: List[Scalar] = []
     pair_weights: List[float] = []
     proximate_count = 0
     for left_index, left in enumerate(population):
         for right in population[left_index + 1 :]:
             if left.category == right.category:
                 continue
-            clearance = max(0.0, _primitive_clearance(left, right, scene))
-            proximity = 1.0 - float(
-                smoothstep(
-                    torch.tensor(clearance / (2.0 * scene.intrinsic_unit), dtype=torch.float64)
-                )
-            )
-            if proximity <= 0.0:
+            clearance = p_max(0.0, _primitive_clearance(left, right, scene))
+            proximity = 1.0 - _smooth01(clearance / (2.0 * scene.intrinsic_unit))
+            if as_float(proximity) <= 0.0:
                 continue
             proximate_count += 1
             visible = proximity * min(visibility[left.identifier], visibility[right.identifier])
             delta = _ciede2000(_srgb_to_lab(left.color), _srgb_to_lab(right.color))
-            distinguishability.append(
-                visible * (1.0 - float(smoothstep(torch.tensor(delta / 20.0, dtype=torch.float64))))
-            )
+            distinguishability.append(visible * (1.0 - _smooth01(delta / 20.0)))
             simulated = [
                 _ciede2000(
                     _srgb_to_lab(_simulate_cvd(left.color, matrix)),
@@ -1408,12 +1508,9 @@ def U42(scene: Scene) -> FacetResult:
                 for matrix in _CVD_MATRICES
             ]
             soft_delta = _soft_min(simulated, 0.05)
-            robustness.append(
-                visible
-                * (1.0 - float(smoothstep(torch.tensor(soft_delta / 20.0, dtype=torch.float64))))
-            )
+            robustness.append(visible * (1.0 - _smooth01(soft_delta / 20.0)))
             pair_weights.append((left.mass + right.mass) / 2.0)
-    values: Dict[str, float] = {
+    values: Dict[str, Scalar] = {
         "U42.i": global_blend(contrast_losses, contrast_weights),
     }
     if distinguishability:
