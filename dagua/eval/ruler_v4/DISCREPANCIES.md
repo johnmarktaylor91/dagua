@@ -91,3 +91,11 @@ the production port; none of the entries below overrides a contract.
     to the region-bounds top; both fallbacks are input-only functions of the derived
     region, so scattered clusters ingest and are scored (and punished by U29/U30) rather
     than aborting the scene.
+20. U22 section 6 sends "all other declared classes and undeclared graphs" to
+    `kappa_class = 1`, while section 13 case (c) types a declared class outside the
+    frozen exemption table's domain as `unknown_declared_class` INVALID and pre-bans the
+    silent unit fallback as an undocumented score-visible branch. The two clauses
+    conflict for unknown class strings. Production follows section 13, the CC-4
+    failure-behavior authority: unknown declared classes are INVALID; undeclared graphs
+    still score against the unit target. Resolving the section 6 wording is a
+    contract-owner item.
