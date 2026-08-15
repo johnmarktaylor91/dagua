@@ -142,3 +142,50 @@ def test_scattered_cluster_scene_ingests_and_every_facet_evaluates() -> None:
     punished = evaluate_facet("U30", result.scene, alpha_grid_index=1)
     assert punished.state is ResultState.VALUE
     assert punished.value is not None and punished.value > 0.0
+
+
+# --- P4REVERIFY3_FABLE blocker 4: the global blend must stay total on ---
+# saturated defect populations (float dust pushes an exact-1.0 trim above 1).
+
+
+def test_u20a_scores_saturated_populations_instead_of_crashing() -> None:
+    """Golden 2's catastrophic endpoint scores ~1; it must never raise."""
+
+    coincident = U20a(_node_scene(torch.zeros((6, 2), dtype=torch.float64)))
+    assert coincident.state is ResultState.VALUE
+    assert coincident.value == pytest.approx(1.0, abs=1e-6)
+    nano = U20a(
+        _node_scene(
+            torch.tensor(
+                [[0.0, 0.0], [1e-9, 0.0], [1e-9, 1e-9], [0.0, 1e-9]],
+                dtype=torch.float64,
+            ),
+            edges=((0, 1), (1, 2), (2, 3)),
+        )
+    )
+    assert nano.state is ResultState.VALUE
+    assert nano.value == pytest.approx(1.0, abs=1e-6)
+
+
+def test_u11_scores_plain_declared_rank_dag() -> None:
+    """A load-bearing corpus family must evaluate, not die in the blend."""
+
+    from dagua.eval.ruler_v4.edges import U11
+
+    points = [[4.0 * column, 6.0 * rank] for rank in range(3) for column in range(3)]
+    edges = tuple(
+        (rank * 3 + column, (rank + 1) * 3 + child)
+        for rank in range(2)
+        for column in range(3)
+        for child in range(3)
+        if (column + child) % 2 == 0
+    )
+    scene = _node_scene(
+        torch.tensor(points, dtype=torch.float64),
+        ranks=tuple(rank for rank in range(3) for _ in range(3)),
+        flow_axis=(0.0, 1.0),
+        edges=edges,
+    )
+    result = U11(scene)
+    assert result.state is ResultState.VALUE
+    assert result.subterms
