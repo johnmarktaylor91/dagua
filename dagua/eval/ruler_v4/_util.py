@@ -242,35 +242,37 @@ def _as_tensor(value: Scalar) -> torch.Tensor:
     return torch.tensor(float(value), dtype=torch.float64)
 
 
-def mean_result(
+def compose_facet_rows(
     facet_id: str,
     values: Mapping[str, Scalar],
-    raw: Optional[Mapping[str, object]] = None,
     *,
     renormalize_missing: bool = True,
-) -> FacetResult:
-    """Build a facet value with its frozen row-composition operator.
+) -> Optional[Scalar]:
+    """Compose scored rows with the frozen operator, without publishing.
+
+    Grid facets evaluate the row composition once per shared-grid row; only
+    the selected row is published as a ``FacetResult``. This is the exact
+    composition core of :func:`mean_result` (which delegates here), so the
+    envelope rows and the published row execute the same operations.
 
     Parameters
     ----------
     facet_id : str
-        Contract id used only for validation context.
-    values : mapping[str, float]
+        Contract id selecting the frozen row weights and operator family.
+    values : mapping[str, float or torch.Tensor]
         Scored sub-term values.
-    raw : mapping[str, object] or None
-        Published raw statistics.
     renormalize_missing : bool
-        Whether to redistribute absent row mass over the applicable rows. Set
-        false only where a facet contract explicitly freezes absent mass.
+        Whether to redistribute absent row mass over the applicable rows.
 
     Returns
     -------
-    FacetResult
-        Bounded fixed-ratio result.
+    float or torch.Tensor or None
+        Composed row value, or ``None`` where the facet has no applicable
+        rows (the ``mean_result`` NA condition).
     """
 
     if not values:
-        return na_result(f"{facet_id.lower()}_no_objects", raw)
+        return None
     weights = _FACET_ROW_WEIGHTS.get(facet_id)
     if weights is None and facet_id == "U33":
         has_radial_rows = any(key.startswith("U33.radial") for key in values)
@@ -281,7 +283,7 @@ def mean_result(
     applicable = {key: weight for key, weight in weights.items() if key in values}
     mass = sum(applicable.values())
     if mass <= 0.0:
-        return na_result(f"{facet_id.lower()}_no_objects", raw)
+        return None
     effective = (
         {key: weight / mass for key, weight in applicable.items()}
         if renormalize_missing
@@ -314,6 +316,39 @@ def mean_result(
             )
         else:
             result = snap_unit(sum(effective[key] * float(values[key]) for key in effective))
+    return result
+
+
+def mean_result(
+    facet_id: str,
+    values: Mapping[str, Scalar],
+    raw: Optional[Mapping[str, object]] = None,
+    *,
+    renormalize_missing: bool = True,
+) -> FacetResult:
+    """Build a facet value with its frozen row-composition operator.
+
+    Parameters
+    ----------
+    facet_id : str
+        Contract id used only for validation context.
+    values : mapping[str, float]
+        Scored sub-term values.
+    raw : mapping[str, object] or None
+        Published raw statistics.
+    renormalize_missing : bool
+        Whether to redistribute absent row mass over the applicable rows. Set
+        false only where a facet contract explicitly freezes absent mass.
+
+    Returns
+    -------
+    FacetResult
+        Bounded fixed-ratio result.
+    """
+
+    result = compose_facet_rows(facet_id, values, renormalize_missing=renormalize_missing)
+    if result is None:
+        return na_result(f"{facet_id.lower()}_no_objects", raw)
     return value_result(result, values, raw)
 
 
