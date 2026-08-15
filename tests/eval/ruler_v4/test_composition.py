@@ -177,7 +177,7 @@ def test_strict_win_requires_more_than_sum_of_nearby_manifold_bounds() -> None:
 
     assert equal.event_margin == 2.0 * one_bound
     assert equal.verdict is ComparisonVerdict.EVENT_MARGIN_LIMITED
-    assert strict.verdict is ComparisonVerdict.FIRST_WINS
+    assert strict.verdict is ComparisonVerdict.MARGIN_RULE_FIRST_WINS
     assert strict.nearby_manifold_ids == ("face-split-1", "face-split-2")
 
 

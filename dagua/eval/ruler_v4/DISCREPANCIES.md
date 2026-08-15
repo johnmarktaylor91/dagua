@@ -234,3 +234,30 @@ the production port; none of the entries below overrides a contract.
     smooth-onset properties without claiming the optional family has passed R3-DR. The
     exact nesting formula and shipped-family selection remain P5/freeze inputs rather
     than phase-2 weight values.
+33. V4_SPEC_r4 3.3 resolves the weight-bearing manifest structure as SOL's generated
+    semantic-slot budget ledger with FABLE's 8 groups persisting only as a slot->group
+    REPORTING rollup carrying no weight semantics, but the frozen MANIFEST.json carries
+    no group/slot field on any facet row, so no build-time source of truth exists for
+    either partition. Production therefore makes the shipped P_MEAN family compose over
+    the frozen scored sub-term inventory directly (the finest partition already frozen
+    in CONTRACTS), which is score-inert to every relabelling of `SubtermWeight.group`
+    by construction; the group field feeds attribution rollups only. The optional
+    MEAN_SOFT_BOTTLENECK family does consume the group partition through its explicit
+    per-group allowances: that partition, like the family selection itself (entry 32),
+    is a P5/freeze input to be generated with the slot ledger under A18 -- a table
+    shipping that family without a frozen partition artifact has no defense against
+    partition drift, and phase-5 tooling must validate it before the family can pass
+    R3-DR.
+34. V4_SPEC_r4 CC-1's frozen ordering rule makes a strict verdict require BOTH the
+    decision margin to exceed the summed nearby jump bounds AND SE_pair to sit below
+    half the smallest score-visible single-event jump bound, and 4.1/4.3 additionally
+    require the JND/posterior arm (p_win over a calibrated latent advantage) before a
+    WIN is published. Phase 2 implements the jump-bound-sum arm always and the SE_pair
+    arm whenever the caller supplies the uncertainty-ledger inputs
+    (`se_pair`/`smallest_visible_jump_bound`); the JND/posterior arm is V4-POLICY
+    fit-time machinery that cannot exist before P5 calibration, so
+    `compare_with_event_margin` publishes deliberately scoped `MARGIN_RULE_*` verdicts
+    (never WIN/TIE semantics from 4.3) and MODULARITY.md directs phase 3 to wrap --
+    not rename -- this result with the ledger and JND machinery. Sub-JND margins
+    therefore remain publishable as MARGIN_RULE_* by this seam alone; no consumer may
+    treat them as certified strict wins.

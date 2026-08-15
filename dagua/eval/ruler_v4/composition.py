@@ -21,10 +21,17 @@ class CompositionFamily(str, Enum):
 
 
 class ComparisonVerdict(str, Enum):
-    """Event-margin comparison outcomes."""
+    """Event-margin comparison outcomes, scoped to the CC-1 margin rule.
 
-    FIRST_WINS = "FIRST_WINS"
-    SECOND_WINS = "SECOND_WINS"
+    ``MARGIN_RULE_*`` verdicts certify only the frozen ordering rule's
+    jump-bound arms (event-budget sum, plus the paired-SE gate when its
+    inputs are supplied). They are NOT the 4.1/4.3 strict-win verdict: the
+    JND/posterior arm is V4-POLICY fit-time machinery (DISCREPANCIES entry
+    34), so phase 3 must wrap this comparison, never republish it as WIN.
+    """
+
+    MARGIN_RULE_FIRST_WINS = "MARGIN_RULE_FIRST_WINS"
+    MARGIN_RULE_SECOND_WINS = "MARGIN_RULE_SECOND_WINS"
     TIE = "TIE"
     EVENT_MARGIN_LIMITED = "EVENT_MARGIN_LIMITED"
 
@@ -243,7 +250,7 @@ class ComparisonResult:
     Parameters
     ----------
     verdict : ComparisonVerdict
-        Strict, tied, or event-margin-limited outcome.
+        Margin-rule, tied, or event-margin-limited outcome.
     decision_margin : float
         Absolute difference between exact ``L_total`` values.
     event_margin : float
@@ -252,6 +259,15 @@ class ComparisonResult:
         Stable event types used in the margin.
     nearby_manifold_ids : tuple[str, ...]
         Stable occurrence identities used in the margin.
+    se_pair : float or None
+        Paired standard error under CRN, when the caller's uncertainty
+        ledger supplied it.
+    smallest_visible_jump_bound : float or None
+        Smallest score-visible single-event jump bound for the graph, when
+        supplied alongside ``se_pair``.
+    se_gate_passed : bool or None
+        Whether ``se_pair`` sits below half that bound; ``None`` when the
+        SE arm was not evaluated.
     """
 
     verdict: ComparisonVerdict
@@ -259,6 +275,9 @@ class ComparisonResult:
     event_margin: float
     nearby_event_ids: Tuple[str, ...]
     nearby_manifold_ids: Tuple[str, ...]
+    se_pair: Optional[float] = None
+    smallest_visible_jump_bound: Optional[float] = None
+    se_gate_passed: Optional[bool] = None
 
 
 def _smooth_max(values: Tuple[float, ...], temperature: float) -> float:
@@ -463,8 +482,18 @@ def compare_with_event_margin(
     first_nearby: Tuple[NearbyEvent, ...],
     second_nearby: Tuple[NearbyEvent, ...],
     registry: EventRegistry,
+    *,
+    se_pair: Optional[float] = None,
+    smallest_visible_jump_bound: Optional[float] = None,
 ) -> ComparisonResult:
-    """Apply the strict-win margin rule to two exact compositions.
+    """Apply the CC-1 margin rule's jump-bound arms to two exact compositions.
+
+    A ``MARGIN_RULE_*`` verdict certifies that the decision margin exceeds
+    the summed nearby jump budget and, when the SE inputs are supplied, that
+    ``SE_pair`` sits below half the smallest score-visible single-event jump
+    bound (CC-1 frozen ordering rule, both arms). It is NOT the full 4.1/4.3
+    strict win: the JND/posterior arm is V4-POLICY fit-time machinery
+    (DISCREPANCIES entry 34) and must wrap this result, never rename it.
 
     Parameters
     ----------
@@ -474,18 +503,34 @@ def compare_with_event_margin(
         Declared manifold occurrences within epsilon of either scored row.
     registry : EventRegistry
         Frozen generated event registry.
+    se_pair : float or None
+        Paired standard error under CRN from the uncertainty ledger. Ships
+        together with ``smallest_visible_jump_bound``.
+    smallest_visible_jump_bound : float or None
+        Smallest score-visible single-event jump bound for this graph.
 
     Returns
     -------
     ComparisonResult
-        Strict only when the decision margin is greater than the summed nearby
-        jump budget.
+        Margin-rule outcome; ``EVENT_MARGIN_LIMITED`` whenever either
+        evaluated arm withholds the margin verdict.
 
     Raises
     ------
     ValueError
-        If a nearby event is undeclared or one occurrence changes event type.
+        If a nearby event is undeclared, one occurrence changes event type,
+        or the SE inputs are malformed or supplied without each other.
     """
+
+    if (se_pair is None) != (smallest_visible_jump_bound is None):
+        raise ValueError("se_pair and smallest_visible_jump_bound ship together")
+    se_gate_passed: Optional[bool] = None
+    if se_pair is not None and smallest_visible_jump_bound is not None:
+        if not math.isfinite(se_pair) or se_pair < 0.0:
+            raise ValueError("se_pair must be finite and nonnegative")
+        if not math.isfinite(smallest_visible_jump_bound) or smallest_visible_jump_bound < 0.0:
+            raise ValueError("smallest_visible_jump_bound must be finite and nonnegative")
+        se_gate_passed = se_pair < 0.5 * smallest_visible_jump_bound
 
     declared = {event.event_id: event for event in registry.entries}
     contexts: Dict[str, List[Tuple[str, Mapping[str, float]]]] = {}
@@ -519,16 +564,19 @@ def compare_with_event_margin(
     decision_margin = abs(first.l_total - second.l_total)
     if decision_margin == 0.0:
         verdict = ComparisonVerdict.TIE
-    elif decision_margin <= event_margin:
+    elif decision_margin <= event_margin or se_gate_passed is False:
         verdict = ComparisonVerdict.EVENT_MARGIN_LIMITED
     elif first.l_total < second.l_total:
-        verdict = ComparisonVerdict.FIRST_WINS
+        verdict = ComparisonVerdict.MARGIN_RULE_FIRST_WINS
     else:
-        verdict = ComparisonVerdict.SECOND_WINS
+        verdict = ComparisonVerdict.MARGIN_RULE_SECOND_WINS
     return ComparisonResult(
         verdict=verdict,
         decision_margin=decision_margin,
         event_margin=event_margin,
         nearby_event_ids=tuple(sorted(set(event_ids))),
         nearby_manifold_ids=tuple(sorted(contexts)),
+        se_pair=se_pair,
+        smallest_visible_jump_bound=smallest_visible_jump_bound,
+        se_gate_passed=se_gate_passed,
     )
