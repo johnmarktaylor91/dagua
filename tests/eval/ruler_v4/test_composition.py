@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
+
+import pytest
 
 from dagua.eval.ruler_v4.composition import (
     ComparisonVerdict,
@@ -14,7 +17,7 @@ from dagua.eval.ruler_v4.composition import (
 )
 from dagua.eval.ruler_v4.events import evaluate_jump_bound, load_event_registry
 from dagua.eval.ruler_v4.scene import FacetResult, na_result, value_result
-from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 
 
 def _three_group_weights() -> WeightTable:
@@ -204,3 +207,43 @@ def test_same_manifold_near_both_rows_is_counted_once() -> None:
 
     assert comparison.event_margin == expected
     assert comparison.verdict is ComparisonVerdict.EVENT_MARGIN_LIMITED
+
+
+def test_group_sensitivity_matches_finite_differences_for_both_families() -> None:
+    """3.7 attribution: published dL_total/dloss_g is the exact partial."""
+
+    step = 1e-7
+    profiles = (
+        CompositionProfile(CompositionFamily.P_MEAN, power=2.0),
+        CompositionProfile(
+            CompositionFamily.MEAN_SOFT_BOTTLENECK,
+            bottleneck_mix=0.4,
+            bottleneck_temperature=0.05,
+            group_allowances={"S": 0.1, "X": 0.1, "L": 0.1},
+        ),
+    )
+    base = (0.2, 0.5, 0.4)
+    for profile in profiles:
+        baseline = compose(_losses(*base), _three_group_weights(), profile)
+        for index, group_id in enumerate(("S", "X", "L")):
+            shifted = list(base)
+            shifted[index] += step
+            bumped = compose(_losses(*shifted), _three_group_weights(), profile)
+            numeric = (bumped.l_total - baseline.l_total) / step
+            published = next(
+                group.dl_total_dloss for group in baseline.groups if group.group == group_id
+            )
+            assert published == pytest.approx(numeric, rel=1e-5)
+
+
+def test_group_sensitivity_at_the_p_mean_origin_uses_the_directional_form() -> None:
+    """At l_total == 0 the published value is the one-sided derivative."""
+
+    result = compose(
+        _losses(0.0, 0.0, 0.0),
+        _three_group_weights(),
+        CompositionProfile(CompositionFamily.P_MEAN, power=2.0),
+    )
+    assert result.l_total == 0.0
+    for group in result.groups:
+        assert group.dl_total_dloss == pytest.approx(math.sqrt(1.0 / 3.0))

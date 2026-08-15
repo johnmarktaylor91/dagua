@@ -10,7 +10,7 @@ from typing import Dict, List, Mapping, Optional, Tuple
 
 from dagua.eval.ruler_v4.events import EventRegistry, evaluate_jump_bound
 from dagua.eval.ruler_v4.scene import FacetResult, ResultState
-from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 
 # CC-13 seam: an UNOBSERVED-class absence (budget/tier, not input-side
 # inapplicability) must enter as its full feasible interval, never as
@@ -170,6 +170,12 @@ class GroupContribution:
         Fraction of total applicable headline mass.
     allowance : float or None
         Soft-bottleneck allowance when that family is active.
+    dl_total_dloss : float
+        Exact partial derivative of ``l_total`` under a uniform shift of
+        every row in this group (V4_SPEC_r4 3.7's published attribution).
+        At the p-mean's origin kink (``l_total == 0``, ``p > 1``) the
+        published value is the one-sided directional derivative
+        ``normalized_mass ** (1/p)``.
     """
 
     group: str
@@ -177,6 +183,7 @@ class GroupContribution:
     mass: float
     normalized_mass: float
     allowance: Optional[float]
+    dl_total_dloss: float
 
 
 @dataclass(frozen=True)
@@ -404,7 +411,7 @@ def compose(
     group_rows: Dict[str, List[Tuple[SubtermWeight, float]]] = {}
     for entry, value in active_entries:
         group_rows.setdefault(entry.group, []).append((entry, value))
-    groups: List[GroupContribution] = []
+    group_stats: List[Tuple[str, float, float, Optional[float]]] = []
     for group in sorted(group_rows):
         rows = group_rows[group]
         mass = math.fsum(entry.weight for entry, _ in rows)
@@ -416,9 +423,9 @@ def compose(
         )
         if profile.family is CompositionFamily.MEAN_SOFT_BOTTLENECK and allowance is None:
             raise ValueError(f"missing explicit soft-bottleneck allowance for {group}")
-        groups.append(GroupContribution(group, loss, mass, mass / total_mass, allowance))
+        group_stats.append((group, loss, mass, allowance))
 
-    l_mean = math.fsum(group.loss * group.normalized_mass for group in groups)
+    l_mean = math.fsum(loss * mass / total_mass for _, loss, mass, _ in group_stats)
     if profile.family is CompositionFamily.P_MEAN:
         assert profile.power is not None
         # The shipped default composes over the frozen scored sub-term rows,
@@ -437,14 +444,42 @@ def compose(
         # the applicable-group count (the 3.3 universal-mass floor: an
         # identical catastrophe may not cost less on a metadata-richer row)
         # and every catastrophic group stays visible regardless of its mass.
-        excess_debts = []
-        for group in groups:
-            assert group.allowance is not None
-            excess_debts.append(
-                _smooth_positive(group.loss - group.allowance, profile.bottleneck_temperature)
-            )
-        l_bottleneck = math.fsum(excess_debts)
+        l_bottleneck = math.fsum(
+            _smooth_positive(loss - allowance, profile.bottleneck_temperature)
+            for _, loss, _, allowance in group_stats
+            if allowance is not None
+        )
         l_total = (1.0 - profile.bottleneck_mix) * l_mean + profile.bottleneck_mix * l_bottleneck
+
+    groups: List[GroupContribution] = []
+    for group, loss, mass, allowance in group_stats:
+        normalized_mass = mass / total_mass
+        if profile.family is CompositionFamily.P_MEAN:
+            assert profile.power is not None
+            if profile.power == 1.0:
+                sensitivity = normalized_mass
+            elif l_total > 0.0:
+                sensitivity = math.fsum(
+                    (entry.weight / total_mass) * value ** (profile.power - 1.0)
+                    for entry, value in group_rows[group]
+                ) * l_total ** (1.0 - profile.power)
+            else:
+                sensitivity = normalized_mass ** (1.0 / profile.power)
+        else:
+            assert profile.bottleneck_mix is not None
+            assert profile.bottleneck_temperature is not None
+            assert allowance is not None
+            excess = loss - allowance
+            tau = profile.bottleneck_temperature
+            onset_slope = (
+                (excess * excess + 2.0 * tau * excess) / ((excess + tau) * (excess + tau))
+                if excess > 0.0
+                else 0.0
+            )
+            sensitivity = (
+                1.0 - profile.bottleneck_mix
+            ) * normalized_mass + profile.bottleneck_mix * onset_slope
+        groups.append(GroupContribution(group, loss, mass, normalized_mass, allowance, sensitivity))
 
     subterms: List[SubtermContribution] = []
     for entry in weight_table.entries:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from dagua.eval.ruler_v4.contracts import CONTRACTS
-from dagua.eval.ruler_v4.weights import (
+from dagua.eval.ruler_v4.weight_table import (
     GATE_DIAGNOSTIC_FACETS,
     REQUIRED_PRIOR_FLOOR_FACETS,
     SubtermWeight,
@@ -109,7 +109,7 @@ def test_weight_table_rejects_nonzero_diagnostic_mass() -> None:
 def test_dof_account_models_the_a18_allocation_buckets() -> None:
     """Identities spend named A18 buckets; unassigned identities fail closed."""
 
-    from dagua.eval.ruler_v4.weights import DOF_ALLOCATION
+    from dagua.eval.ruler_v4.weight_table import DOF_ALLOCATION
 
     assert sum(DOF_ALLOCATION.values()) == 20
     table = WeightTable(
@@ -153,7 +153,7 @@ def test_unspent_reserve_and_unknown_buckets_are_rejected() -> None:
 def test_bucket_overspend_fails_the_contract_gate() -> None:
     """A table spending more identities than a bucket's allocation is refused."""
 
-    from dagua.eval.ruler_v4.weights import DOF_ALLOCATION
+    from dagua.eval.ruler_v4.weight_table import DOF_ALLOCATION
 
     width = DOF_ALLOCATION["semantic"] + 1
     table = WeightTable(
@@ -207,3 +207,42 @@ def test_provenance_class_is_validated_and_bundle_consistent() -> None:
             ),
             d_power=20,
         )
+
+
+def test_prior_floor_mass_must_be_flagged_or_evidence_fitted() -> None:
+    """PM-1 cross-check: bare prior-floor mass cannot dodge the numerator."""
+
+    def build(prior_driven: bool, fitted: bool) -> WeightTable:
+        entries = tuple(
+            SubtermWeight(
+                subterm_id=subterm_id,
+                facet_id=facet_id,
+                group="test",
+                weight=0.0 if facet_id in GATE_DIAGNOSTIC_FACETS else 1.0,
+                prior_driven=(facet_id in REQUIRED_PRIOR_FLOOR_FACETS) and prior_driven,
+                diagnostic=facet_id in GATE_DIAGNOSTIC_FACETS,
+                fitted_parameter=(
+                    f"w_{facet_id}" if fitted and facet_id in REQUIRED_PRIOR_FLOOR_FACETS else None
+                ),
+                provenance_class=(
+                    "fitted" if fitted and facet_id in REQUIRED_PRIOR_FLOOR_FACETS else None
+                ),
+            )
+            for facet_id, contract in CONTRACTS.items()
+            for subterm_id in contract.scored_subterms
+        )
+        return WeightTable(
+            entries=entries,
+            d_power=20,
+            prior_floors={facet_id: 1.0 for facet_id in REQUIRED_PRIOR_FLOOR_FACETS},
+            fitted_parameter_buckets=(
+                {f"w_{facet_id}": "universal" for facet_id in REQUIRED_PRIOR_FLOOR_FACETS}
+                if fitted
+                else {}
+            ),
+        )
+
+    with pytest.raises(ValueError, match="neither prior_driven nor"):
+        build(prior_driven=False, fitted=False).validate_for_contracts()
+    build(prior_driven=True, fitted=False).validate_for_contracts()
+    build(prior_driven=False, fitted=True).validate_for_contracts()

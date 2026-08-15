@@ -14,7 +14,7 @@ from dagua.eval.ruler_v4.composition import (
 )
 from dagua.eval.ruler_v4.edges import U07
 from dagua.eval.ruler_v4.events import evaluate_jump_bound, load_event_registry
-from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 
 from .conftest import build_crossing_field_scene, build_crossing_scene
 

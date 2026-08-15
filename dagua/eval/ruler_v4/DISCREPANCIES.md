@@ -282,3 +282,19 @@ the production port; none of the entries below overrides a contract.
     per-term interval propagation through `compose` (6.2) remains the phase-3 item
     MODULARITY.md already names; this seam guarantees no cheap tier can ever route
     unobserved mass through the renormalizing branch in the meantime.
+36. Three P2-review accounting seams are recorded as P5 obligations rather than
+    phase-2 code. (a) `NearbyEvent` carries no facet id, so a manifold owned by a
+    DIAG (weight-0) or currently-NA facet still enters the CC-1 strict-win budget;
+    the error direction is strictly conservative (more EVENT_MARGIN_LIMITED, never a
+    strict win), all eight contact-type registry entries carry bound 0.0 today, and
+    filtering to score-visible facets requires the fitted weight table, so the
+    score-visibility filter belongs to the P5 comparison tooling that owns that
+    table. (b) The 3.6 rule that a k-row bundle sharing one fitted identity counts
+    one dof ONLY when its internal ratios were fixed a priori is enforceable only
+    against the manifest's `fitted_dof_declaration`/`provenance_class` records at
+    fit time; phase 2 ships the `provenance_class` field with consistency
+    validation, and the manifest cross-check is the A18-side gate. (c) A caller can
+    still misclassify a fitted profile scalar as `preregistered_prior` in
+    `ScoringProfiles.parameter_provenance`; the classification is fail-closed on
+    omission and on unledgered fitted identities, and provenance truthfulness is
+    audited against A18/A20 at freeze, not computable at build time.

@@ -9,7 +9,7 @@ from dagua.eval.ruler_v4.contracts import CONTRACTS
 from dagua.eval.ruler_v4.headline import HeadlineProfile
 from dagua.eval.ruler_v4.scene import ResultState, Scene
 from dagua.eval.ruler_v4.score import OutputType, ScoringProfiles, score, score_scene
-from dagua.eval.ruler_v4.weights import (
+from dagua.eval.ruler_v4.weight_table import (
     GATE_DIAGNOSTIC_FACETS,
     REQUIRED_PRIOR_FLOOR_FACETS,
     ParameterProvenance,
@@ -135,3 +135,55 @@ def test_score_handles_conditionally_dropped_subterms(semantic_scene: Scene) -> 
 
     assert dropped
     assert all(row.normalized_weight == 0.0 and row.na_reason for row in dropped)
+
+
+def test_score_routes_a_temporal_scene_to_u40(semantic_scene: Scene) -> None:
+    """The pure entrypoint can publish all 45 rows, including U40 (P2 minor)."""
+
+    import torch
+
+    from dagua.eval.ruler_v4.ingestion import ingest, ingest_temporal
+    from dagua.eval.ruler_v4.scene import (
+        DrawingScene,
+        GraphSemantics,
+        ObservationProfile,
+        Route,
+        StyleContract,
+        TemporalTransition,
+        ValidScene,
+        ValidTemporalScene,
+    )
+
+    def frame() -> Scene:
+        positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]], dtype=torch.float64)
+        edges = ((0, 1), (0, 2))
+        routes = tuple(
+            Route(index, torch.stack((positions[source], positions[target])))
+            for index, (source, target) in enumerate(edges)
+        )
+        ingested = ingest(
+            GraphSemantics(("a", "b", "c"), edges, temporal_ids=("a", "b", "c")),
+            DrawingScene(positions, routes),
+            StyleContract(),
+            ObservationProfile(visible_channels=frozenset({"nodes", "routes"})),
+        )
+        assert isinstance(ingested, ValidScene)
+        return ingested.scene
+
+    transition = TemporalTransition(
+        {"a": "unchanged", "b": "unchanged", "c": "unchanged"},
+        {"a": 0.0, "b": 0.0, "c": 0.0},
+    )
+    temporal = ingest_temporal((frame(), frame()), (transition,))
+    assert isinstance(temporal, ValidTemporalScene)
+
+    scene = _scorable_scene(semantic_scene)
+    without = score(scene, _complete_table(), _profiles())
+    assert without.type_m.facets["U40"].result.reason == "TEMPORAL_PROFILE_ABSENT"
+
+    routed = score(scene, _complete_table(), _profiles(), temporal_scene=temporal.scene)
+    u40 = routed.type_m.facets["U40"].result
+    assert u40.state is ResultState.VALUE
+    assert u40.temporal_headline == 0.0
+    # U40 is DIAG at weight 0: the temporal route cannot move the headline.
+    assert routed.type_m.headline.value == without.type_m.headline.value

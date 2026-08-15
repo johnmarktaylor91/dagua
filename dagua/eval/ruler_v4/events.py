@@ -2,11 +2,40 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Mapping, Optional, Tuple
+
+# SHA-256 digests of the jump-bound formula strings the closed-form
+# evaluator below faithfully implements: per facet, the embedded compact
+# form and the frozen p3 EVENT_REGISTRY.json prose form. Any other string
+# means the registry moved without the evaluator (see evaluate_jump_bound).
+_U07_FORMULA_DIGESTS = frozenset(
+    {
+        "db15ec72ac0078c59c47472f19ce1291b1b93d6082b6e442d8c2492a4856b0ce",
+        "da3a009e57110b78e78be8ea175751e30fa12072f6ff5d69776688e7c1263eea",
+    }
+)
+_U11_FORMULA_DIGESTS = frozenset(
+    {
+        "b123ca679f8887de58064ff5b73cabe1941d29e29f01c1734de0ef80a26258b3",
+        "3a27c70dc404d6f2f2f1b6ee3a3710c0f548334815f50ab5ad26358de9e88391",
+    }
+)
+_U41_FORMULA_DIGESTS = frozenset(
+    {
+        "b4612d4b8065e6d36637eb3c0efbefd6db35677b76828d94fd76d4c13917ed9d",
+        "8f72fcf6c5ce8b76f2b8699b8088b444354a7f76f0209113b51730bc1d6b85a6",
+    }
+)
+_EVALUATOR_FORMULA_SHA256: Mapping[str, FrozenSet[str]] = {
+    "U07": _U07_FORMULA_DIGESTS,
+    "U11": _U11_FORMULA_DIGESTS,
+    "U41": _U41_FORMULA_DIGESTS,
+}
 
 
 @dataclass(frozen=True)
@@ -285,6 +314,20 @@ def evaluate_jump_bound(
         return event.jump_bound.value
     if event.jump_bound.formula is not None and event.jump_bound.formula.strip() == "0.0":
         return 0.0
+    # Tripwire: the three closed forms below are hardcoded Python. Consistency
+    # with the registry's formula STRINGS holds by copy discipline, so an
+    # amended/regenerated registry must refuse to evaluate under the stale
+    # hardcode instead of silently returning the old bound. The allowed
+    # digests are the embedded compact form and the frozen
+    # EVENT_REGISTRY.json prose form, per facet.
+    formula = event.jump_bound.formula or ""
+    digest = hashlib.sha256(formula.encode("utf-8")).hexdigest()
+    allowed = _EVALUATOR_FORMULA_SHA256.get(event.facet_id, frozenset())
+    if digest not in allowed:
+        raise ValueError(
+            f"{event.facet_id} jump-bound formula does not match the hardcoded "
+            "evaluator (registry drift); regenerate the evaluator before scoring"
+        )
     values: Dict[str, float] = {key: float(value) for key, value in (context or {}).items()}
     if event.facet_id == "U41":
         f0 = max(1.0, values.get("F0", 1.0))
