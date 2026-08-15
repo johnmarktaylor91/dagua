@@ -848,7 +848,10 @@ def _grid_geometry(
         Frame center, lower x/y, grid width/height, and rotated primitive groups.
     """
 
-    frame = robust_frame(scene.positions, scene.intrinsic_unit)
+    # U04's polygon-union grid is partition machinery on the float path in
+    # this seam version (constant under tracing), so the frame reads are
+    # detached decisions, not score-visible liveness.
+    frame = robust_frame(scene.positions.detach(), scene.intrinsic_unit)
     clamp = 16.0 * math.sqrt(scene.node_count) * scene.intrinsic_unit
     half = torch.minimum(frame.half_extents, torch.full((2,), clamp, dtype=torch.float64))
     corners = frame.center + torch.tensor(

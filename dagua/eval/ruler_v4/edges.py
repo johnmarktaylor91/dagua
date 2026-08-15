@@ -297,7 +297,7 @@ def _segment_event_point(
             return start_a + parameter_a * direction_a, _segment_angle(direction_a, direction_b)
         return None
     if (
-        float(direction_a[0] * (start_b - start_a)[1] - direction_a[1] * (start_b - start_a)[0])
+        as_float(direction_a[0] * (start_b - start_a)[1] - direction_a[1] * (start_b - start_a)[0])
         != 0.0
     ):
         return None
