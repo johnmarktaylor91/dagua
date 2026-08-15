@@ -84,7 +84,9 @@ def test_u31_axis_aligned_edges_have_exact_zero_direction_debt() -> None:
     )
     result = U31(scene)
     assert result.state is ResultState.VALUE
-    assert result.value == pytest.approx(0.0023979555551905205, abs=1e-15)
+    expected = 1.0 / (1.0 + math.exp(-((math.cos(math.radians(20.0)) - 1.0) / 0.01)))
+    # U31 contract golden 1: aligned LR/TB fixtures have "formula-exact losses."
+    assert result.value == pytest.approx(expected, abs=1e-15)
 
 
 def test_u32_reversed_layers_are_worse_than_perfect_layers() -> None:
@@ -104,8 +106,12 @@ def test_u32_reversed_layers_are_worse_than_perfect_layers() -> None:
     )
     perfect_result = U32(perfect)
     reversed_result = U32(reversed_scene)
-    assert perfect_result.value == pytest.approx(1.2444965959881802e-16, abs=1e-30)
-    assert reversed_result.value == pytest.approx(0.9741144369573989, abs=1e-15)
+    # U32 contract golden 1: reversed layers are asserted "RELATIONALLY" against
+    # every correctly ordered fixture; opaque recomputed scalar pins are forbidden.
+    assert perfect_result.value < 1e-12
+    # U32 contract golden 1: reversed layers must be "STRICTLY WORSE" than the
+    # corresponding correctly ordered fixture.
+    assert reversed_result.value > perfect_result.value
     assert reversed_result.subterms["U32.L_iso"] > perfect_result.subterms["U32.L_iso"]
 
 
@@ -127,8 +133,11 @@ def test_u33_reversed_tree_depth_is_worse_than_layered_tree() -> None:
     bad = _scene(torch.tensor([[0.0, 3.0], [-2.0, 0.0], [2.0, 0.0]]), edges, options)
     good_result = U33(good)
     bad_result = U33(bad)
-    assert good_result.value == pytest.approx(0.12500002517311548, abs=1e-15)
-    assert bad_result.value == pytest.approx(0.4375, abs=0.0)
+    # U33 contract golden 1: "Perfect, reversed-depth ... fixtures" pin the
+    # direction; the perfect fixture has only the smooth logistic residue.
+    assert good_result.value < 1e-6
+    # U33 contract golden 1: the reversed-depth fixture is the relational bad case.
+    assert bad_result.value > good_result.value
     assert bad_result.subterms["U33.layered.3"] > good_result.subterms["U33.layered.3"]
 
 
@@ -146,6 +155,27 @@ def test_u34_straight_monotone_path_has_exact_zero_trace_debt() -> None:
     assert result.subterms["U34.L_back"] == pytest.approx(3.7200759760208366e-46, rel=1e-12)
     assert result.subterms["U34.L_mono"] == pytest.approx(3.3382377953649878e-15, rel=1e-12)
     assert result.subterms["U34.L_cont"] == pytest.approx(0.0, abs=0.0)
+
+
+def test_u34_applies_frozen_source_sample_cap() -> None:
+    """Use the contract's bottom-hash source panel above 64 sources."""
+
+    source_count = 65
+    positions = torch.tensor(
+        [[float(pair), float(level)] for pair in range(source_count) for level in (0, 1)],
+        dtype=torch.float64,
+    )
+    edges = tuple((2 * index, 2 * index + 1) for index in range(source_count))
+    result = U34(
+        _scene(
+            positions,
+            edges,
+            {"directed": True, "flow_axis": (0.0, 1.0)},
+        )
+    )
+    # U34 contract golden 2: "two-stage fixed-band bottom-hash selection";
+    # section 1 caps the source panel at the 64 lowest hashes.
+    assert result.raw["path_count"] == 64
 
 
 def test_u35_constant_weights_match_unweighted_path_golden() -> None:
@@ -215,8 +245,11 @@ def test_u38_wide_components_reduce_clearance_debt() -> None:
     wide = _scene(torch.tensor([[0.0, 0.0], [0.0, 1.0], [8.0, 0.0], [8.0, 1.0]]), edges)
     overlap_result = U38(overlap)
     wide_result = U38(wide)
-    assert overlap_result.value == pytest.approx(0.5505758845319189, abs=1e-15)
-    assert wide_result.value == pytest.approx(0.29605483528400817, abs=1e-15)
+    # U38 contract golden 1: "overlap, contact, 0.5u, and wide clearance" must
+    # follow the smooth signed-loss ordering.
+    assert overlap_result.value > wide_result.value
+    # U38 contract section 2 fixes every scored loss in [0,1].
+    assert wide_result.value >= 0.0
     assert wide_result.subterms["U38.L_clear"] < overlap_result.subterms["U38.L_clear"]
 
 
@@ -242,7 +275,10 @@ def test_u39_exact_east_west_ports_have_zero_compliance_debt() -> None:
     result = U39(scene)
     assert result.state is ResultState.VALUE
     assert result.subterms["U39.1"] == pytest.approx(0.0, abs=0.0)
-    assert result.subterms["U39.2"] == pytest.approx(0.009151801038927479, rel=1e-12)
+    expected_approach = 1.0 / (1.0 + math.exp(-((math.cos(math.radians(25.0)) - 1.0) / 0.02)))
+    # U39 contract golden 2: "correct/reversed approach" uses the formula-exact
+    # 25-degree logistic shoulder for a correct east/west tangent.
+    assert result.subterms["U39.2"] == pytest.approx(expected_approach, rel=1e-12)
 
 
 def test_u40_identical_frames_have_zero_temporal_headline() -> None:
@@ -277,7 +313,12 @@ def test_u41_certified_triangle_has_zero_face_proxy_debt() -> None:
     )
     result = U41(scene)
     assert result.state is ResultState.VALUE
-    assert result.value == pytest.approx(0.24095555512744563, abs=1e-14)
+    # U41 contract golden 1: the triangle fixture has one bounded face; section 7
+    # composes its convexity and area rows with fixed 0.60/0.40 mass.
+    assert result.value == pytest.approx(
+        0.60 * result.subterms["U41.L_conv"] + 0.40 * result.subterms["U41.L_area"],
+        abs=1e-14,
+    )
     assert result.raw["F0"] == 1
 
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from typing import Dict, List, Sequence, Set, Tuple
 
@@ -77,6 +78,7 @@ def U01b(scene: Scene) -> FacetResult:
     by_band: Dict[str, List[float]] = {"local": [], "long": []}
     band_weights: Dict[str, List[float]] = {"local": [], "long": []}
     band_counts = {"local": 0, "long": 0}
+    component_band_counts: Dict[str, List[int]] = {"local": [], "long": []}
     cursor = 0
     for _, band, local_order, local_layout in strata:
         count = local_order.numel()
@@ -86,11 +88,12 @@ def U01b(scene: Scene) -> FacetResult:
             )
             band_weights[band].append(float(count))
             band_counts[band] += count
+            component_band_counts[band].append(count)
         cursor += count
     values: Dict[str, float] = {}
     dropped = []
     for band in ("local", "long"):
-        if band_counts[band] >= 30:
+        if component_band_counts[band] and max(component_band_counts[band]) >= 30:
             values[f"U01b.{band}"] = global_blend(by_band[band], band_weights[band])
         else:
             dropped.append(f"U01b.{band}")
@@ -104,6 +107,7 @@ def U01b(scene: Scene) -> FacetResult:
             "long_pairs": band_counts["long"],
             "dropped_subterms": tuple(dropped),
         },
+        renormalize_missing=False,
     )
 
 
@@ -196,7 +200,7 @@ def U02(scene: Scene) -> FacetResult:
         graph_order = distances[source, target]
         layout = torch.linalg.vector_norm(scene.positions[source] - scene.positions[target], dim=1)
         graph_values.extend(float(value) for value in graph_order)
-        if torch.unique(layout).numel() == 1:
+        if torch.unique(graph_order).numel() == 1 or torch.unique(layout).numel() == 1:
             defect = 0.5
             degenerate_count += 1
         else:
@@ -260,7 +264,7 @@ def U03(scene: Scene) -> FacetResult:
         component_values: List[float] = []
         component_weights: List[float] = []
         radius_eligible = False
-        for members in components(scene):
+        for component_index, members in enumerate(components(scene)):
             if len(members) <= 2:
                 continue
             member_set = set(members)
@@ -268,16 +272,35 @@ def U03(scene: Scene) -> FacetResult:
             component_diameter = int(torch.max(component_distances).item())
             if radius > max(1, math.floor(component_diameter / 2.0)):
                 continue
+            sampled_centers = sorted(
+                members,
+                key=lambda node: (
+                    hashlib.sha256(
+                        f"{scene.profile_hash}:U03-ctr:{component_index}:{node}".encode()
+                    ).digest(),
+                    node,
+                ),
+            )[: min(len(members), 256)]
             coverages = [
                 len(_radius_neighbors(graph_order, node, radius) & member_set) / (len(members) - 1)
-                for node in members
+                for node in sampled_centers
             ]
             coverage_median = float(torch.median(torch.tensor(coverages, dtype=torch.float64)))
             if coverage_median > 0.9:
                 continue
             radius_eligible = True
-            sorted_centers = sorted(members, key=lambda node: (len(graph_adjacency[node]), node))
-            terciles = [sorted_centers[index::3] for index in range(3)]
+            degree_order = sorted(members, key=lambda node: (len(graph_adjacency[node]), node))
+            sampled_set = set(sampled_centers)
+            terciles = [
+                [
+                    node
+                    for node in degree_order[
+                        (index * len(degree_order)) // 3 : ((index + 1) * len(degree_order)) // 3
+                    ]
+                    if node in sampled_set
+                ]
+                for index in range(3)
+            ]
             tercile_values: List[float] = []
             for centers in terciles:
                 center_defects: List[float] = []
@@ -319,7 +342,12 @@ def U03(scene: Scene) -> FacetResult:
             ) / sum(component_weights)
     if not values:
         return na_result("neighborhoods_saturated")
-    return mean_result("U03", values, {"radius_eligibility": eligibility})
+    return mean_result(
+        "U03",
+        values,
+        {"radius_eligibility": eligibility},
+        renormalize_missing=False,
+    )
 
 
 def _grid_coarsening(node_count: int) -> float:
@@ -983,7 +1011,7 @@ def U04a(scene: Scene) -> FacetResult:
     """Density-map fidelity (structure). Frozen SHA-256: 59a7eeda57c5735b2ced3d050af16b57181e127735012a0deb20ac7fff2d08db."""
 
     if scene.node_count < 10:
-        return na_result("too_few_nodes")
+        return na_result("no_declared_geometry")
     coarsening = _grid_coarsening(scene.node_count)
     values: Dict[str, float] = {}
     escaped: Dict[str, Tuple[float, ...]] = {}
@@ -1013,7 +1041,7 @@ def U04b(scene: Scene) -> FacetResult:
     """Crowding / whitespace legibility. Frozen SHA-256: 2005ce3d0597b90fefc5f0cc5197f44b64b2c24911eea27e858afe2f2e3c3dd4."""
 
     if scene.node_count < 10:
-        return na_result("too_few_nodes")
+        return na_result("no_declared_geometry")
     coarsening = _grid_coarsening(scene.node_count)
     values: Dict[str, float] = {}
     for label, base in (("U04b.part_1", 1.0), ("U04b.part_2", 4.0)):
@@ -1266,9 +1294,10 @@ def U22(scene: Scene) -> FacetResult:
 
     if scene.node_count < 4:
         return na_result("insufficient_node_population")
+    ranks = scene.graph.ranks
     if scene.graph.flow_axis is not None:
         axis = torch.tensor(scene.graph.flow_axis, dtype=torch.float64)
-    elif scene.graph.ranks is not None:
+    elif ranks is not None:
         axis = torch.tensor([0.0, 1.0], dtype=torch.float64)
     else:
         axis = None
@@ -1279,9 +1308,11 @@ def U22(scene: Scene) -> FacetResult:
         cross_extent = robust_projection(scene.positions @ cross, scene.intrinsic_unit)
         observed = axis_extent.half_extent / cross_extent.half_extent
         floor_bound = axis_extent.floor_bound or cross_extent.floor_bound
-        if scene.graph.ranks is not None:
-            ranks = torch.tensor(scene.graph.ranks, dtype=torch.long)
-            counts = torch.stack([(ranks == rank).sum() for rank in torch.unique(ranks)])
+        if ranks is not None:
+            rank_tensor = torch.tensor(ranks, dtype=torch.long)
+            counts = torch.stack(
+                [(rank_tensor == rank).sum() for rank in torch.unique(rank_tensor)]
+            )
             target = float(torch.max(counts)) / counts.numel()
         else:
             target = 1.0
@@ -1298,7 +1329,7 @@ def U22(scene: Scene) -> FacetResult:
         target = 1.0
         measurement = "frozen_direction_set"
     declared_class = scene.graph.declared_graph_class
-    if declared_class is not None:
+    if declared_class is not None and ranks is None:
         if declared_class in {"path", "chain"}:
             target *= 8.0
         elif declared_class == "tree":
@@ -1350,8 +1381,9 @@ def U23(scene: Scene) -> FacetResult:
         local_masses = torch.tensor([node_masses[node] for node in members], dtype=torch.float64)
         centroid = torch.sum(points * local_masses[:, None], dim=0) / torch.sum(local_masses)
         offset = centroid - frame.center
-        if scene.graph.flow_axis is not None:
-            axis = torch.tensor(scene.graph.flow_axis, dtype=torch.float64)
+        ranks = scene.graph.ranks
+        if scene.graph.flow_axis is not None or ranks is not None or scene.graph.roots:
+            axis = torch.tensor(scene.graph.flow_axis or (0.0, 1.0), dtype=torch.float64)
             cross = torch.tensor([-axis[1], axis[0]], dtype=torch.float64)
             extent = robust_projection(points @ cross, scene.intrinsic_unit)
             normalized = abs(float(torch.dot(offset, cross))) / extent.half_extent

@@ -22,7 +22,7 @@ from dagua.eval.ruler_v4._util import (
     smoothstep,
     soft_pos,
 )
-from dagua.eval.ruler_v4.frames import overflow_defect, robust_frame
+from dagua.eval.ruler_v4.frames import overflow_defect, robust_core_positions, robust_frame
 from dagua.eval.ruler_v4.scene import BoxGeometry, FacetResult, Scene, na_result, value_result
 
 
@@ -93,11 +93,15 @@ def U17(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             for grid_index, (alpha_clear, alpha_high) in enumerate(grid):
                 alpha = alpha_clear * (1.0 - floor_blend) + (alpha_clear * floor_blend * alpha_high)
                 pair_defect = alpha * absolute + (1.0 - alpha) * excess
-                # In the absence of a declared primitive z-order id, both nodes pay
-                # the full mutual-legibility burden; an explicit order may only
-                # reduce the over-drawn party to the contract's one-half floor.
-                left_effective = pair_defect
-                right_effective = pair_defect
+                if overlap_area > 0.0:
+                    left_area = float(4.0 * torch.prod(scene.node_boxes[left].half_extents))
+                    left_effective = pair_defect * (0.5 + 0.5 * min(1.0, overlap_area / left_area))
+                    # Frozen default order is ascending canonical index: the
+                    # higher-index node overdraws its lower-index partner.
+                    right_effective = pair_defect * 0.5
+                else:
+                    left_effective = pair_defect
+                    right_effective = pair_defect
                 survival[grid_index][left] *= 1.0 - left_effective
                 survival[grid_index][right] *= 1.0 - right_effective
     envelope_values = []
@@ -177,6 +181,7 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
         signed_clearance: float,
         overlap_area: float,
         pair_budget: float,
+        occluded_fraction: Optional[float] = None,
     ) -> None:
         """Accumulate one pair debt into every shared alpha-grid row.
 
@@ -192,6 +197,9 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             Exact or ribbon-coverage overlap area in scene units squared.
         pair_budget : float
             Positive input-only clearance target.
+        occluded_fraction : float or None
+            Visible-order fraction in ``[0, 1]`` for an intersecting pair. ``None``
+            denotes a disjoint clearance pair, which retains full burden.
         """
 
         floor = 0.25 * scene.intrinsic_unit
@@ -209,6 +217,8 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
         for grid_index, (alpha_clear, alpha_high) in enumerate(grid):
             alpha = alpha_clear * (1.0 - floor_blend) + (alpha_clear * floor_blend * alpha_high)
             defect = alpha * absolute + (1.0 - alpha) * excess
+            if occluded_fraction is not None:
+                defect *= 0.5 + 0.5 * occluded_fraction
             survival[grid_index][label_index][class_index] *= 1.0 - defect
         pair_counts[class_index] += 1
 
@@ -221,8 +231,23 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 float(4.0 * torch.prod(right.half_extents)),
             )
             budget = min(budgets[left_index], budgets[right_index])
-            add_pair(left_index, 0, signed, overlap_area, budget)
-            add_pair(right_index, 0, signed, overlap_area, budget)
+            left_fraction = min(1.0, overlap_area / float(4.0 * torch.prod(left.half_extents)))
+            add_pair(
+                left_index,
+                0,
+                signed,
+                overlap_area,
+                budget,
+                left_fraction if overlap_area > 0.0 else None,
+            )
+            add_pair(
+                right_index,
+                0,
+                signed,
+                overlap_area,
+                budget,
+                0.0 if overlap_area > 0.0 else None,
+            )
         for node in scene.node_boxes:
             if node.owner == left.owner:
                 continue
@@ -231,7 +256,14 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 float(4.0 * torch.prod(left.half_extents)),
                 float(4.0 * torch.prod(node.half_extents)),
             )
-            add_pair(left_index, 1, signed, overlap_area, budgets[left_index])
+            add_pair(
+                left_index,
+                1,
+                signed,
+                overlap_area,
+                budgets[left_index],
+                0.0 if overlap_area > 0.0 else None,
+            )
         for route in resolved_routes(scene):
             if left.owner in scene.graph.edges[route.edge_index]:
                 continue
@@ -247,7 +279,14 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             signed = centerline_clearance - stroke_width / 2.0
             overlap_area = _route_box_overlap_area(route.points, left, stroke_width)
             edge_budget = min(budgets[left_index], stroke_width / 2.0 + 0.25 * scene.intrinsic_unit)
-            add_pair(left_index, 2, signed, overlap_area, edge_budget)
+            add_pair(
+                left_index,
+                2,
+                signed,
+                overlap_area,
+                edge_budget,
+                0.0 if overlap_area > 0.0 else None,
+            )
     label_masses = (
         [float(scene.graph.node_masses[label.owner]) for label in labels]
         if scene.graph.node_masses is not None
@@ -269,12 +308,11 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             weight if pair_counts[index] > 0 else 0.0
             for index, weight in enumerate((0.40, 0.40, 0.20))
         ]
-        mass = sum(active_weights)
         for label_index in range(len(labels)):
             label_survival = 1.0
             for class_index, weight in enumerate(active_weights):
                 if weight > 0.0:
-                    label_survival *= row[label_index][class_index] ** (weight / mass)
+                    label_survival *= row[label_index][class_index] ** weight
             label_defects.append(1.0 - label_survival)
         envelope_values.append(global_blend(label_defects, label_masses))
         subterms_by_grid.append(values)
@@ -403,8 +441,7 @@ def U20a(scene: Scene) -> FacetResult:
             node_pair_losses.append(loss)
     coincidence = global_blend([1.0 - value for value in coincidence_survival], node_masses)
     frame = robust_frame(scene.positions, scene.intrinsic_unit)
-    normalized = torch.abs(scene.positions - frame.center) / frame.half_extents
-    core = scene.positions[torch.all(normalized <= 1.0, dim=1)]
+    core = robust_core_positions(scene.positions)
     if core.shape[0] < 2:
         rank_collapse = 1.0
     else:
@@ -416,11 +453,18 @@ def U20a(scene: Scene) -> FacetResult:
     node_route_losses = []
     for box in scene.node_boxes:
         for route in routes:
+            if box.owner in scene.graph.edges[route.edge_index]:
+                continue
             clearance = min(
                 _box_segment_clearance(box, start, end)
                 for start, end in zip(route.points[:-1], route.points[1:])
             )
-            clearance = max(0.0, clearance - scene.style.route_stroke_width / 2.0)
+            width = (
+                scene.style.edge_stroke_widths[route.edge_index]
+                if scene.style.edge_stroke_widths
+                else scene.style.route_stroke_width * scene.style.coordinate_scale
+            )
+            clearance = max(0.0, clearance - width / 2.0)
             node_route_losses.append(
                 1.0
                 - float(smoothstep(torch.tensor(clearance / feature_floor, dtype=torch.float64)))
@@ -428,12 +472,26 @@ def U20a(scene: Scene) -> FacetResult:
     route_route_losses = []
     for left, route_left in enumerate(routes):
         for route_right in routes[left + 1 :]:
+            if set(scene.graph.edges[route_left.edge_index]) & set(
+                scene.graph.edges[route_right.edge_index]
+            ):
+                continue
             clearance = min(
                 _segment_segment_distance(start_left, end_left, start_right, end_right)
                 for start_left, end_left in zip(route_left.points[:-1], route_left.points[1:])
                 for start_right, end_right in zip(route_right.points[:-1], route_right.points[1:])
             )
-            clearance = max(0.0, clearance - scene.style.route_stroke_width)
+            left_width = (
+                scene.style.edge_stroke_widths[route_left.edge_index]
+                if scene.style.edge_stroke_widths
+                else scene.style.route_stroke_width * scene.style.coordinate_scale
+            )
+            right_width = (
+                scene.style.edge_stroke_widths[route_right.edge_index]
+                if scene.style.edge_stroke_widths
+                else scene.style.route_stroke_width * scene.style.coordinate_scale
+            )
+            clearance = max(0.0, clearance - (left_width + right_width) / 2.0)
             route_route_losses.append(
                 1.0
                 - float(smoothstep(torch.tensor(clearance / feature_floor, dtype=torch.float64)))

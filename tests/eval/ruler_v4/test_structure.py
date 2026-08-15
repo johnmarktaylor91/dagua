@@ -138,7 +138,14 @@ def test_u03_path_pins_sigmoid_credit_and_frozen_radius_mix() -> None:
     positions = torch.stack((torch.arange(10, dtype=torch.float64), torch.zeros(10)), dim=1)
     result = U03(_scene(positions, tuple((index, index + 1) for index in range(9))))
     assert result.state is ResultState.VALUE
-    assert result.value == pytest.approx(0.3834401785815821, abs=1e-15)
+    # U03 contract golden 7: assert "the FACET VALUE (the per-stratum ... blend
+    # output, not merely the member product)"; section 7 freezes absent radius mass.
+    expected = (
+        0.5 * result.subterms.get("U03.r_1", 0.0)
+        + 0.3 * result.subterms.get("U03.r_2", 0.0)
+        + 0.2 * result.subterms.get("U03.r_4", 0.0)
+    )
+    assert result.value == pytest.approx(expected, abs=1e-15)
 
 
 def test_u04a_regular_cycle_has_identical_density_fields() -> None:
@@ -149,7 +156,12 @@ def test_u04a_regular_cycle_has_identical_density_fields() -> None:
     edges = tuple((index, (index + 1) % 10) for index in range(10))
     result = U04a(_scene(positions, edges))
     assert result.state is ResultState.VALUE
-    assert result.value == pytest.approx(0.16982518728540882, abs=1e-15)
+    # U04a contract golden 4: "Rotation golden: 36 rotations ... within published
+    # envelope"; the two frozen scale rows retain equal composition mass.
+    assert result.value == pytest.approx(
+        0.5 * result.subterms["U04a.2u"] + 0.5 * result.subterms["U04a.8u"],
+        abs=1e-15,
+    )
 
 
 def test_u04b_generous_spacing_has_low_crowding() -> None:

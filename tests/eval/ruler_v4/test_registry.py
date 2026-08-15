@@ -41,6 +41,14 @@ def test_contract_smoke_case(facet_id: str, semantic_scene: Scene) -> None:
         assert set(result.subterms).issubset(CONTRACTS[facet_id].scored_subterms)
 
 
+def test_u07_dispatch_forwards_fitted_parameters(semantic_scene: Scene) -> None:
+    """Expose both fitted U07 scalars through the public facet registry."""
+
+    result = evaluate_facet("U07", semantic_scene, gamma=2.0, lambda_T=0.25)
+    assert result.raw["gamma"] == 2.0
+    assert result.raw["lambda_T"] == 0.25
+
+
 @pytest.mark.parametrize("facet_id", CONTRACTS)
 def test_contract_worked_identity(facet_id: str) -> None:
     """Pin each contract title, exact id, and frozen hash used by worked goldens."""

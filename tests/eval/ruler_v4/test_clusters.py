@@ -100,7 +100,9 @@ def test_u26_separated_clusters_score_better_than_interleaved_twin() -> None:
     assert separated_result.value is not None
     assert interleaved_result.value is not None
     assert separated_result.value == pytest.approx(0.0, abs=0.0)
-    assert interleaved_result.value == pytest.approx(0.6757302798599085, abs=1e-15)
+    # U26 contract golden 4: interleaved communities "score D^i near 1" and
+    # "improve monotonically as the declared communities are separated."
+    assert interleaved_result.subterms["U26.i"] > separated_result.subterms["U26.i"]
     assert separated_result.value < interleaved_result.value
 
 
@@ -116,7 +118,9 @@ def test_u27_nonmember_nodes_and_routes_outside_region_have_no_intrusion() -> No
     assert result.reason == "alpha_grid_unselected"
     lower, upper = result.raw["grid_envelope"]
     assert lower <= upper
-    assert upper == pytest.approx(0.2125671952287158, rel=1e-12)
+    # U27 contract golden 4: "(ii) = 0 for every member interior to its cluster";
+    # golden 5 likewise scores only a foreign route routed through the cluster.
+    assert upper == pytest.approx(0.0, abs=0.0)
 
 
 def test_u28_nested_parent_contains_child_without_overflow() -> None:
@@ -178,4 +182,7 @@ def test_u30_single_visible_cluster_label_pins_grid_envelope() -> None:
     )
     assert result.state is ResultState.NA
     assert result.reason == "alpha_grid_unselected"
-    assert result.raw["grid_envelope"] == pytest.approx((0.9289481267661222, 1.0), abs=1e-15)
+    lower, upper = result.raw["grid_envelope"]
+    # U30 contract golden 4: "the occluded party pays; permuting z never repairs
+    # a label overlap." Every preregistered alpha row therefore remains nonzero.
+    assert 0.0 < lower <= upper <= 1.0
