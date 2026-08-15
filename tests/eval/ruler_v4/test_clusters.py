@@ -183,3 +183,184 @@ def test_u30_derived_label_is_exactly_at_declared_padding() -> None:
     assert result.subterms["U30.ii"] == pytest.approx(0.0, abs=0.0)
     label = scene.cluster_label_boxes["c"]
     assert float(label.center[0]) == pytest.approx(1.0, abs=0.0)
+
+
+def _traced_cluster_scene() -> Scene:
+    """Build the clusters traced-seam fixture: two communities plus strays.
+
+    Seeded noise off a two-community layout with a shared parent cluster,
+    two unclustered stray nodes, and declared cluster labels, so the
+    separation (U26), containment (U27), hierarchy (U28), and label (U30)
+    channels all carry nonzero defects.
+
+    Returns
+    -------
+    Scene
+        Validated clustered scene.
+    """
+
+    generator = torch.Generator().manual_seed(0)
+    base = torch.tensor(
+        [
+            [0.0, 0.0],
+            [0.9, 0.1],
+            [0.2, 1.1],
+            [1.3, 0.9],
+            [4.2, 0.3],
+            [5.1, -0.2],
+            [4.6, 1.2],
+            [5.4, 0.8],
+            [2.6, 2.4],
+            [2.4, -1.6],
+        ],
+        dtype=torch.float64,
+    )
+    positions = base + 0.13 * torch.randn(base.shape, generator=generator, dtype=torch.float64)
+    edges = tuple((index, index + 1) for index in range(9)) + ((0, 3), (4, 7))
+    graph = GraphSemantics(
+        tuple(f"n{index}" for index in range(10)),
+        edges,
+        clusters={"a": (0, 1, 2, 3), "b": (4, 5, 6, 7), "top": tuple(range(8))},
+        cluster_parents={"a": "top", "b": "top"},
+    )
+    routes = tuple(
+        Route(index, torch.stack((positions[source], positions[target])))
+        for index, (source, target) in enumerate(edges)
+    )
+    result = ingest(
+        graph,
+        DrawingScene(positions, routes),
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes", "cluster_labels"})),
+    )
+    assert isinstance(result, ValidScene)
+    return result.scene
+
+
+def _score_traced(scene: Scene):
+    """Score one scene through the traced surrogate seam."""
+
+    from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile
+    from dagua.eval.ruler_v4.contracts import CONTRACTS
+    from dagua.eval.ruler_v4.headline import HeadlineProfile
+    from dagua.eval.ruler_v4.score import ScoringProfiles
+    from dagua.eval.ruler_v4.surrogate.traced import score_scene_soft
+    from dagua.eval.ruler_v4.weight_table import (
+        GATE_DIAGNOSTIC_FACETS,
+        REQUIRED_PRIOR_FLOOR_FACETS,
+        ParameterProvenance,
+        SubtermWeight,
+        WeightTable,
+    )
+
+    entries = tuple(
+        SubtermWeight(
+            subterm_id=subterm_id,
+            facet_id=facet_id,
+            group=facet_id[:3],
+            weight=0.0 if facet_id in GATE_DIAGNOSTIC_FACETS else 1.0,
+            prior_driven=facet_id in REQUIRED_PRIOR_FLOOR_FACETS,
+            diagnostic=facet_id in GATE_DIAGNOSTIC_FACETS,
+            provenance_class=(
+                None
+                if facet_id in GATE_DIAGNOSTIC_FACETS
+                else "preregistered_prior"
+                if facet_id in REQUIRED_PRIOR_FLOOR_FACETS
+                else "contract_frozen"
+            ),
+        )
+        for facet_id, contract in CONTRACTS.items()
+        for subterm_id in contract.scored_subterms
+    )
+    table = WeightTable(
+        entries=entries,
+        d_power=20,
+        prior_floors={facet_id: 1.0 for facet_id in REQUIRED_PRIOR_FLOOR_FACETS},
+    )
+    profiles = ScoringProfiles(
+        composition=CompositionProfile(CompositionFamily.P_MEAN, power=2.0),
+        headline=HeadlineProfile(index_span=100.0, loss_scale=1.0, version="probe"),
+        measurement_version="probe-measurement",
+        policy_version="probe-policy",
+        alpha_grid_index=1,
+        parameter_provenance={
+            "composition.power": ParameterProvenance("preregistered_prior"),
+            "headline.index_span": ParameterProvenance("contract_frozen"),
+            "headline.loss_scale": ParameterProvenance("preregistered_prior"),
+            "alpha_grid_index": ParameterProvenance("preregistered_prior"),
+        },
+    )
+    return score_scene_soft(scene, table, profiles)
+
+
+@pytest.fixture(scope="module")
+def cluster_traced():
+    """Score the clusters fixture once through the traced seam (expensive)."""
+
+    scene = _traced_cluster_scene()
+    return scene, _score_traced(scene)
+
+
+def test_cluster_traced_rows_carry_live_position_gradients(cluster_traced) -> None:
+    """Traced cluster geometry rows differentiate against positions.
+
+    Live rows on this fixture: separation margins (U26.i), community
+    stratum contrasts (U26.iii), foreign-node intrusion (U27.i), parent
+    coverage economy (U28.ii), sibling-overlap (U28.iii), and the derived
+    cluster-label containment (U30.i, live through the region geometry
+    even while the label box itself is an input-owned constant).
+    """
+
+    import torch as _torch
+
+    _, traced = cluster_traced
+    live_rows = ("U26.i", "U26.iii", "U27.i", "U28.ii", "U28.iii", "U30.i")
+    for row in live_rows:
+        tensor = traced.traced_subterms[row]
+        assert tensor.requires_grad, row
+        (gradient,) = _torch.autograd.grad(
+            tensor, traced.positions, retain_graph=True, allow_unused=True
+        )
+        assert gradient is not None, row
+        assert float(_torch.linalg.vector_norm(gradient)) > 0.0, row
+    # Honest flats on this fixture, traced but exactly stationary:
+    # U25.headline and U29.headline sit at their exact-zero defects
+    # (anchored zeros), U27.ii at zero member escape, U28.i at zero
+    # overflow, U30.ii at zero padding debt; U27.iii's route-intrusion
+    # fade is saturated (every foreign route fully inside or outside the
+    # 0.25 band, where the smooth fade's derivative is exactly zero).
+    for row in ("U25.headline", "U29.headline", "U27.ii", "U27.iii", "U28.i", "U30.ii"):
+        tensor = traced.traced_subterms[row]
+        assert tensor.requires_grad, row
+        (gradient,) = _torch.autograd.grad(
+            tensor, traced.positions, retain_graph=True, allow_unused=True
+        )
+        assert gradient is not None, row
+        assert float(_torch.linalg.vector_norm(gradient)) == 0.0, row
+    assert traced.soft.l_total.requires_grad
+
+
+def test_cluster_traced_values_match_untraced_evaluation(cluster_traced) -> None:
+    """Traced cluster subterm values agree with the exact un-traced facets."""
+
+    scene, traced = cluster_traced
+    exact = {}
+    for facet, needs_grid in (
+        (U25, False),
+        (U26, False),
+        (U27, True),
+        (U28, True),
+        (U29, False),
+        (U30, True),
+    ):
+        result = facet(scene, 1) if needs_grid else facet(scene)
+        assert result.state is ResultState.VALUE, facet.__name__
+        for key, value in result.subterms.items():
+            # The exact path must keep publishing plain floats (no leaked graph).
+            assert isinstance(value, float), key
+            exact[key] = value
+    for row, expected in exact.items():
+        assert row in traced.traced_subterms, row
+        traced_value = float(traced.traced_subterms[row].detach())
+        # Traced forwards may differ from exact by accumulation order only.
+        assert traced_value == pytest.approx(expected, rel=1e-9, abs=1e-15), row
