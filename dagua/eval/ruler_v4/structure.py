@@ -26,6 +26,7 @@ from dagua.eval.ruler_v4._util import (
     primary_isotonic_fit,
     resolved_routes,
     smoothstep,
+    snap_unit,
     soft_pos,
 )
 from dagua.eval.ruler_v4.frames import robust_frame, robust_projection
@@ -346,16 +347,17 @@ def U03(scene: Scene) -> FacetResult:
                     tercile_values.append(global_blend(center_defects))
             degree_stratum_defects[statistic_key] = tuple(tercile_values)
             if tercile_values:
-                component_values.append(sum(tercile_values) / len(tercile_values))
+                component_values.append(snap_unit(sum(tercile_values) / len(tercile_values)))
                 # Section 4 weights block: "Components pooled by node-count
                 # input mass". Section 7's "components by node mass" summary
                 # conflicts; the dedicated weights block governs (docketed).
                 component_weights.append(float(len(members)))
         eligibility[f"r_{radius}"] = radius_eligible
         if component_values:
-            values[f"U03.r_{radius}"] = sum(
-                weight * value for weight, value in zip(component_weights, component_values)
-            ) / sum(component_weights)
+            values[f"U03.r_{radius}"] = snap_unit(
+                sum(weight * value for weight, value in zip(component_weights, component_values))
+                / sum(component_weights)
+            )
     if not values:
         return na_result("neighborhoods_saturated")
     return mean_result(
@@ -1277,7 +1279,7 @@ def U14(scene: Scene) -> FacetResult:
         achievement = 1.0 - float(smoothstep(torch.tensor(gap / achievable, dtype=torch.float64)))
         argument = (achievable - floor) / (0.5 * floor)
         blend = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, argument))))
-        pair_defect = (1.0 - blend) * absolute + blend * achievement
+        pair_defect = snap_unit((1.0 - blend) * absolute + blend * achievement)
         survival[left] *= 1.0 - pair_defect
         survival[right] *= 1.0 - pair_defect
         raw_pairs.append(

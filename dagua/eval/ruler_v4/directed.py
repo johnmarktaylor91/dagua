@@ -20,6 +20,7 @@ from dagua.eval.ruler_v4._util import (
     pava,
     resolved_ranks,
     resolved_routes,
+    snap_unit,
 )
 from dagua.eval.ruler_v4.scene import (
     BoxGeometry,
@@ -756,22 +757,30 @@ def U34(scene: Scene) -> FacetResult:
         backtrack = sum(_soft_positive(-float(value), tau) for value in signed)
         back_loss = backtrack / (progress + backtrack)
         unit_directions = delta_tensor / lengths[:, None]
-        mono_loss = sum(
-            _stable_sigmoid(-float(torch.dot(direction, axis).item()) / 0.03)
-            for direction in unit_directions
-        ) / len(unit_directions)
+        mono_loss = snap_unit(
+            sum(
+                _stable_sigmoid(-float(torch.dot(direction, axis).item()) / 0.03)
+                for direction in unit_directions
+            )
+            / len(unit_directions)
+        )
         junction_losses = []
         for junction, (incoming, outgoing) in junction_vectors.items():
             if degrees[junction] == 2:
                 continue
             incoming = incoming / torch.linalg.vector_norm(incoming)
             outgoing = outgoing / torch.linalg.vector_norm(outgoing)
-            junction_losses.append((1.0 + float(torch.dot(incoming, outgoing).item())) / 2.0)
-        continuity_loss = sum(junction_losses) / len(junction_losses) if junction_losses else 0.0
+            # Unit-normalized dots can exceed 1 by one ULP.
+            junction_losses.append(
+                snap_unit((1.0 + float(torch.dot(incoming, outgoing).item())) / 2.0)
+            )
+        continuity_loss = (
+            snap_unit(sum(junction_losses) / len(junction_losses)) if junction_losses else 0.0
+        )
         back_losses.append(back_loss)
         mono_losses.append(mono_loss)
         continuity_losses.append(continuity_loss)
-        path_losses.append(0.40 * back_loss + 0.35 * mono_loss + 0.25 * continuity_loss)
+        path_losses.append(snap_unit(0.40 * back_loss + 0.35 * mono_loss + 0.25 * continuity_loss))
         path_weights.append(path_weight)
         path_bands.append(path_band)
     values = {
@@ -808,8 +817,12 @@ def _u34_blend(defects: List[float], weights: List[float], bands: List[int]) -> 
     for band in sorted(set(bands)):
         indices = [index for index, value in enumerate(bands) if value == band]
         total = sum(weights[index] for index in indices)
-        stratum_means.append(sum(weights[index] * defects[index] for index in indices) / total)
-    equal_stratum_mean = sum(stratum_means) / len(stratum_means)
+        stratum_means.append(
+            snap_unit(sum(weights[index] * defects[index] for index in indices) / total)
+        )
+    # The override guard in blend_with_weights stays strict by design; the
+    # equal-stratum mean is analytically in [0, 1] and sheds its dust here.
+    equal_stratum_mean = snap_unit(sum(stratum_means) / len(stratum_means))
     return blend_with_weights(
         defects,
         weights,
