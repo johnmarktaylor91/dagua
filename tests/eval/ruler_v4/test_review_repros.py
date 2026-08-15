@@ -701,3 +701,98 @@ def test_p_mean_sees_a_catastrophic_row_inside_a_populated_group() -> None:
     diffuse_result = compose(diffuse, table, profile)
     assert concentrated_result.l_mean == pytest.approx(diffuse_result.l_mean)
     assert concentrated_result.l_total > diffuse_result.l_total
+
+
+# --- P2REVIEW_OPUS blocker 2 / P2REVIEW_FABLE finding 3: fitted profile ---
+# scalars (composition power/mix/temperature/allowances, headline span/scale,
+# facet-profile scalars) were invisible to the dof account -- a fully fitted
+# profile set read used=0, within_cap=True.
+
+
+def test_fitted_profile_scalars_cannot_hide_from_the_dof_account() -> None:
+    """The Opus P2 probe: an 8-allowance bottleneck profile must be ledgered."""
+
+    from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile
+    from dagua.eval.ruler_v4.headline import HeadlineProfile
+    from dagua.eval.ruler_v4.score import ScoringProfiles, validate_parameter_provenance
+    from dagua.eval.ruler_v4.weights import ParameterProvenance, SubtermWeight, WeightTable
+
+    table = WeightTable(
+        entries=(
+            SubtermWeight("A.1", "A", "g", 0.6, fitted_parameter="w_shared"),
+            SubtermWeight("B.1", "B", "g", 0.4, fitted_parameter="w_shared"),
+        ),
+        d_power=20,
+    )
+    allowances = {f"g{index}": 0.1 for index in range(8)}
+    composition = CompositionProfile(
+        CompositionFamily.MEAN_SOFT_BOTTLENECK,
+        bottleneck_mix=0.4,
+        bottleneck_temperature=0.05,
+        group_allowances=allowances,
+    )
+    headline = HeadlineProfile(index_span=100.0, loss_scale=1.0, version="repro")
+
+    unclassified = ScoringProfiles(
+        composition=composition,
+        headline=headline,
+        measurement_version="m",
+        policy_version="p",
+    )
+    with pytest.raises(ValueError, match="lack provenance"):
+        validate_parameter_provenance(unclassified, table)
+
+    fitted_but_unledgered = ScoringProfiles(
+        composition=composition,
+        headline=headline,
+        measurement_version="m",
+        policy_version="p",
+        parameter_provenance={
+            "composition.bottleneck_mix": ParameterProvenance("fitted", "beta"),
+            "composition.bottleneck_temperature": ParameterProvenance("fitted", "tau"),
+            **{
+                f"composition.group_allowances.{group}": ParameterProvenance(
+                    "fitted", f"allow_{group}"
+                )
+                for group in allowances
+            },
+            "headline.index_span": ParameterProvenance("contract_frozen"),
+            "headline.loss_scale": ParameterProvenance("fitted", "loss_scale"),
+        },
+    )
+    with pytest.raises(ValueError, match="missing from the weight-table dof ledger"):
+        validate_parameter_provenance(fitted_but_unledgered, table)
+
+    identities = ("beta", "tau", "loss_scale", *(f"allow_{group}" for group in allowances))
+    ledgered_table = WeightTable(
+        entries=table.entries,
+        d_power=20,
+        other_fitted_parameters=identities,
+    )
+    validate_parameter_provenance(fitted_but_unledgered, ledgered_table)
+    assert ledgered_table.dof_account.used == 1 + len(identities)
+
+
+def test_provenance_for_an_inactive_scalar_is_refused() -> None:
+    """The ledger stays exact: classifying a scalar not in play is an error."""
+
+    from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile
+    from dagua.eval.ruler_v4.headline import HeadlineProfile
+    from dagua.eval.ruler_v4.score import ScoringProfiles, validate_parameter_provenance
+    from dagua.eval.ruler_v4.weights import ParameterProvenance, WeightTable
+
+    profiles = ScoringProfiles(
+        composition=CompositionProfile(CompositionFamily.P_MEAN, power=1.0),
+        headline=HeadlineProfile(index_span=100.0, loss_scale=1.0, version="repro"),
+        measurement_version="m",
+        policy_version="p",
+        parameter_provenance={
+            "composition.power": ParameterProvenance("preregistered_prior"),
+            "headline.index_span": ParameterProvenance("contract_frozen"),
+            "headline.loss_scale": ParameterProvenance("preregistered_prior"),
+            "crossing_gamma": ParameterProvenance("preregistered_prior"),
+        },
+    )
+    table = WeightTable(entries=(), d_power=20)
+    with pytest.raises(ValueError, match="inactive profile scalars"):
+        validate_parameter_provenance(profiles, table)

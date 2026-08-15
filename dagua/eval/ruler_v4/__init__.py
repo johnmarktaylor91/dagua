@@ -37,9 +37,11 @@ from dagua.eval.ruler_v4.score import (
     TypeRContext,
     score,
     score_scene,
+    validate_parameter_provenance,
 )
 from dagua.eval.ruler_v4.weights import (
     DofAccount,
+    ParameterProvenance,
     PriorMassDisclosure,
     SubtermWeight,
     WeightTable,
@@ -63,6 +65,7 @@ __all__ = [
     "NearbyEvent",
     "ObservationProfile",
     "OutputType",
+    "ParameterProvenance",
     "PriorMassDisclosure",
     "Route",
     "Scene",
@@ -87,5 +90,6 @@ __all__ = [
     "ordinal_headline",
     "score",
     "score_scene",
+    "validate_parameter_provenance",
     "validate_registry",
 ]

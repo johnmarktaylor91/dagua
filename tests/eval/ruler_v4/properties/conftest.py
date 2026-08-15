@@ -25,6 +25,7 @@ from dagua.eval.ruler_v4.score import ScoringProfiles
 from dagua.eval.ruler_v4.weights import (
     GATE_DIAGNOSTIC_FACETS,
     REQUIRED_PRIOR_FLOOR_FACETS,
+    ParameterProvenance,
     SubtermWeight,
     WeightTable,
 )
@@ -139,6 +140,12 @@ def scoring_profiles() -> ScoringProfiles:
         measurement_version="v4-measurement-property",
         policy_version="v4-policy-property",
         alpha_grid_index=1,
+        parameter_provenance={
+            "composition.power": ParameterProvenance("preregistered_prior"),
+            "headline.index_span": ParameterProvenance("contract_frozen"),
+            "headline.loss_scale": ParameterProvenance("preregistered_prior"),
+            "alpha_grid_index": ParameterProvenance("preregistered_prior"),
+        },
     )
 
 
