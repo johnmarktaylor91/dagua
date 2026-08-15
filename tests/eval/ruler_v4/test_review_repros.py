@@ -336,6 +336,56 @@ def test_u11_grid_of_paths_scores_interior_nodes_clean() -> None:
     assert facet.subterms["U11.v"] == pytest.approx(0.0, abs=1e-12)
 
 
+# --- P4REVERIFY4_OPUS blocker 2: the declared-axis branch compared ---
+# depth/breadth against the breadth/depth target, rewarding exactly the
+# drawing the contract calls wrong. Fixture is U22.md sec 6's own worked
+# example: "a 12-layer DAG whose widest layer holds 40 nodes SHOULD draw
+# wide" (A_target = 40/12).
+
+
+def _layered_scene(layer_gap: float, node_gap: float) -> Scene:
+    """Ingest 12 layers (widest 40 nodes) drawn with the given spacings.
+
+    Parameters
+    ----------
+    layer_gap : float
+        Distance between consecutive layers along the declared flow axis.
+    node_gap : float
+        Distance between neighbours within a layer (the breadth axis).
+
+    Returns
+    -------
+    Scene
+        Validated static scene with declared ranks and flow axis.
+    """
+
+    points = []
+    ranks = []
+    for layer in range(12):
+        width = 40 if layer == 0 else 2
+        for column in range(width):
+            points.append([node_gap * column, layer_gap * layer])
+            ranks.append(layer)
+    return _node_scene(
+        torch.tensor(points, dtype=torch.float64),
+        ranks=tuple(ranks),
+        flow_axis=(0.0, 1.0),
+    )
+
+
+def test_u22_contract_worked_example_rewards_the_wide_drawing() -> None:
+    """The 40-in-12 DAG scores 0 drawn wide and is priced drawn tall."""
+
+    from dagua.eval.ruler_v4.structure import U22
+
+    wide = U22(_layered_scene(layer_gap=4.0, node_gap=4.0))
+    tall = U22(_layered_scene(layer_gap=4.0, node_gap=0.3))
+    assert wide.raw["measurement"] == "declared_axis"
+    assert wide.raw["target"] == pytest.approx(40.0 / 12.0, abs=1e-12)
+    assert wide.value == pytest.approx(0.0, abs=0.0)
+    assert tall.value is not None and tall.value > 0.25
+
+
 def test_u22_ranks_only_graph_keeps_layer_profile_target() -> None:
     """U22's target comes from declared ranks alone; the frame stays honest."""
 
