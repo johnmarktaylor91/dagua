@@ -1,10 +1,16 @@
-"""RULER V4 facet-layer primitives.
+"""RULER V4 facet, composition, and ordinal-headline primitives."""
 
-This package is intentionally independent of earlier ruler implementations.  Phase 1
-contains scene ingestion, measurement frames, event metadata, and individual facets;
-cross-facet composition is deliberately absent.
-"""
-
+from dagua.eval.ruler_v4.composition import (
+    ComparisonResult,
+    ComparisonVerdict,
+    CompositionFamily,
+    CompositionProfile,
+    CompositionResult,
+    NearbyEvent,
+    compare_with_event_margin,
+    compose,
+)
+from dagua.eval.ruler_v4.headline import HeadlineProfile, HeadlineResult, ordinal_headline
 from dagua.eval.ruler_v4.ingestion import ingest, ingest_record, ingest_temporal
 from dagua.eval.ruler_v4.registry import FACET_FUNCTIONS, evaluate_facet, validate_registry
 from dagua.eval.ruler_v4.scene import (
@@ -22,25 +28,64 @@ from dagua.eval.ruler_v4.scene import (
     ValidScene,
     ValidTemporalScene,
 )
+from dagua.eval.ruler_v4.score import (
+    FacetBreakdown,
+    OutputType,
+    ScoreResult,
+    ScoringProfiles,
+    TypeMMeasurement,
+    TypeRContext,
+    score,
+    score_scene,
+)
+from dagua.eval.ruler_v4.weights import (
+    DofAccount,
+    PriorMassDisclosure,
+    SubtermWeight,
+    WeightTable,
+)
 
 __all__ = [
+    "ComparisonResult",
+    "ComparisonVerdict",
+    "CompositionFamily",
+    "CompositionProfile",
+    "CompositionResult",
+    "DofAccount",
     "DrawingScene",
     "FACET_FUNCTIONS",
+    "FacetBreakdown",
     "FacetResult",
     "GraphSemantics",
+    "HeadlineProfile",
+    "HeadlineResult",
     "InvalidScene",
+    "NearbyEvent",
     "ObservationProfile",
+    "OutputType",
+    "PriorMassDisclosure",
     "Route",
     "Scene",
+    "ScoreResult",
+    "ScoringProfiles",
     "StyleContract",
+    "SubtermWeight",
     "TemporalScene",
     "TemporalTransition",
+    "TypeMMeasurement",
+    "TypeRContext",
     "ValidAbsence",
     "ValidScene",
     "ValidTemporalScene",
+    "WeightTable",
+    "compare_with_event_margin",
+    "compose",
     "evaluate_facet",
     "ingest",
     "ingest_record",
     "ingest_temporal",
+    "ordinal_headline",
+    "score",
+    "score_scene",
     "validate_registry",
 ]
