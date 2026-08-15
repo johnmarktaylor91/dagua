@@ -227,13 +227,21 @@ the production port; none of the entries below overrides a contract.
     names the optional nesting family only by `(q, beta, allowances, lambda)`, while the
     phase-2 implementation brief explicitly requests mean-plus-bottleneck machinery and
     the only published closed form (IDEAS_SOL section 3.3) uses a nondifferentiable
-    `max(0, L_tail)`. Production exposes both R3-DR families and replaces that bare hinge
-    only in the optional bottleneck family with the ecosystem's C1 positive-onset form
-    `x^2/(x+tau)` for `x > 0`, zero otherwise; the normalized log-sum-exp tail and all
-    parameters remain explicit. This preserves the requested non-compensation and CC-1
-    smooth-onset properties without claiming the optional family has passed R3-DR. The
-    exact nesting formula and shipped-family selection remain P5/freeze inputs rather
-    than phase-2 weight values.
+    `max(0, L_tail)`. Production exposes both R3-DR families and replaces that bare
+    hinge in the optional bottleneck family with a SUM of per-group C1 positive-onset
+    excess debts `phi(loss_g - allowance_g)` with `phi(x) = x^2/(x+tau)` for `x > 0`,
+    zero otherwise (the P2 review's normalized log-sum-exp tail was count-dependent --
+    `-tau*ln(n)` of relief per applicable group, against 3.3's universal-mass floor --
+    and is replaced: a group at or under its allowance contributes exactly zero, so
+    the arm is invariant to applicable-group count and a catastrophic group is visible
+    at any mass). All parameters remain explicit. This preserves the requested
+    non-compensation and CC-1 smooth-onset properties without claiming the optional
+    family has passed R3-DR. Two open boundaries are disclosed rather than resolved:
+    the implemented pair are DISJOINT families (`beta` is constrained to `(0, 1]` and
+    the mean arm is arithmetic, so `P_MEAN` is not the `beta = 0` boundary case of
+    `MEAN_SOFT_BOTTLENECK` and R3-DR's freeze-at-prior fallback cannot be executed
+    inside one family), and the exact nesting formula plus shipped-family selection
+    remain P5/freeze inputs rather than phase-2 weight values.
 33. V4_SPEC_r4 3.3 resolves the weight-bearing manifest structure as SOL's generated
     semantic-slot budget ledger with FABLE's 8 groups persisting only as a slot->group
     REPORTING rollup carrying no weight semantics, but the frozen MANIFEST.json carries
