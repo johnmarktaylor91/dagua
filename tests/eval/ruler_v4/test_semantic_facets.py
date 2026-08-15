@@ -8,7 +8,7 @@ from typing import Any, Mapping, Optional, Tuple
 import pytest
 import torch
 
-from dagua.eval.ruler_v4.directed import U31, U32, U33, U34, U39
+from dagua.eval.ruler_v4.directed import U31, U32, U33, U34, U39, _u34_blend
 from dagua.eval.ruler_v4.ingestion import ingest, ingest_temporal
 from dagua.eval.ruler_v4.packing import U38, U41, U42, _ciede2000
 from dagua.eval.ruler_v4.registry import evaluate_facet
@@ -141,6 +141,25 @@ def test_u33_reversed_tree_depth_is_worse_than_layered_tree() -> None:
     assert bad_result.subterms["U33.layered.3"] > good_result.subterms["U33.layered.3"]
 
 
+def test_u33_parent_centering_uses_declared_child_mass() -> None:
+    """U33 centers a parent on the node-mass centroid of its children."""
+
+    positions = torch.tensor([[1.0, 0.0], [0.0, 3.0], [10.0, 3.0]], dtype=torch.float64)
+    options = {
+        "directed": True,
+        "flow_axis": (0.0, 1.0),
+        "roots": (0,),
+        "ranks": (0, 1, 1),
+        "node_masses": (1.0, 9.0, 1.0),
+        "tree_parents": (None, 0, 0),
+        "tree_depths": (0, 1, 1),
+        "tree_layout": "layered",
+    }
+    result = U33(_scene(positions, ((0, 1), (0, 2)), options))
+    # U33 layered subterm 2 defines c as the node-mass child centroid.
+    assert result.subterms["U33.layered.2"] == pytest.approx(0.0, abs=0.0)
+
+
 def test_u34_straight_monotone_path_has_exact_zero_trace_debt() -> None:
     """U34's straight monotone source-to-sink path has zero on all rows."""
 
@@ -178,6 +197,18 @@ def test_u34_applies_frozen_source_sample_cap() -> None:
     assert result.raw["path_count"] == 64
 
 
+def test_u34_uses_equal_stratum_ht_mean_component() -> None:
+    """U34's dominant mean component equal-weights nonempty hop bands."""
+
+    defects = [0.0, 1.0, 1.0]
+    weights = [100.0, 1.0, 1.0]
+    cvar = (2.0 / 102.0) / 0.10
+    smooth_max = 1.0 + 0.05 * math.log((100.0 * math.exp(-20.0) + 2.0) / 102.0)
+    expected = 0.65 * 0.5 + 0.25 * cvar + 0.10 * smooth_max
+    # U34 section 4 replaces the robust mean with the equal-stratum HT mean.
+    assert _u34_blend(defects, weights, [0, 1, 1]) == pytest.approx(expected, abs=1e-15)
+
+
 def test_u35_constant_weights_match_unweighted_path_golden() -> None:
     """U35's constant-weight limit has exact zero on a perfect collinear path."""
 
@@ -211,8 +242,15 @@ def test_u36_reversed_local_weight_order_is_worse() -> None:
     bad_result = U36(bad)
     assert good_result.value is not None
     assert bad_result.value is not None
-    assert good_result.value == pytest.approx(0.0004286730519093966, abs=1e-18)
-    assert bad_result.value == pytest.approx(0.9995713269480908, abs=1e-15)
+    expected_good = (
+        sum(1.0 / (1.0 + math.exp(-(value / 0.03))) for value in (-1.0 / 3.0, -0.5, -0.2)) / 3.0
+    )
+    expected_bad = (
+        sum(1.0 / (1.0 + math.exp(-(value / 0.03))) for value in (0.2, 0.5, 1.0 / 3.0)) / 3.0
+    )
+    # U36 golden 1 freezes ell=sigmoid(((l_strong-l_weak)/(l_strong+l_weak))/0.03).
+    assert good_result.value == pytest.approx(expected_good, abs=1e-18)
+    assert bad_result.value == pytest.approx(expected_bad, abs=1e-15)
     assert bad_result.value > good_result.value
 
 
@@ -313,13 +351,10 @@ def test_u41_certified_triangle_has_zero_face_proxy_debt() -> None:
     )
     result = U41(scene)
     assert result.state is ResultState.VALUE
-    # U41 contract golden 1: the triangle fixture has one bounded face; section 7
-    # composes its convexity and area rows with fixed 0.60/0.40 mass.
-    assert result.value == pytest.approx(
-        0.60 * result.subterms["U41.L_conv"] + 0.40 * result.subterms["U41.L_area"],
-        abs=1e-14,
-    )
+    # U41 golden 1 names the triangle: its sole face equals its convex hull.
     assert result.raw["F0"] == 1
+    assert result.raw["arrangement_face_count"] == 1
+    assert result.raw["faces"][0]["convexity_defect"] == pytest.approx(0.0, abs=0.0)
 
 
 def test_u42_default_v4_style_has_typed_channel_absence() -> None:

@@ -16,6 +16,7 @@ from dagua.eval.ruler_v4._util import (
     adjacency,
     components,
     correlation_defect,
+    declared_axis,
     global_blend,
     graph_distances,
     isotonic_stress,
@@ -252,13 +253,11 @@ def U03(scene: Scene) -> FacetResult:
 
     graph_order = graph_distances(scene)
     layout_order = torch.cdist(scene.positions, scene.positions)
-    node_masses = (
-        list(scene.graph.node_masses)
-        if scene.graph.node_masses is not None
-        else [1.0] * scene.node_count
-    )
     values: Dict[str, float] = {}
     eligibility: Dict[str, bool] = {}
+    degree_terciles: Dict[str, Tuple[Tuple[int, ...], ...]] = {}
+    degree_stratum_defects: Dict[str, Tuple[float, ...]] = {}
+    center_panels: Dict[str, Tuple[int, ...]] = {}
     graph_adjacency = adjacency(scene)
     for radius in (1, 2, 4):
         component_values: List[float] = []
@@ -276,11 +275,25 @@ def U03(scene: Scene) -> FacetResult:
                 members,
                 key=lambda node: (
                     hashlib.sha256(
-                        f"{scene.profile_hash}:U03-ctr:{component_index}:{node}".encode()
+                        f"{scene.graph_hash}:U03-ctr:{component_index}:0:{node}".encode()
                     ).digest(),
                     node,
                 ),
             )[: min(len(members), 256)]
+            panel_key = f"component_{component_index}.panel_0"
+            center_panels[panel_key] = tuple(sampled_centers)
+            if len(members) > len(sampled_centers):
+                sampled_set = set(sampled_centers)
+                second_panel = sorted(
+                    (node for node in members if node not in sampled_set),
+                    key=lambda node: (
+                        hashlib.sha256(
+                            f"{scene.graph_hash}:U03-ctr:{component_index}:1:{node}".encode()
+                        ).digest(),
+                        node,
+                    ),
+                )[: min(len(members) - len(sampled_centers), 256)]
+                center_panels[f"component_{component_index}.panel_1"] = tuple(second_panel)
             coverages = [
                 len(_radius_neighbors(graph_order, node, radius) & member_set) / (len(members) - 1)
                 for node in sampled_centers
@@ -301,10 +314,11 @@ def U03(scene: Scene) -> FacetResult:
                 ]
                 for index in range(3)
             ]
+            statistic_key = f"r_{radius}.component_{component_index}"
+            degree_terciles[statistic_key] = tuple(tuple(centers) for centers in terciles)
             tercile_values: List[float] = []
             for centers in terciles:
                 center_defects: List[float] = []
-                center_masses: List[float] = []
                 for node in centers:
                     expected = _radius_neighbors(graph_order, node, radius) & member_set
                     if not expected:
@@ -315,7 +329,6 @@ def U03(scene: Scene) -> FacetResult:
                     rho = float(torch.kthvalue(candidate_distances, k_value).values)
                     if rho == 0.0:
                         center_defects.append(0.0)
-                        center_masses.append(node_masses[node])
                         continue
                     credits = []
                     for neighbor in expected:
@@ -329,12 +342,12 @@ def U03(scene: Scene) -> FacetResult:
                         )
                     )
                     center_defects.append(gate * raw_defect)
-                    center_masses.append(node_masses[node])
                 if center_defects:
-                    tercile_values.append(global_blend(center_defects, center_masses))
+                    tercile_values.append(global_blend(center_defects))
+            degree_stratum_defects[statistic_key] = tuple(tercile_values)
             if tercile_values:
                 component_values.append(sum(tercile_values) / len(tercile_values))
-                component_weights.append(sum(node_masses[node] for node in members))
+                component_weights.append(float(len(members)))
         eligibility[f"r_{radius}"] = radius_eligible
         if component_values:
             values[f"U03.r_{radius}"] = sum(
@@ -345,7 +358,12 @@ def U03(scene: Scene) -> FacetResult:
     return mean_result(
         "U03",
         values,
-        {"radius_eligibility": eligibility},
+        {
+            "radius_eligibility": eligibility,
+            "degree_terciles": degree_terciles,
+            "degree_stratum_defects": degree_stratum_defects,
+            "center_panels": center_panels,
+        },
         renormalize_missing=False,
     )
 
@@ -1295,12 +1313,7 @@ def U22(scene: Scene) -> FacetResult:
     if scene.node_count < 4:
         return na_result("insufficient_node_population")
     ranks = scene.graph.ranks
-    if scene.graph.flow_axis is not None:
-        axis = torch.tensor(scene.graph.flow_axis, dtype=torch.float64)
-    elif ranks is not None:
-        axis = torch.tensor([0.0, 1.0], dtype=torch.float64)
-    else:
-        axis = None
+    axis = declared_axis(scene)
     floor_bound = False
     if axis is not None:
         cross = torch.tensor([-axis[1], axis[0]], dtype=torch.float64)
@@ -1346,7 +1359,7 @@ def U22(scene: Scene) -> FacetResult:
             width, height = scene.graph.lattice_dimensions
             target *= width / height
         elif declared_class not in {"cycle", "ring"}:
-            return invalid_result("unknown_declared_class")
+            target *= 1.0
     excess = soft_pos(abs(math.log(observed / target)) - math.log(3.0))
     defect = excess / (1.0 + excess)
     return value_result(
@@ -1381,9 +1394,8 @@ def U23(scene: Scene) -> FacetResult:
         local_masses = torch.tensor([node_masses[node] for node in members], dtype=torch.float64)
         centroid = torch.sum(points * local_masses[:, None], dim=0) / torch.sum(local_masses)
         offset = centroid - frame.center
-        ranks = scene.graph.ranks
-        if scene.graph.flow_axis is not None or ranks is not None or scene.graph.roots:
-            axis = torch.tensor(scene.graph.flow_axis or (0.0, 1.0), dtype=torch.float64)
+        axis = declared_axis(scene)
+        if axis is not None:
             cross = torch.tensor([-axis[1], axis[0]], dtype=torch.float64)
             extent = robust_projection(points @ cross, scene.intrinsic_unit)
             normalized = abs(float(torch.dot(offset, cross))) / extent.half_extent

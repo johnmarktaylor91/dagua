@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Tuple
+from typing import List, Tuple
 
 import torch
 
@@ -115,34 +115,6 @@ def trim_count(node_count: int) -> int:
     return min(max(math.ceil(TRIM_RATE * node_count), MIN_TRIM), maximum)
 
 
-def intrinsic_unit(scene: Scene) -> float:
-    """Return the median declared primitive diagonal.
-
-    Parameters
-    ----------
-    scene : Scene
-        Validated scene with StyleContract-derived node boxes.
-
-    Returns
-    -------
-    float
-        Positive intrinsic unit in scene coordinates.
-    """
-
-    diagonals = torch.stack(
-        [
-            2.0 * torch.linalg.vector_norm(box.half_extents.to(torch.float64))
-            for box in scene.node_boxes
-        ]
-    )
-    if diagonals.numel() == 0:
-        raise ValueError("intrinsic unit requires at least one primitive")
-    value = float(torch.median(diagonals).item())
-    if value <= 0.0 or not math.isfinite(value):
-        raise ValueError("primitive diagonals must be finite and positive")
-    return value
-
-
 def _median(values: torch.Tensor) -> torch.Tensor:
     """Compute the conventional midpoint median along axis zero.
 
@@ -236,15 +208,36 @@ def robust_core_positions(positions: torch.Tensor) -> torch.Tensor:
         raise ValueError("positions must have shape [N, 2] with N >= 1")
     if not bool(torch.isfinite(points).all()):
         raise ValueError("positions must be finite")
+    return points[robust_core_mask(points)].clone()
+
+
+def robust_core_mask(positions: torch.Tensor) -> torch.Tensor:
+    """Return the membership mask of the U21 retained point core.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Finite node centers with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Boolean retained-core mask with shape ``[N]``.
+    """
+
+    points = positions.detach().to(device="cpu", dtype=torch.float64)
+    if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] == 0:
+        raise ValueError("positions must have shape [N, 2] with N >= 1")
+    if not bool(torch.isfinite(points).all()):
+        raise ValueError("positions must be finite")
     count = points.shape[0]
     if count < N_SMALL:
-        return points.clone()
+        return torch.ones(count, dtype=torch.bool)
     trim = trim_count(count)
     ordered, _ = torch.sort(points, dim=0)
     lower = ordered[trim]
     upper = ordered[count - trim - 1]
-    retained = points[torch.all((points >= lower) & (points <= upper), dim=1)]
-    return retained.clone()
+    return torch.all((points >= lower) & (points <= upper), dim=1)
 
 
 def robust_projection(projections: torch.Tensor, unit: float) -> RobustProjection:
@@ -383,7 +376,6 @@ def overflow_defect(scene: Scene, frame: RobustFrame) -> Tuple[float, float, flo
         float(node_masses[box.owner]) * box_outside_area(box.center, box.half_extents, frame)
         for box in scene.node_boxes
     )
-    edge_masses = scene.graph.edge_weights or tuple(1.0 for _ in range(scene.edge_count))
     for route in resolved_routes(scene):
         stroke_width = (
             scene.style.edge_stroke_widths[route.edge_index]
@@ -393,16 +385,101 @@ def overflow_defect(scene: Scene, frame: RobustFrame) -> Tuple[float, float, flo
         for start, end in zip(route.points[:-1], route.points[1:]):
             segment_length = float(torch.linalg.vector_norm(end - start).item())
             inside_length = _segment_length_inside_frame(start, end, frame)
-            escaped_area += (
-                float(edge_masses[route.edge_index])
-                * max(0.0, segment_length - inside_length)
-                * stroke_width
-            )
+            escaped_area += max(0.0, segment_length - inside_length) * stroke_width
     mass_out = escaped_area / frame.area
     anchor = overflow_anchor(scene, frame)
     excess = max(0.0, mass_out - anchor)
     smooth = 0.0 if excess <= 0.0 else excess**2 / (excess + 0.05)
     return mass_out, anchor, smooth / (1.0 + smooth)
+
+
+def declared_content_area(scene: Scene) -> float:
+    """Return the port's declared-primitive content-area approximation.
+
+    Parameters
+    ----------
+    scene : Scene
+        Validated scene.
+
+    Returns
+    -------
+    float
+        Sum of node areas and flattened route-ribbon areas.
+
+    Notes
+    -----
+    Exact overlapping-primitive union certification remains recorded in
+    ``DISCREPANCIES.md``; this published statistic uses the same approximation
+    as escaped mass.
+    """
+
+    area = sum(float(4.0 * torch.prod(box.half_extents)) for box in scene.node_boxes)
+    for route in resolved_routes(scene):
+        stroke_width = (
+            scene.style.edge_stroke_widths[route.edge_index]
+            if scene.style.edge_stroke_widths
+            else scene.style.route_stroke_width * scene.style.coordinate_scale
+        )
+        area += sum(
+            float(torch.linalg.vector_norm(end - start)) * stroke_width
+            for start, end in zip(route.points[:-1], route.points[1:])
+        )
+    return area
+
+
+def point_hull_area(points: torch.Tensor) -> float:
+    """Return the exact convex-hull area of two-dimensional points.
+
+    Parameters
+    ----------
+    points : torch.Tensor
+        Point coordinates with shape ``[N, 2]``.
+
+    Returns
+    -------
+    float
+        Nonnegative hull area, zero for fewer than three distinct points.
+    """
+
+    unique = sorted(set((float(point[0]), float(point[1])) for point in points))
+    if len(unique) < 3:
+        return 0.0
+
+    def cross(
+        origin: Tuple[float, float], left: Tuple[float, float], right: Tuple[float, float]
+    ) -> float:
+        """Return the signed turn of three points.
+
+        Parameters
+        ----------
+        origin, left, right : tuple[float, float]
+            Two-dimensional coordinates.
+
+        Returns
+        -------
+        float
+            Signed twice-triangle area.
+        """
+
+        return (left[0] - origin[0]) * (right[1] - origin[1]) - (left[1] - origin[1]) * (
+            right[0] - origin[0]
+        )
+
+    lower: List[Tuple[float, float]] = []
+    for point in unique:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0.0:
+            lower.pop()
+        lower.append(point)
+    upper: List[Tuple[float, float]] = []
+    for point in reversed(unique):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0.0:
+            upper.pop()
+        upper.append(point)
+    hull = lower[:-1] + upper[:-1]
+    twice_area = sum(
+        left[0] * right[1] - left[1] * right[0] for left, right in zip(hull, hull[1:] + hull[:1])
+    )
+    return abs(twice_area) / 2.0
 
 
 def _segment_length_inside_frame(

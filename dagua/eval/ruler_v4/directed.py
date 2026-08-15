@@ -13,6 +13,7 @@ from typing import DefaultDict, Dict, List, Optional, Tuple, Union
 import torch
 
 from dagua.eval.ruler_v4._util import (
+    blend_with_weights,
     declared_axis,
     global_blend,
     mean_result,
@@ -334,7 +335,16 @@ def _u33_layered(scene: Scene, children: DefaultDict[int, List[int]]) -> FacetRe
         if len(child_nodes) == 1:
             centering_losses.append(0.0)
         else:
-            centroid = torch.mean(child_positions, dim=0)
+            child_masses = torch.tensor(
+                [
+                    scene.graph.node_masses[child] if scene.graph.node_masses is not None else 1.0
+                    for child in child_nodes
+                ],
+                dtype=torch.float64,
+            )
+            centroid = torch.sum(child_positions * child_masses[:, None], dim=0) / torch.sum(
+                child_masses
+            )
             span = math.sqrt(
                 float(torch.mean(torch.sum((child_positions - centroid) ** 2, dim=1)).item())
             )
@@ -718,7 +728,8 @@ def U34(scene: Scene) -> FacetResult:
     continuity_losses: List[float] = []
     path_losses: List[float] = []
     path_weights: List[float] = []
-    for path_nodes, path_edges, path_weight in paths:
+    path_bands: List[int] = []
+    for path_nodes, path_edges, path_weight, path_band in paths:
         deltas = []
         junction_vectors: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         for edge_position, edge_index in enumerate(path_edges):
@@ -762,15 +773,48 @@ def U34(scene: Scene) -> FacetResult:
         continuity_losses.append(continuity_loss)
         path_losses.append(0.40 * back_loss + 0.35 * mono_loss + 0.25 * continuity_loss)
         path_weights.append(path_weight)
+        path_bands.append(path_band)
     values = {
-        "U34.L_back": global_blend(back_losses, path_weights),
-        "U34.L_mono": global_blend(mono_losses, path_weights),
-        "U34.L_cont": global_blend(continuity_losses, path_weights),
+        "U34.L_back": _u34_blend(back_losses, path_weights, path_bands),
+        "U34.L_mono": _u34_blend(mono_losses, path_weights, path_bands),
+        "U34.L_cont": _u34_blend(continuity_losses, path_weights, path_bands),
     }
     return value_result(
-        global_blend(path_losses, path_weights),
+        _u34_blend(path_losses, path_weights, path_bands),
         values,
-        {"path_count": len(paths)},
+        {"path_count": len(paths), "nonempty_hop_bands": len(set(path_bands))},
+    )
+
+
+def _u34_blend(defects: List[float], weights: List[float], bands: List[int]) -> float:
+    """Blend path defects with U34's equal-stratum HT mean component.
+
+    Parameters
+    ----------
+    defects : list[float]
+        Per-path losses.
+    weights : list[float]
+        Horvitz--Thompson inverse-inclusion weights.
+    bands : list[int]
+        Fixed hop-band ids in ``[0, 3]``.
+
+    Returns
+    -------
+    float
+        Global blend with the contract-specific robust-mean replacement.
+    """
+
+    stratum_means = []
+    for band in sorted(set(bands)):
+        indices = [index for index, value in enumerate(bands) if value == band]
+        total = sum(weights[index] for index in indices)
+        stratum_means.append(sum(weights[index] * defects[index] for index in indices) / total)
+    equal_stratum_mean = sum(stratum_means) / len(stratum_means)
+    return blend_with_weights(
+        defects,
+        weights,
+        (0.65, 0.25, 0.10),
+        robust_mean=equal_stratum_mean,
     )
 
 
@@ -802,7 +846,7 @@ def _soft_positive(value: float, temperature: float) -> float:
 
 def _canonical_source_sink_paths(
     scene: Scene,
-) -> List[Tuple[List[int], List[int], float]]:
+) -> List[Tuple[List[int], List[int], float, int]]:
     """Enumerate canonical shortest directed source-to-sink paths.
 
     Parameters
@@ -812,9 +856,9 @@ def _canonical_source_sink_paths(
 
     Returns
     -------
-    list[tuple[list[int], list[int], float]]
-        Node and edge indices plus inverse-inclusion mass for each sampled
-        reachable source-sink pair.
+    list[tuple[list[int], list[int], float, int]]
+        Node and edge indices, inverse-inclusion mass, and fixed hop-band id for
+        each sampled reachable source-sink pair.
     """
 
     incoming = [0] * scene.node_count
@@ -833,11 +877,11 @@ def _canonical_source_sink_paths(
         sources = sorted(
             sources,
             key=lambda source: hashlib.sha256(
-                f"{scene.profile_hash}:U34-source:{source}".encode()
+                f"{scene.graph_hash}:U34-source:{source}".encode()
             ).digest(),
         )[:64]
     source_probability = min(1.0, 64.0 / source_population) if source_population else 1.0
-    result: List[Tuple[List[int], List[int], float]] = []
+    result: List[Tuple[List[int], List[int], float, int]] = []
     for source in sources:
         predecessor: Dict[int, Tuple[int, int]] = {}
         predecessor_key: Dict[int, bytes] = {}
@@ -848,7 +892,7 @@ def _canonical_source_sink_paths(
             for target, edge_index in sorted(outgoing[node]):
                 candidate = distance[node] + 1
                 tie_key = hashlib.sha256(
-                    f"{scene.profile_hash}:{source}:{target}:{edge_index}".encode()
+                    f"{scene.graph_hash}:{source}:{target}:{edge_index}".encode()
                 ).digest()
                 if target not in distance or (
                     candidate == distance[target] and tie_key < predecessor_key[target]
@@ -869,7 +913,7 @@ def _canonical_source_sink_paths(
                 chosen = sorted(
                     members,
                     key=lambda sink: hashlib.sha256(
-                        f"{scene.profile_hash}:U34-sink:{source}:{sink}".encode()
+                        f"{scene.graph_hash}:U34-sink:{source}:{sink}".encode()
                     ).digest(),
                 )[:16]
                 probability = min(1.0, 16.0 / len(members)) if members else 1.0
@@ -886,7 +930,9 @@ def _canonical_source_sink_paths(
                 edges.append(edge_index)
                 cursor = parent
             weight = 1.0 / (source_probability * sink_probability)
-            result.append((list(reversed(nodes)), list(reversed(edges)), weight))
+            hop_count = len(edges)
+            band = 0 if hop_count <= 2 else 1 if hop_count <= 4 else 2 if hop_count <= 8 else 3
+            result.append((list(reversed(nodes)), list(reversed(edges)), weight, band))
     return result
 
 

@@ -41,8 +41,8 @@ the production port; none of the entries below overrides a contract.
 9. U16 route/label overlap and U21 escaped-content mass use exact clipped centerline
    length times declared stroke width. They do not yet include round-cap area or form
    an exact union of overlapping escaped primitives. U21 does apply declared node
-   masses, edge masses, and per-edge stroke widths, so the remaining difference is
-   union/capsule certification rather than missing input weights.
+   masses, fixed unit route masses, and per-edge stroke widths, so the remaining
+   difference is union/capsule certification rather than missing input weights.
 10. U27 penetration uses the minimum signed distance to the member-offset pieces. This
     is exact outside the union but is a conservative lower magnitude inside overlapping
     pieces; exact distance to the complement of the full union remains a geometry-owner
@@ -58,8 +58,29 @@ the production port; none of the entries below overrides a contract.
     relative canonical-id grammar between node labels and cluster labels, nor does the
     scene schema expose a container-boundary primitive. U30 isolates a bounded interim
     for those pairs: an overdrawn subject pays exactly one half, never more than the
-    contract's stated severity interval. The scheduler owner must freeze the missing
-    primitive-id grammar before those branches can be certified.
+    contract's stated severity interval. U27's container relation uses the same isolated
+    helper. The scheduler owner must freeze the missing primitive-id grammar before those
+    branches can be certified.
 13. U17's declared-containment exemption has no corresponding immutable containment
     relation in `GraphSemantics`. No v4.0 frozen corpus row declares one, so current
     scores are unaffected; schema-owner work is required before such rows are admitted.
+14. `SCENE_RECONSTRUCTION_CONTRACT.md` section 8d simultaneously states the class order
+    "nodes below labels" and that each label is immediately above its own node. Production
+    gives the class clause priority for U18 foreign-node pairs. It also uses the assigned
+    stored-row order for U17/U18/U27/U30 rather than parsing future producer `z_order`
+    tokens, while U42 still consumes its typed channel order. A future scene-bearing
+    corpus needs one schema-owner primitive-id grammar before either posture generalizes.
+15. U33 specifies `a_perp` without orienting it. Production orients it clockwise from the
+    declared top-to-bottom page axis, so positive sibling order is left-to-right. This is
+    score-visible and remains a scheduler-owner convention rather than contract text.
+16. `MANIFEST.json` declares U09 scale-neutral, while U09 section 3 freezes
+    `log(len_e + 1e-12*u)`. Because `u` is unchanged under position-only scaling, the
+    formula cannot be exactly scale-neutral on every fixture; production follows the
+    facet formula.
+17. U13 section 7 does not state whether its three sub-term-(i) blend components are
+    saturated separately. Production follows U10 section 7's sibling construction:
+    compute raw integrals, saturate each component by `x/(x+0.05)`, then blend.
+18. Graphs with multiedges or self-loops require producer-supplied distinct routes in the
+    current ingestion schema because a derived straight chord cannot distinguish them.
+    They are typed `MISSING_REQUIRED_PRIMITIVE`; admitting default render-truth routes for
+    those graph classes requires a route-schema extension.

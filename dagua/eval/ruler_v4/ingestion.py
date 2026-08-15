@@ -563,7 +563,11 @@ def _derive_cluster_label_boxes(scene: Scene) -> Mapping[str, BoxGeometry]:
         return {}
     # The region contract lives with the cluster facets. Importing it here avoids
     # duplicating that score-visible construction while keeping module import order acyclic.
-    from dagua.eval.ruler_v4.clusters import _regions
+    from dagua.eval.ruler_v4.clusters import (
+        _cluster_robust_core_center,
+        _region_top_at_x,
+        _regions,
+    )
 
     scale = scene.style.coordinate_scale
     result: Dict[str, BoxGeometry] = {}
@@ -574,11 +578,12 @@ def _derive_cluster_label_boxes(scene: Scene) -> Mapping[str, BoxGeometry]:
         width = text_width + 2.0 * scene.style.padding_x * scale
         height = text_height + 2.0 * scene.style.padding_y * scale
         padding = 0.50 * scene.intrinsic_unit
-        top = region.bounds.center[1] + region.bounds.half_extents[1]
+        robust_center = _cluster_robust_core_center(scene, scene.graph.clusters[name])
+        top = _region_top_at_x(region, float(robust_center[0]))
         center = torch.stack(
             (
-                region.bounds.center[0],
-                top - padding - torch.tensor(height / 2.0, dtype=torch.float64),
+                robust_center[0],
+                torch.tensor(top - padding - height / 2.0, dtype=torch.float64),
             )
         )
         result[name] = BoxGeometry(
@@ -587,6 +592,73 @@ def _derive_cluster_label_boxes(scene: Scene) -> Mapping[str, BoxGeometry]:
             owner,
         )
     return result
+
+
+def _normalize_hash_value(value: Any) -> Any:
+    """Normalize one value for canonical JSON hashing.
+
+    Parameters
+    ----------
+    value : Any
+        Nested schema value.
+
+    Returns
+    -------
+    Any
+        JSON-compatible canonical value.
+    """
+
+    if isinstance(value, (set, frozenset)):
+        return sorted(_normalize_hash_value(item) for item in value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalize_hash_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_hash_value(item) for item in value]
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            item.name: _normalize_hash_value(getattr(value, item.name)) for item in fields(value)
+        }
+    return value
+
+
+def _hash_payload(payload: Mapping[str, Any]) -> str:
+    """Hash one canonical schema payload.
+
+    Parameters
+    ----------
+    payload : mapping[str, Any]
+        Input-owned values to hash.
+
+    Returns
+    -------
+    str
+        SHA-256 hexadecimal digest.
+    """
+
+    encoded = json.dumps(
+        _normalize_hash_value(payload), sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _graph_hash(graph: GraphSemantics) -> str:
+    """Hash canonical graph semantics without profile or style fields.
+
+    Parameters
+    ----------
+    graph : GraphSemantics
+        Graph declaration.
+
+    Returns
+    -------
+    str
+        SHA-256 hexadecimal digest shared across profile arms.
+    """
+
+    return _hash_payload({item.name: getattr(graph, item.name) for item in fields(graph)})
 
 
 def _profile_hash(graph: GraphSemantics, style: StyleContract, profile: ObservationProfile) -> str:
@@ -647,35 +719,7 @@ def _profile_hash(graph: GraphSemantics, style: StyleContract, profile: Observat
         "profile": {item.name: getattr(profile, item.name) for item in fields(profile)},
     }
 
-    def normalize(value: Any) -> Any:
-        """Normalize one value for canonical JSON serialization.
-
-        Parameters
-        ----------
-        value : Any
-            Nested profile-identity value.
-
-        Returns
-        -------
-        Any
-            JSON-compatible canonical value.
-        """
-
-        if isinstance(value, (set, frozenset)):
-            return sorted(normalize(item) for item in value)
-        if isinstance(value, Mapping):
-            return {
-                str(key): normalize(item)
-                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-            }
-        if isinstance(value, (list, tuple)):
-            return [normalize(item) for item in value]
-        if is_dataclass(value) and not isinstance(value, type):
-            return {item.name: normalize(getattr(value, item.name)) for item in fields(value)}
-        return value
-
-    encoded = json.dumps(normalize(payload), sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return _hash_payload(payload)
 
 
 def ingest(
@@ -882,6 +926,7 @@ def ingest(
         cluster_label_boxes={},
         intrinsic_unit=intrinsic_unit,
         profile_hash=_profile_hash(graph, style, profile),
+        graph_hash=_graph_hash(graph),
     )
     scene = replace(scene, cluster_label_boxes=_derive_cluster_label_boxes(scene))
     return ValidScene(scene)

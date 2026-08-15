@@ -376,6 +376,8 @@ class Scene:
         Median diagonal of declared node primitives.
     profile_hash : str
         Canonical hash of graph/profile/style inputs.
+    graph_hash : str
+        Canonical hash of graph semantics alone.
     """
 
     graph: GraphSemantics
@@ -390,6 +392,7 @@ class Scene:
     cluster_label_boxes: Mapping[str, BoxGeometry]
     intrinsic_unit: float
     profile_hash: str
+    graph_hash: str
 
     @property
     def node_count(self) -> int:

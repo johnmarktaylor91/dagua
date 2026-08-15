@@ -136,7 +136,8 @@ def test_u08_equal_six_spoke_star_has_exact_zero_defect() -> None:
     positions = torch.cat((torch.zeros((1, 2), dtype=torch.float64), leaves), dim=0)
     result = U08(_scene(positions, tuple((0, index) for index in range(1, 7))))
     assert result.state is ResultState.VALUE
-    assert result.value == pytest.approx(1.776356839400249e-16, abs=1e-30)
+    # U08 section 3 freezes exact zero for the uniform angular fixture.
+    assert result.value == pytest.approx(0.0, abs=0.0)
 
 
 def test_u10_clean_route_has_exact_zero_clearance_burden() -> None:
@@ -166,6 +167,20 @@ def test_u11_terminal_disk_clears_coincident_nonterminal_box() -> None:
     assert result.state is ResultState.VALUE
     assert result.raw["edges"][0]["baseline_length"] == pytest.approx(10.0, abs=0.0)
     assert result.raw["edges"][0]["baseline_turn"] == pytest.approx(0.0, abs=0.0)
+
+
+def test_u11_tangentless_terminal_pair_is_not_best_case() -> None:
+    """U11 treats a zero-arc terminal as the coincidence limit."""
+
+    positions = torch.tensor([[0.0, 0.0], [0.0, 0.0], [4.0, 0.0], [0.0, 4.0]])
+    edges = ((0, 1), (0, 2), (0, 3))
+    routes = tuple(
+        Route(index, torch.stack((positions[source], positions[target])))
+        for index, (source, target) in enumerate(edges)
+    )
+    result = U11(_scene(positions, edges, routes))
+    # U11 section 5(v): approaching coincidence raises terminal confusability.
+    assert result.subterms["U11.v"] > 0.0
 
 
 def test_u12_collinear_subdivided_path_has_zero_continuity_defect() -> None:
