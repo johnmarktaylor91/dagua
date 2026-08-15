@@ -269,6 +269,8 @@ def _evaluate_static_facets(
     temporal_scene : TemporalScene or None
         Validated temporal scene routed to U40 so the pure entrypoint can
         publish the full 45-row table; U40 is structurally NA without it.
+        The caller (:func:`score`) has already verified it describes the
+        same drawing as ``scene``.
 
     Returns
     -------
@@ -309,7 +311,9 @@ def score(
         Frozen facet, composition, headline, measurement, and policy profiles.
     temporal_scene : TemporalScene or None
         Validated temporal scene for U40 (mental-map continuity), when
-        ingestion produced one. Without it U40 publishes its structural NA.
+        ingestion produced one. It must be a history OF the drawing under
+        score: its final frame must carry the scene's profile hash (CC-11),
+        or the call is refused. Without it U40 publishes its structural NA.
 
     Returns
     -------
@@ -320,12 +324,20 @@ def score(
     Raises
     ------
     ValueError
-        If registry/weight invariants fail or a facet returns INVALID.
+        If registry/weight invariants fail, a facet returns INVALID, or the
+        temporal scene does not describe the same drawing as ``scene``.
     """
 
     validate_registry()
     weight_table.validate_for_contracts()
     validate_parameter_provenance(profiles, weight_table)
+    if temporal_scene is not None and temporal_scene.frames[-1].profile_hash != scene.profile_hash:
+        raise ValueError(
+            "temporal scene is not a history of the drawing under score: its final "
+            f"frame's profile hash {temporal_scene.frames[-1].profile_hash} does not "
+            f"match the scene's {scene.profile_hash} (CC-11: measurements published "
+            "on one TYPE-R context must be of that drawing)"
+        )
     facet_results = _evaluate_static_facets(scene, profiles, temporal_scene)
     invalid = {
         facet_id: result.reason
@@ -390,7 +402,8 @@ def score_scene(
     profiles : ScoringProfiles
         Frozen scoring profiles and version ids.
     temporal_scene : TemporalScene or None
-        Validated temporal scene for U40, when available.
+        Validated temporal scene for U40, when available; it must describe
+        the same drawing as ``scene`` (see :func:`score`).
 
     Returns
     -------

@@ -241,7 +241,14 @@ the production port; none of the entries below overrides a contract.
     the mean arm is arithmetic, so `P_MEAN` is not the `beta = 0` boundary case of
     `MEAN_SOFT_BOTTLENECK` and R3-DR's freeze-at-prior fallback cannot be executed
     inside one family), and the exact nesting formula plus shipped-family selection
-    remain P5/freeze inputs rather than phase-2 weight values.
+    remain P5/freeze inputs rather than phase-2 weight values. The SUM form also
+    changes the arm's RANGE: `P_MEAN` stays in [0, 1] but `MEAN_SOFT_BOTTLENECK`
+    `l_total` grows without bound in the applicable-group count under simultaneous
+    catastrophe (measured 0.941 -> 6.057 from 1 to 16 groups, all at defect 1.0
+    against allowance 0.1, tau 0.05, beta 0.4), so `HeadlineProfile.loss_scale` is
+    family-specific and `l_total` values are NOT comparable across families; the
+    event-margin seam stays conservative because per-group sensitivity
+    `(1-beta)*nm_g + beta*onset_slope` remains below 1.
 33. V4_SPEC_r4 3.3 resolves the weight-bearing manifest structure as SOL's generated
     semantic-slot budget ledger with FABLE's 8 groups persisting only as a slot->group
     REPORTING rollup carrying no weight semantics, but the frozen MANIFEST.json carries
@@ -268,7 +275,12 @@ the production port; none of the entries below overrides a contract.
     (never WIN/TIE semantics from 4.3) and MODULARITY.md directs phase 3 to wrap --
     not rename -- this result with the ledger and JND machinery. Sub-JND margins
     therefore remain publishable as MARGIN_RULE_* by this seam alone; no consumer may
-    treat them as certified strict wins.
+    treat them as certified strict wins. The SE_pair arm is consequently OPT-IN at
+    this seam where CC-1 states it as a conjunct: a caller supplying no uncertainty
+    ledger receives a one-arm MARGIN_RULE_* verdict with `se_gate_passed = None`
+    rather than being forced to declare an explicit `se_unavailable`
+    acknowledgement; the phase-3 wrapper that owns the ledger owns forcing that
+    declaration (P2 round-2 finding 5).
 35. V4_SPEC_r4 CC-13/6.2b make every unobserved or under-sampled facet enter a tier's
     composite as its FULL FEASIBLE INTERVAL, while 3.6's PM-1 denominator renormalizes
     INAPPLICABLE terms away; phase 2's point-valued `compose` originally collapsed both
@@ -277,11 +289,18 @@ the production port; none of the entries below overrides a contract.
     The two classes are now separated at the composition seam: NA renormalization is
     the inapplicable branch only (every phase-1 NA source is input-side, keeping the
     denominator out of the drawing's control, CC-2), and any absence reason in the
-    `UNOBSERVED` class refuses point composition outright -- the honest point-value
-    handling of a width-maximal interval row is escalation, not a number. Certified
-    per-term interval propagation through `compose` (6.2) remains the phase-3 item
-    MODULARITY.md already names; this seam guarantees no cheap tier can ever route
-    unobserved mass through the renormalizing branch in the meantime.
+    `UNOBSERVED` class on HEADLINE-BEARING mass -- a non-diagnostic, positive-weight
+    row -- refuses point composition outright: the honest point-value handling of a
+    width-maximal interval row is escalation, not a number. The refusal is scoped to
+    headline-bearing mass because CC-13 concerns a facet's entry into a tier's
+    COMPOSITE: a weight-0 diagnostic row carries no mass renormalization could hide,
+    and diagnostics are exactly the rows most likely to go unobserved under a cheap
+    tier, so an unscoped refusal would abort otherwise fully observed headlines for
+    a score-inert reason; the diagnostic row publishes its unobserved absence
+    instead (P2 round-2 finding 4). Certified per-term interval propagation through
+    `compose` (6.2) remains the phase-3 item MODULARITY.md already names; this seam
+    guarantees no cheap tier can ever route unobserved mass through the
+    renormalizing branch in the meantime.
 36. Three P2-review accounting seams are recorded as P5 obligations rather than
     phase-2 code. (a) `NearbyEvent` carries no facet id, so a manifold owned by a
     DIAG (weight-0) or currently-NA facet still enters the CC-1 strict-win budget;
@@ -297,4 +316,21 @@ the production port; none of the entries below overrides a contract.
     still misclassify a fitted profile scalar as `preregistered_prior` in
     `ScoringProfiles.parameter_provenance`; the classification is fail-closed on
     omission and on unledgered fitted identities, and provenance truthfulness is
-    audited against A18/A20 at freeze, not computable at build time.
+    audited against A18/A20 at freeze, not computable at build time. The same
+    fail-closed-on-omission rule now covers the mass surface: `validate_for_contracts`
+    refuses any positive-mass or fitted-identity `SubtermWeight` whose
+    `provenance_class` is undeclared (P2 round-2 finding 1), so misclassification --
+    not omission -- is the only residual on either surface.
+37. V4_SPEC_r4 5.5 r3 adds a combined crossing+face K12 metamorph ("adding a
+    crossing on a high-face-debt near-planar row must strictly worsen the
+    composite") to catch the exchange-rate disease -- face relief paying for a
+    priced crossing. The shipped property test
+    (`test_combined_crossing_and_face_metamorph_strictly_worsens_composite`) runs
+    the combined composite on a certified-planar bowtie fixture where BOTH facets
+    degrade together (U07 0.0 -> 0.590, U41 0.081 -> 0.307), so it pins combined
+    applicability and per-facet monotonicity but cannot detect an exchange rate
+    that lets face relief buy a crossing: the disease needs the face term to move
+    the OTHER way. A fixture where the added crossing genuinely reduces face debt
+    (so the composite must still worsen against the relief) is the missing
+    metamorph, docketed for the property family rather than shipped as a
+    misleadingly-named test (P2 round-2 finding 6).
