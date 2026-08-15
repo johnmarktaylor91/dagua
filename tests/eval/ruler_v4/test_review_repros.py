@@ -262,6 +262,80 @@ def test_u20a_coincident_core_is_catastrophic_even_with_ranks() -> None:
 # layer-profile target even though no direction exists to orient the frame.
 
 
+def _terminal_pair_scene(fork_degrees: float) -> Scene:
+    """Ingest two straight routes leaving one node ``fork_degrees`` apart.
+
+    Parameters
+    ----------
+    fork_degrees : float
+        Oriented angle between the two departing tangents.
+
+    Returns
+    -------
+    Scene
+        Validated static scene whose only U11.v pair is the fork.
+    """
+
+    import math
+
+    angle = math.radians(fork_degrees)
+    positions = torch.tensor(
+        [[0.0, 0.0], [10.0, 0.0], [10.0 * math.cos(angle), 10.0 * math.sin(angle)]],
+        dtype=torch.float64,
+    )
+    return _node_scene(positions, edges=((0, 1), (0, 2)))
+
+
+# --- P4REVERIFY4_OPUS blocker 1: the U11.v angle factor was mirrored at 90 ---
+# degrees (acute unoriented angle on tangents documented to point AWAY from
+# the node), so a straight through-path -- the most distinguishable terminal
+# pair there is -- read Delta_theta = 0 and scored conf = 1.0.
+
+
+def test_u11_through_path_is_not_merge_identity() -> None:
+    """Anti-parallel terminal tangents are maximally distinguishable."""
+
+    from dagua.eval.ruler_v4.edges import U11
+
+    positions = torch.tensor([[0.0, 0.0], [4.0, 0.0], [8.0, 0.0]], dtype=torch.float64)
+    through = U11(_node_scene(positions, edges=((0, 1), (1, 2))))
+    assert through.subterms["U11.v"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_u11_angle_factor_is_monotone_on_the_oriented_range() -> None:
+    """conf decreases from the merge-identity limit out to the through-path.
+
+    The pre-fix curve was correct on [0, 90] and reflected on [90, 180]:
+    a 179-degree fork scored 0.9955 (near-merge) and a 90-degree fork
+    2.3e-16. The contract's merge-identity limit is COINCIDENT tangents
+    (U11 sec 5 (v)), so conf must be strictly decreasing in the oriented
+    angle.
+    """
+
+    from dagua.eval.ruler_v4.edges import U11
+
+    values = [
+        U11(_terminal_pair_scene(degrees)).subterms["U11.v"]
+        for degrees in (0.5, 45.0, 90.0, 135.0, 179.0)
+    ]
+    assert values[0] > 0.99
+    assert all(left > right for left, right in zip(values, values[1:]))
+    assert values[-1] < 1e-12
+
+
+def test_u11_grid_of_paths_scores_interior_nodes_clean() -> None:
+    """A plain grid of straight 4-node paths carries no terminal confusion."""
+
+    from dagua.eval.ruler_v4.edges import U11
+
+    points = [[4.0 * column, 6.0 * row] for row in range(4) for column in range(3)]
+    edges = tuple(
+        (row * 3 + column, (row + 1) * 3 + column) for row in range(3) for column in range(3)
+    )
+    facet = U11(_node_scene(torch.tensor(points, dtype=torch.float64), edges=edges))
+    assert facet.subterms["U11.v"] == pytest.approx(0.0, abs=1e-12)
+
+
 def test_u22_ranks_only_graph_keeps_layer_profile_target() -> None:
     """U22's target comes from declared ranks alone; the frame stays honest."""
 
