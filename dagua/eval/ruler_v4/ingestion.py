@@ -578,7 +578,11 @@ def _derive_cluster_label_boxes(scene: Scene) -> Mapping[str, BoxGeometry]:
         width = text_width + 2.0 * scene.style.padding_x * scale
         height = text_height + 2.0 * scene.style.padding_y * scale
         padding = 0.50 * scene.intrinsic_unit
-        robust_center = _cluster_robust_core_center(scene, scene.graph.clusters[name])
+        # Use the same duplicate-member canonicalization as the region builder,
+        # so the label anchor and the region never disagree on a duplicate id.
+        robust_center = _cluster_robust_core_center(
+            scene, tuple(sorted(set(scene.graph.clusters[name])))
+        )
         top = _region_top_at_x(region, float(robust_center[0]))
         center = torch.stack(
             (
