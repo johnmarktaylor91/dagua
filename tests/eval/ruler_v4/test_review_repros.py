@@ -1108,3 +1108,61 @@ def test_unobserved_absence_refuses_point_composition() -> None:
         profile,
     )
     assert inapplicable.l_total == pytest.approx(0.2)
+
+
+# --- P2REVIEW2_OPUS finding 4 (composition.py:393-399): the CC-13 refusal ---
+# fired on every table entry before the headline-mass filter, so an
+# UNOBSERVED absence on a weight-0 diagnostic row aborted composition of an
+# otherwise fully observed headline it could never move. The refusal is now
+# scoped to headline-bearing (non-diagnostic, positive-weight) mass.
+
+
+def test_unobserved_diagnostic_mass_does_not_abort_composition() -> None:
+    """CC-13 refusal is scoped to mass that can actually move the composite."""
+
+    from dagua.eval.ruler_v4.composition import (
+        CompositionFamily,
+        CompositionProfile,
+        compose,
+    )
+    from dagua.eval.ruler_v4.scene import na_result, value_result
+    from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
+
+    table = WeightTable(
+        entries=(
+            SubtermWeight("A.loss", "A", "S", 1.0),
+            SubtermWeight("U40.x", "U40", "X", 0.0, diagnostic=True),
+        ),
+        d_power=0,
+    )
+    profile = CompositionProfile(CompositionFamily.P_MEAN, power=2.0)
+    result = compose(
+        {
+            "A": value_result(0.2, {"A.loss": 0.2}),
+            "U40": na_result("UNOBSERVED:TIER_BUDGET_ZERO"),
+        },
+        table,
+        profile,
+    )
+
+    assert result.l_total == 0.2
+    diagnostic_row = next(row for row in result.subterms if row.subterm_id == "U40.x")
+    assert diagnostic_row.value is None
+    assert diagnostic_row.na_reason == "UNOBSERVED:TIER_BUDGET_ZERO"
+
+    # The same absence on headline-bearing mass still refuses outright.
+    with pytest.raises(ValueError, match="CC-13"):
+        compose(
+            {
+                "A": value_result(0.2, {"A.loss": 0.2}),
+                "B": na_result("UNOBSERVED:TIER_BUDGET_ZERO"),
+            },
+            WeightTable(
+                entries=(
+                    SubtermWeight("A.loss", "A", "S", 1.0),
+                    SubtermWeight("B.loss", "B", "X", 1.0),
+                ),
+                d_power=0,
+            ),
+            profile,
+        )

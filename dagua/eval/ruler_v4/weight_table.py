@@ -84,6 +84,10 @@ class SubtermWeight:
     provenance_class : str or None
         Frozen manifest provenance of this mass (``contract_frozen``,
         ``preregistered_prior``, ``fitted``, or ``controlled_stimulus``).
+        Optional only while a table is under construction: the contract gate
+        refuses any positive-mass or fitted-identity entry without one, the
+        same fail-closed rule ``ScoringProfiles.parameter_provenance``
+        applies to profile scalars (V4_SPEC_r4 3.6).
     """
 
     subterm_id: str
@@ -199,7 +203,9 @@ class WeightTable:
     entries : tuple[SubtermWeight, ...]
         Per-sub-term masses. P5 supplies fitted values; this class contains no
         default weights. One table serves exactly one observation profile
-        (PM-1 provenance is per-profile).
+        (PM-1 provenance is per-profile). The contract gate refuses any
+        positive-mass or fitted entry whose provenance class is undeclared, so
+        the mass surface cannot hide from the A18 dof account by omission.
     d_power : int
         Information-limited fitted capacity used by the A18 cap formula.
     prior_floors : mapping[str, float]
@@ -352,12 +358,14 @@ class WeightTable:
         )
 
     def validate_for_contracts(self) -> None:
-        """Validate completeness, gates-report diagnostics, and prior floors.
+        """Validate completeness, diagnostics, floors, provenance, and dof.
 
         Raises
         ------
         ValueError
-            If the table cannot be used by the frozen 45-facet scorer.
+            If the table cannot be used by the frozen 45-facet scorer,
+            including any positive-mass or fitted entry that declares no
+            provenance class (V4_SPEC_r4 3.6 counting rule).
         """
 
         from dagua.eval.ruler_v4.contracts import CONTRACTS
@@ -411,6 +419,21 @@ class WeightTable:
                     f"{facet_id} prior-floor mass is neither prior_driven nor "
                     f"evidence-fitted: {unaccounted}"
                 )
+        # 3.6 counting-rule closure on the mass surface (P2 review OB2): a
+        # score-visible mass or a fitted identity with no declared provenance
+        # class would let independently adjustable scalars cost zero dof, the
+        # omission `validate_parameter_provenance` already refuses for
+        # profile scalars. Construction stays permissive; the gate does not.
+        unclassified = sorted(
+            entry.subterm_id
+            for entry in self.entries
+            if entry.provenance_class is None
+            and (entry.weight > 0.0 or entry.fitted_parameter is not None)
+        )
+        if unclassified:
+            raise ValueError(
+                f"score-visible sub-term masses lack a provenance class: {unclassified}"
+            )
         account = self.dof_account
         if not account.within_cap:
             raise ValueError("fitted parameter count exceeds min(20, D_power)")

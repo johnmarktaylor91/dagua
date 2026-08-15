@@ -100,6 +100,13 @@ def build_full_weight_table() -> WeightTable:
             weight=0.0 if facet_id in GATE_DIAGNOSTIC_FACETS else 1.0,
             prior_driven=facet_id in REQUIRED_PRIOR_FLOOR_FACETS,
             diagnostic=facet_id in GATE_DIAGNOSTIC_FACETS,
+            provenance_class=(
+                None
+                if facet_id in GATE_DIAGNOSTIC_FACETS
+                else "preregistered_prior"
+                if facet_id in REQUIRED_PRIOR_FLOOR_FACETS
+                else "contract_frozen"
+            ),
         )
         for facet_id, contract in CONTRACTS.items()
         for subterm_id in contract.scored_subterms

@@ -15,7 +15,9 @@ from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 # CC-13 seam: an UNOBSERVED-class absence (budget/tier, not input-side
 # inapplicability) must enter as its full feasible interval, never as
 # renormalized-away mass. The point scorer has no interval tier, so it
-# refuses, forcing escalation instead of fabricating precision.
+# refuses on headline-bearing (non-diagnostic, positive-weight) rows,
+# forcing escalation instead of fabricating precision; weight-0 DIAG rows
+# carry no composable mass and publish the absence instead.
 UNOBSERVED_REASON_PREFIX = "UNOBSERVED"
 
 
@@ -359,9 +361,12 @@ def compose(
     NA renormalization is the INAPPLICABLE branch only (3.6): every phase-1
     NA source is input-side, so a dropped row never hands the drawing its
     own denominator (CC-2). An ``UNOBSERVED``-class absence (budget/tier,
-    CC-13) refuses composition outright -- the honest point-value handling
-    of a full-feasible-interval row is escalation, not renormalization
-    (DISCREPANCIES entry 35).
+    CC-13) on headline-bearing mass -- a non-diagnostic, positive-weight
+    row -- refuses composition outright: the honest point-value handling
+    of a full-feasible-interval row is escalation, not renormalization.
+    A weight-0 diagnostic row carries no mass the composite could hide, so
+    its unobserved absence publishes without aborting (DISCREPANCIES
+    entry 35).
 
     Parameters
     ----------
@@ -391,7 +396,15 @@ def compose(
         if result.state is ResultState.INVALID:
             raise ValueError(f"invalid facet result for {entry.facet_id}: {result.reason}")
         absence_reason = _dropped_subterm_reason(result, entry.subterm_id)
-        if absence_reason is not None and absence_reason.startswith(UNOBSERVED_REASON_PREFIX):
+        if (
+            absence_reason is not None
+            and not entry.diagnostic
+            and entry.weight > 0.0
+            and absence_reason.startswith(UNOBSERVED_REASON_PREFIX)
+        ):
+            # Scoped to headline-bearing mass: a weight-0 diagnostic row can
+            # never move the composite (CC-13 concerns a tier's composite),
+            # so its unobserved absence publishes instead of aborting.
             raise ValueError(
                 f"{entry.facet_id}/{entry.subterm_id} is unobserved ({absence_reason}): "
                 "CC-13 requires full-feasible-interval handling at an interval tier; "

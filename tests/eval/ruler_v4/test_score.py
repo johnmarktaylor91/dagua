@@ -35,6 +35,13 @@ def _complete_table() -> WeightTable:
             weight=0.0 if facet_id in GATE_DIAGNOSTIC_FACETS else 1.0,
             prior_driven=facet_id in REQUIRED_PRIOR_FLOOR_FACETS,
             diagnostic=facet_id in GATE_DIAGNOSTIC_FACETS,
+            provenance_class=(
+                None
+                if facet_id in GATE_DIAGNOSTIC_FACETS
+                else "preregistered_prior"
+                if facet_id in REQUIRED_PRIOR_FLOOR_FACETS
+                else "contract_frozen"
+            ),
         )
         for facet_id, contract in CONTRACTS.items()
         for subterm_id in contract.scored_subterms
@@ -138,8 +145,43 @@ def test_score_handles_conditionally_dropped_subterms(semantic_scene: Scene) -> 
 
 
 def test_score_routes_a_temporal_scene_to_u40(semantic_scene: Scene) -> None:
-    """The pure entrypoint can publish all 45 rows, including U40 (P2 minor)."""
+    """The pure entrypoint can publish all 45 rows, including U40 (P2 minor).
 
+    The temporal frames are built from the scene under score itself, so the
+    routed history genuinely describes the drawing being scored.
+    """
+
+    from dagua.eval.ruler_v4.ingestion import ingest_temporal
+    from dagua.eval.ruler_v4.scene import TemporalTransition, ValidTemporalScene
+
+    base = _scorable_scene(semantic_scene)
+    scene = replace(base, graph=replace(base.graph, temporal_ids=base.graph.node_ids))
+    transition = TemporalTransition(
+        {identifier: "unchanged" for identifier in scene.graph.node_ids},
+        {identifier: 0.0 for identifier in scene.graph.node_ids},
+    )
+    temporal = ingest_temporal((scene, scene), (transition,))
+    assert isinstance(temporal, ValidTemporalScene)
+
+    without = score(scene, _complete_table(), _profiles())
+    assert without.type_m.facets["U40"].result.reason == "TEMPORAL_PROFILE_ABSENT"
+
+    routed = score(scene, _complete_table(), _profiles(), temporal_scene=temporal.scene)
+    u40 = routed.type_m.facets["U40"].result
+    assert u40.state is ResultState.VALUE
+    assert u40.temporal_headline == 0.0
+    # U40 is DIAG at weight 0: the temporal route cannot move the headline.
+    assert routed.type_m.headline.value == without.type_m.headline.value
+
+
+def test_score_refuses_a_temporal_scene_of_a_different_drawing(semantic_scene: Scene) -> None:
+    """A temporal history of some other graph cannot ride into U40 (CC-11).
+
+    P2 round-2 MAJOR: routing an unrelated temporal scene published a U40
+    VALUE against a TYPE-R context describing a different drawing.
+    """
+
+    import pytest
     import torch
 
     from dagua.eval.ruler_v4.ingestion import ingest, ingest_temporal
@@ -174,16 +216,9 @@ def test_score_routes_a_temporal_scene_to_u40(semantic_scene: Scene) -> None:
         {"a": "unchanged", "b": "unchanged", "c": "unchanged"},
         {"a": 0.0, "b": 0.0, "c": 0.0},
     )
-    temporal = ingest_temporal((frame(), frame()), (transition,))
-    assert isinstance(temporal, ValidTemporalScene)
+    unrelated = ingest_temporal((frame(), frame()), (transition,))
+    assert isinstance(unrelated, ValidTemporalScene)
 
     scene = _scorable_scene(semantic_scene)
-    without = score(scene, _complete_table(), _profiles())
-    assert without.type_m.facets["U40"].result.reason == "TEMPORAL_PROFILE_ABSENT"
-
-    routed = score(scene, _complete_table(), _profiles(), temporal_scene=temporal.scene)
-    u40 = routed.type_m.facets["U40"].result
-    assert u40.state is ResultState.VALUE
-    assert u40.temporal_headline == 0.0
-    # U40 is DIAG at weight 0: the temporal route cannot move the headline.
-    assert routed.type_m.headline.value == without.type_m.headline.value
+    with pytest.raises(ValueError, match="not a history of the drawing under score"):
+        score(scene, _complete_table(), _profiles(), temporal_scene=unrelated.scene)
