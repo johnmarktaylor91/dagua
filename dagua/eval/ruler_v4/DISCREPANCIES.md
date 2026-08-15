@@ -411,3 +411,17 @@ the production port; none of the entries below overrides a contract.
     selection may rely on `race_candidates` pruning before that lands;
     until then every published score stays full-tier (6.1's "only B2/full
     enters tallies" already guarantees tally integrity independently).
+41. U33 conformance fix (P3FIX2): the P4 port returned INVALID with reason
+    TREE_SEMANTICS_ABSENT both when tree semantics are absent and when a
+    declared tree is trivial (no root or no child anywhere). The frozen
+    contract is explicit the other way: "U33 is applicable to a nontrivial
+    declared rooted tree/forest. Absence is `NA:TREE_SEMANTICS_ABSENT`;
+    malformed parent/depth/order data are invalid" (U33.md, "Input schema
+    and applicability"). Every sibling facet already used NA for absent
+    semantics (U31 DIRECTION_OR_AXIS_ABSENT, U34 FLOW_SEMANTICS_ABSENT,
+    U39 PORTS_ABSENT, U35/U36 WEIGHTS_ABSENT). Fixed to
+    `na_result("TREE_SEMANTICS_ABSENT")` for both absence arms; the
+    malformed arms (bad layout token, wrong lengths, bad parent index,
+    depth mismatch) stay INVALID. Surfaced by the 6.3 pilot bank's
+    clustered class, whose scenes declare no tree semantics and were
+    unscorable end to end under the port's refusal.

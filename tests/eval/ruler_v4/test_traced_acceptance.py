@@ -58,10 +58,10 @@ _SUBTERM_FACET: Mapping[str, str] = {
 # U21) are all represented; the rest add breadth across modules.
 BATTERY: Tuple[Tuple[str, float], ...] = (
     ("U01.headline", 0.35),
-    ("U7.base", 0.35),
+    ("U7.base", 0.65),
     ("U11.v", 0.35),
     ("U17.1", 0.35),
-    ("U18.le", 0.35),
+    ("U18.le", 0.8),
     ("U03.r_1", 0.35),
     ("U09.headline", 0.35),
     ("U12.headline", 0.35),
