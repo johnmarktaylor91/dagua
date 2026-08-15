@@ -947,3 +947,93 @@ def test_margin_rule_verdicts_are_scoped_names_not_certified_wins() -> None:
     }
     assert sub_jnd.verdict is ComparisonVerdict.MARGIN_RULE_FIRST_WINS
     assert sub_jnd.se_gate_passed is None
+
+
+# --- P2REVIEW_OPUS major (composition.py:255-274): the normalized LSE ---
+# bottleneck arm shrank a fixed catastrophe by tau*ln(n) as applicable
+# groups grew (0.7529 at 1 group -> 0.6494 at 8), violating the 3.3
+# universal-mass floor; the smooth max also ignored group mass entirely.
+
+
+def _bottleneck_composition(groups: Tuple[str, ...], losses: Tuple[float, ...]):
+    """Compose one soft-bottleneck fixture with unit masses.
+
+    Parameters
+    ----------
+    groups : tuple[str, ...]
+        Group label per row.
+    losses : tuple[float, ...]
+        Defect per row.
+
+    Returns
+    -------
+    CompositionResult
+        Fixed beta=0.4, tau=0.05, allowance 0.1 composition.
+    """
+
+    from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile, compose
+    from dagua.eval.ruler_v4.scene import value_result
+    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+
+    table = WeightTable(
+        entries=tuple(
+            SubtermWeight(f"G{index}.x", f"G{index}", group, 1.0)
+            for index, group in enumerate(groups)
+        ),
+        d_power=0,
+    )
+    results = {
+        f"G{index}": value_result(value, {f"G{index}.x": value})
+        for index, value in enumerate(losses)
+    }
+    profile = CompositionProfile(
+        CompositionFamily.MEAN_SOFT_BOTTLENECK,
+        bottleneck_mix=0.4,
+        bottleneck_temperature=0.05,
+        group_allowances={group: 0.1 for group in set(groups)},
+    )
+    return compose(results, table, profile)
+
+
+def test_bottleneck_debt_is_invariant_to_applicable_group_count() -> None:
+    """The Opus P2 probe: a fixed catastrophe costs the same at 1 or 8 groups."""
+
+    one = _bottleneck_composition(("W",), (0.9,))
+    eight = _bottleneck_composition(tuple(f"g{index}" for index in range(8)), (0.9,) + (0.0,) * 7)
+    assert one.l_bottleneck is not None and eight.l_bottleneck is not None
+    assert one.l_bottleneck == eight.l_bottleneck
+    # Clean groups sit at exactly zero excess debt (C1 onset at the allowance);
+    # the surviving debt is phi(0.9 - 0.1) = 0.8^2 / (0.8 + 0.05).
+    assert one.l_bottleneck == pytest.approx(0.64 / 0.85)
+
+
+def test_low_mass_catastrophic_group_stays_visible_in_the_bottleneck() -> None:
+    """The Opus second-order probe pinned as intended semantics: a 1%-mass
+    group at defect 1.0 carries a material bottleneck debt."""
+
+    from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile, compose
+    from dagua.eval.ruler_v4.scene import value_result
+    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+
+    table = WeightTable(
+        entries=(
+            SubtermWeight("A.1", "A", "tiny", 1.0),
+            SubtermWeight("B.1", "B", "big", 99.0),
+        ),
+        d_power=0,
+    )
+    results = {
+        "A": value_result(1.0, {"A.1": 1.0}),
+        "B": value_result(0.0, {"B.1": 0.0}),
+    }
+    profile = CompositionProfile(
+        CompositionFamily.MEAN_SOFT_BOTTLENECK,
+        bottleneck_mix=0.4,
+        bottleneck_temperature=0.05,
+        group_allowances={"tiny": 0.1, "big": 0.1},
+    )
+    result = compose(results, table, profile)
+    assert result.l_mean == pytest.approx(0.01)
+    assert result.l_bottleneck is not None
+    assert result.l_bottleneck > 0.85
+    assert result.l_total > 0.3

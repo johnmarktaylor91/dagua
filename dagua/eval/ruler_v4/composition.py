@@ -50,7 +50,7 @@ class CompositionProfile:
     bottleneck_mix : float or None
         Positive convex weight beta, required for ``MEAN_SOFT_BOTTLENECK``.
     bottleneck_temperature : float or None
-        Positive smooth-maximum temperature tau.
+        Positive C1 onset scale tau for the per-group excess debts.
     group_allowances : mapping[str, float]
         Explicit nonnegative allowance for every applicable bottleneck group.
     """
@@ -280,42 +280,20 @@ class ComparisonResult:
     se_gate_passed: Optional[bool] = None
 
 
-def _smooth_max(values: Tuple[float, ...], temperature: float) -> float:
-    """Compute a stable normalized log-sum-exp smooth maximum.
-
-    Parameters
-    ----------
-    values : tuple[float, ...]
-        Nonempty group debts.
-    temperature : float
-        Positive soft-maximum temperature.
-
-    Returns
-    -------
-    float
-        Smooth maximum with identity behavior for equal inputs.
-    """
-
-    scaled = tuple(value / temperature for value in values)
-    maximum = max(scaled)
-    mean_exponential = math.fsum(math.exp(value - maximum) for value in scaled) / len(scaled)
-    return temperature * (maximum + math.log(mean_exponential))
-
-
 def _smooth_positive(value: float, temperature: float) -> float:
-    """Apply a C1 positive-part onset to the smoothed excess debt.
+    """Apply a C1 positive-part onset to one group's excess debt.
 
     Parameters
     ----------
     value : float
-        Signed smoothed excess over group allowances.
+        Signed excess of one group's loss over its allowance.
     temperature : float
-        Positive onset scale shared with the smooth maximum.
+        Positive onset scale.
 
     Returns
     -------
     float
-        Zero for ordinary debt and a C1 increasing burden above it.
+        Zero at or below the allowance and a C1 increasing burden above it.
     """
 
     if value <= 0.0:
@@ -434,12 +412,18 @@ def compose(
     else:
         assert profile.bottleneck_temperature is not None
         assert profile.bottleneck_mix is not None
-        allowed_losses = []
+        # Per-group C1 positive-excess debts SUM: a group at or under its
+        # allowance contributes exactly zero, so the arm is independent of
+        # the applicable-group count (the 3.3 universal-mass floor: an
+        # identical catastrophe may not cost less on a metadata-richer row)
+        # and every catastrophic group stays visible regardless of its mass.
+        excess_debts = []
         for group in groups:
             assert group.allowance is not None
-            allowed_losses.append(group.loss - group.allowance)
-        tail = _smooth_max(tuple(allowed_losses), profile.bottleneck_temperature)
-        l_bottleneck = _smooth_positive(tail, profile.bottleneck_temperature)
+            excess_debts.append(
+                _smooth_positive(group.loss - group.allowance, profile.bottleneck_temperature)
+            )
+        l_bottleneck = math.fsum(excess_debts)
         l_total = (1.0 - profile.bottleneck_mix) * l_mean + profile.bottleneck_mix * l_bottleneck
 
     subterms: List[SubtermContribution] = []
