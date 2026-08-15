@@ -208,8 +208,11 @@ class NearbyEvent:
     context : mapping[str, float]
         Graph-local inputs for a closed-form jump bound.
     manifold_id : str or None
-        Stable occurrence id. Omit when the event type occurs at most once in
-        the comparison neighborhood.
+        Stable occurrence id. Occurrences are merged ONLY through an explicit
+        shared id: every id-less occurrence enters the CC-1 margin sum as its
+        own manifold, so one occurrence near both rows is double-charged
+        unless the caller identifies it. Omission is always conservative
+        (a larger event budget), never a way to shrink the sum.
     """
 
     event_id: str
@@ -486,10 +489,18 @@ def compare_with_event_margin(
 
     declared = {event.event_id: event for event in registry.entries}
     contexts: Dict[str, List[Tuple[str, Mapping[str, float]]]] = {}
-    for nearby in (*first_nearby, *second_nearby):
+    for index, nearby in enumerate((*first_nearby, *second_nearby)):
         if nearby.event_id not in declared:
             raise ValueError(f"undeclared event manifold: {nearby.event_id}")
-        manifold_id = nearby.manifold_id or nearby.event_id
+        # CC-1 sums the bounds of ALL nearby manifolds. Only an explicit
+        # shared manifold_id may merge occurrences into one; an id-less
+        # occurrence is always its own summand (collapsing repeats of one
+        # event type to a max would fail open on the default argument).
+        manifold_id = (
+            nearby.manifold_id
+            if nearby.manifold_id is not None
+            else f"{nearby.event_id}#anonymous-{index}"
+        )
         contexts.setdefault(manifold_id, []).append((nearby.event_id, nearby.context))
     bounds = []
     event_ids = []
