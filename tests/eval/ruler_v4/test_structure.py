@@ -9,6 +9,9 @@ from typing import Any, Mapping, Optional, Tuple
 import pytest
 import torch
 
+from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile
+from dagua.eval.ruler_v4.contracts import CONTRACTS
+from dagua.eval.ruler_v4.headline import HeadlineProfile
 from dagua.eval.ruler_v4.ingestion import ingest
 from dagua.eval.ruler_v4.scene import (
     DrawingScene,
@@ -20,6 +23,7 @@ from dagua.eval.ruler_v4.scene import (
     StyleContract,
     ValidScene,
 )
+from dagua.eval.ruler_v4.score import ScoringProfiles
 from dagua.eval.ruler_v4.structure import (
     U01,
     U02,
@@ -34,6 +38,14 @@ from dagua.eval.ruler_v4.structure import (
     U01b,
     U04a,
     U04b,
+)
+from dagua.eval.ruler_v4.surrogate.traced import TracedSoftScore, score_scene_soft
+from dagua.eval.ruler_v4.weight_table import (
+    GATE_DIAGNOSTIC_FACETS,
+    REQUIRED_PRIOR_FLOOR_FACETS,
+    ParameterProvenance,
+    SubtermWeight,
+    WeightTable,
 )
 
 
@@ -408,3 +420,216 @@ def test_u24_compact_scene_publishes_finite_ink_ratio() -> None:
     assert result.state is ResultState.VALUE
     assert result.value == pytest.approx(0.0, abs=0.0)
     assert result.raw["ink_ratio"] > 0.0
+
+
+# --- Traced surrogate seam (spec 6.5): structure-facet gradient channels. ---
+# The scene, weight table, and profiles reproduce the traced_baseline probe's
+# semantic fixture so its LIVE/FLAT classification is pinned permanently.
+
+_TRACED_LIVE_ROWS = ("U01.headline", "U03.r_1", "U03.r_2")
+# Honestly flat on this fixture: U09's MAD sits on an exact-zero absolute
+# deviation (abs subgradient at 0 is 0); U23's balanced drawing sits at the
+# contract's zero-derivative smoothstep knot (U23 golden 1); U24's ink ratio
+# sits inside soft_pos's zero plateau (ink_ratio < kappa_ink = 3).
+_TRACED_FLAT_ROWS = ("U09.headline", "U23.headline", "U24.headline")
+
+
+def _traced_semantic_scene() -> Scene:
+    """Build the traced-baseline probe's directed clustered eight-node scene.
+
+    Returns
+    -------
+    Scene
+        Validated semantic fixture, construction copied from the probe.
+    """
+
+    positions = torch.tensor(
+        [
+            [0.0, 0.0],
+            [2.0, -2.0],
+            [2.0, 2.0],
+            [4.0, -2.0],
+            [4.0, 2.0],
+            [6.0, -2.0],
+            [6.0, 2.0],
+            [8.0, 0.0],
+        ],
+        dtype=torch.float64,
+    )
+    edges: Tuple[Tuple[int, int], ...] = (
+        (0, 1),
+        (0, 2),
+        (1, 3),
+        (2, 4),
+        (3, 5),
+        (4, 6),
+        (5, 7),
+        (6, 7),
+    )
+    graph = GraphSemantics(
+        node_ids=tuple(f"n{index}" for index in range(8)),
+        edges=edges,
+        directed=True,
+        node_labels=tuple(f"n{index}" for index in range(8)),
+        edge_labels=tuple(None for _ in edges),
+        clusters={"left": (0, 1, 2, 3), "right": (4, 5, 6, 7), "parent": tuple(range(8))},
+        cluster_parents={"left": "parent", "right": "parent"},
+        ranks=(0, 1, 1, 2, 2, 3, 3, 4),
+        roots=(0,),
+        feedback=tuple(False for _ in edges),
+        edge_weights=tuple(float(index + 1) for index in range(len(edges))),
+        weight_semantics="distance_cost",
+        required_primitives=frozenset({"nodes", "routes"}),
+    )
+    graph = replace(
+        graph,
+        tree_parents=(None, 0, 0, 1, 2, 3, 4, 5),
+        tree_depths=(0, 1, 1, 2, 2, 3, 3, 4),
+        tree_layout="layered",
+        flow_axis=(1.0, 0.0),
+        ordered_children={0: (1, 2)},
+    )
+    routes = tuple(
+        Route(index, torch.stack((positions[source], positions[target])))
+        for index, (source, target) in enumerate(edges)
+    )
+    drawing = DrawingScene(positions, routes, ("nodes", "routes", "node_labels"))
+    result = ingest(
+        graph,
+        drawing,
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes", "node_labels"})),
+    )
+    assert isinstance(result, ValidScene)
+    return result.scene
+
+
+def _complete_weight_table() -> WeightTable:
+    """Build the probe's complete uniform weight table.
+
+    Returns
+    -------
+    WeightTable
+        One unit weight per non-diagnostic scored sub-term.
+    """
+
+    entries = tuple(
+        SubtermWeight(
+            subterm_id=subterm_id,
+            facet_id=facet_id,
+            group=facet_id[:3],
+            weight=0.0 if facet_id in GATE_DIAGNOSTIC_FACETS else 1.0,
+            prior_driven=facet_id in REQUIRED_PRIOR_FLOOR_FACETS,
+            diagnostic=facet_id in GATE_DIAGNOSTIC_FACETS,
+            provenance_class=(
+                None
+                if facet_id in GATE_DIAGNOSTIC_FACETS
+                else "preregistered_prior"
+                if facet_id in REQUIRED_PRIOR_FLOOR_FACETS
+                else "contract_frozen"
+            ),
+        )
+        for facet_id, contract in CONTRACTS.items()
+        for subterm_id in contract.scored_subterms
+    )
+    return WeightTable(
+        entries=entries,
+        d_power=20,
+        prior_floors={facet_id: 1.0 for facet_id in REQUIRED_PRIOR_FLOOR_FACETS},
+    )
+
+
+def _probe_profiles() -> ScoringProfiles:
+    """Build the probe's frozen scoring profiles.
+
+    Returns
+    -------
+    ScoringProfiles
+        P-mean composition with declared parameter provenance.
+    """
+
+    return ScoringProfiles(
+        composition=CompositionProfile(CompositionFamily.P_MEAN, power=2.0),
+        headline=HeadlineProfile(index_span=100.0, loss_scale=1.0, version="probe"),
+        measurement_version="probe-measurement",
+        policy_version="probe-policy",
+        alpha_grid_index=1,
+        parameter_provenance={
+            "composition.power": ParameterProvenance("preregistered_prior"),
+            "headline.index_span": ParameterProvenance("contract_frozen"),
+            "headline.loss_scale": ParameterProvenance("preregistered_prior"),
+            "alpha_grid_index": ParameterProvenance("preregistered_prior"),
+        },
+    )
+
+
+def _traced_probe_score(scene: Scene) -> TracedSoftScore:
+    """Score the probe fixture through the traced surrogate seam.
+
+    Parameters
+    ----------
+    scene : Scene
+        Validated probe scene.
+
+    Returns
+    -------
+    TracedSoftScore
+        Traced differentiable score.
+    """
+
+    return score_scene_soft(scene, _complete_weight_table(), _probe_profiles())
+
+
+def test_traced_structure_rows_carry_live_position_gradients() -> None:
+    """U01/U03 traced sub-terms are bound with nonzero finite position grads."""
+
+    traced = _traced_probe_score(_traced_semantic_scene())
+    for subterm_id in _TRACED_LIVE_ROWS:
+        assert subterm_id in traced.bound_subterms
+        tensor = traced.traced_subterms[subterm_id]
+        assert tensor.requires_grad
+        (gradient,) = torch.autograd.grad(tensor, traced.positions, retain_graph=True)
+        assert bool(torch.isfinite(gradient).all())
+        assert float(torch.linalg.vector_norm(gradient)) > 0.0
+    assert traced.soft.l_total.requires_grad
+    (total_gradient,) = torch.autograd.grad(
+        traced.soft.l_total, traced.positions, retain_graph=True
+    )
+    assert bool(torch.isfinite(total_gradient).all())
+    assert float(torch.linalg.vector_norm(total_gradient)) > 0.0
+
+
+def test_traced_structure_flat_rows_have_finite_zero_gradients() -> None:
+    """Fixture-flat structure rows carry a graph whose gradient is exactly 0."""
+
+    traced = _traced_probe_score(_traced_semantic_scene())
+    for subterm_id in _TRACED_FLAT_ROWS:
+        tensor = traced.traced_subterms[subterm_id]
+        assert tensor.requires_grad
+        (gradient,) = torch.autograd.grad(
+            tensor, traced.positions, retain_graph=True, allow_unused=True
+        )
+        assert gradient is not None
+        assert bool(torch.isfinite(gradient).all())
+        assert float(torch.linalg.vector_norm(gradient)) == 0.0
+
+
+def test_traced_structure_values_match_untraced_evaluation() -> None:
+    """Tracing never moves the exact path; traced values differ by <= 1e-12."""
+
+    scene = _traced_semantic_scene()
+    facets = (U01, U03, U09, U23, U24)
+    direct_before: dict = {}
+    for facet in facets:
+        direct_before.update(facet(scene).subterms)
+    traced = _traced_probe_score(scene)
+    direct_after: dict = {}
+    for facet in facets:
+        direct_after.update(facet(scene).subterms)
+    # Exact-path bit-identity: the un-traced evaluation is unchanged by tracing.
+    assert direct_after == direct_before
+    for subterm_id in (*_TRACED_LIVE_ROWS, *_TRACED_FLAT_ROWS):
+        # Traced forwards may differ from exact by accumulation order only.
+        assert float(traced.traced_subterms[subterm_id].detach()) == pytest.approx(
+            direct_before[subterm_id], abs=1e-12
+        )
