@@ -259,6 +259,11 @@ def U03(scene: Scene) -> FacetResult:
     degree_stratum_defects: Dict[str, Tuple[float, ...]] = {}
     center_panels: Dict[str, Tuple[int, ...]] = {}
     graph_adjacency = adjacency(scene)
+    node_masses = (
+        list(scene.graph.node_masses)
+        if scene.graph.node_masses is not None
+        else [1.0] * scene.node_count
+    )
     for radius in (1, 2, 4):
         component_values: List[float] = []
         component_weights: List[float] = []
@@ -347,7 +352,9 @@ def U03(scene: Scene) -> FacetResult:
             degree_stratum_defects[statistic_key] = tuple(tercile_values)
             if tercile_values:
                 component_values.append(sum(tercile_values) / len(tercile_values))
-                component_weights.append(float(len(members)))
+                # Section 7: terciles combine with equal input mass, components
+                # by node mass (identical on unit-mass graphs).
+                component_weights.append(float(sum(node_masses[node] for node in members)))
         eligibility[f"r_{radius}"] = radius_eligible
         if component_values:
             values[f"U03.r_{radius}"] = sum(
