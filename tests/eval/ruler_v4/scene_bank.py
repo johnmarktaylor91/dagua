@@ -34,7 +34,10 @@ from dagua.eval.ruler_v4.scene import (
 )
 
 BANK_SEED = 20260815
-SCALE_BANDS: Mapping[str, int] = {"small": 8, "medium": 20, "large": 48}
+# Pilot-time size bands: exact facet evaluation is superlinear in node
+# count (measured ~145 s/scene at 20 nodes), so the pilot's large band is
+# 32 nodes; the production bank's larger bands are P5-owned (entry 39).
+SCALE_BANDS: Mapping[str, int] = {"small": 8, "medium": 20, "large": 32}
 CLASS_NAMES: Tuple[str, ...] = ("chain", "tree", "layered_dag", "clustered")
 VARIANT_NAMES: Tuple[str, ...] = (
     "constructed",
