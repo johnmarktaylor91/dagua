@@ -372,13 +372,23 @@ def blend_with_weights(
     total_mass = sum(weight for _, weight in ordered)
     sorted_values = [value for value, _ in ordered]
     normalized = [weight / total_mass for _, weight in ordered]
-    trimmed = (
-        _weighted_interval_mean(sorted_values, normalized, _TRIM_FRACTION, 1.0 - _TRIM_FRACTION)
-        if robust_mean is None
-        else float(robust_mean)
-    )
-    if not math.isfinite(trimmed) or not 0.0 <= trimmed <= 1.0:
-        raise ValueError("robust mean override must be finite and lie in [0, 1]")
+    if robust_mean is None:
+        # The interval mean of an in-[0, 1] population can escape the interval
+        # only by float summation dust (six exact-1.0 defects trim to
+        # 1.0000000000000002); clamp rather than reject the port's own output.
+        trimmed = min(
+            1.0,
+            max(
+                0.0,
+                _weighted_interval_mean(
+                    sorted_values, normalized, _TRIM_FRACTION, 1.0 - _TRIM_FRACTION
+                ),
+            ),
+        )
+    else:
+        trimmed = float(robust_mean)
+        if not math.isfinite(trimmed) or not 0.0 <= trimmed <= 1.0:
+            raise ValueError("robust-mean override must be finite and lie in [0, 1]")
     cvar = _weighted_interval_mean(sorted_values, normalized, 1.0 - _CVAR_TAIL_FRACTION, 1.0)
     maximum = sorted_values[-1]
     exponential_mean = sum(
