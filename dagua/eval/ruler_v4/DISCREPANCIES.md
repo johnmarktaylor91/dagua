@@ -334,3 +334,19 @@ the production port; none of the entries below overrides a contract.
     (so the composite must still worsen against the relief) is the missing
     metamorph, docketed for the property family rather than shipped as a
     misleadingly-named test (P2 round-2 finding 6).
+38. V4_SPEC_r4 6.5 requires an analytic `score_v4_soft` and bans invented
+    relaxations, but neither the generated `MANIFEST.json` nor any facet
+    contract, A18 insert, or the current preregistration amendment chain names
+    a position-level smoothing or a machine-readable surrogate formula. The
+    manifest contains contract identity, scored subterms, constants, frame
+    class, and event metadata only. Production therefore compiles all 91
+    scored rows with an `exact_defect_identity` rule: it is differentiable
+    with respect to explicitly bound defect tensors and traceable to the exact
+    contract hash, but it does NOT claim that the closed float-valued facet
+    implementation is differentiable with respect to scene positions. A future
+    position-level rule must be contract-named and manifest-generated before it
+    can be admitted; silently finite-differencing, straight-through-estimating,
+    or choosing a soft threshold here would violate the no-invented-relaxation
+    requirement. Rank fidelity is consequently certified for the compiled
+    defect/composition surrogate, while position-gradient claims are limited to
+    caller-supplied traced tensors.
