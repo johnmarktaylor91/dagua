@@ -1,4 +1,4 @@
-"""Live repros from the P4 adversarial review rounds, banked as regressions.
+"""Live repros from the P4 and P3 adversarial review rounds, banked as regressions.
 
 Every test here is a repro that a review lane (P4REVIEW / P4REVERIFY /
 P4REVERIFY2 / P4REVERIFY3, Fable and Opus) ran live against a shipped
@@ -1166,3 +1166,96 @@ def test_unobserved_diagnostic_mass_does_not_abort_composition() -> None:
             ),
             profile,
         )
+
+
+def test_paired_certificate_covers_bottleneck_shared_level_exchange_rate() -> None:
+    """P3REVIEW FABLE B2 repro: shared unobserved level under the soft
+    bottleneck once produced a zero-width certificate while the exact paired
+    functional varied by ~0.074 and changed sign across the feasible level
+    box. The fixed bound must cover every feasible shared level, and the
+    end-to-end race must no longer confidently prune the exact winner."""
+
+    from dagua.eval.ruler_v4.certification import CertifiedInterval
+    from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile, compose
+    from dagua.eval.ruler_v4.racing import (
+        PairedTermRegion,
+        RaceCandidate,
+        certify_paired_difference,
+        race_candidates,
+    )
+    from dagua.eval.ruler_v4.scene import value_result
+    from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
+
+    confidence = "round-1"
+    facets = {
+        "U07": value_result(0.5, {"U07.s": 0.5}),
+        "U08": value_result(0.5, {"U08.s": 0.5}),
+        "U09": value_result(0.5, {"U09.s": 0.5}),
+    }
+    table = WeightTable(
+        entries=(
+            SubtermWeight("U07.s", "U07", "G1", 1.0),
+            SubtermWeight("U08.s", "U08", "G1", 1.0),
+            SubtermWeight("U09.s", "U09", "G2", 1.0),
+        ),
+        d_power=20,
+    )
+    profile = CompositionProfile(
+        CompositionFamily.MEAN_SOFT_BOTTLENECK,
+        bottleneck_mix=0.5,
+        bottleneck_temperature=0.05,
+        group_allowances={"G1": 0.5, "G2": 1.0},
+    )
+    paired = {
+        "U08.s": PairedTermRegion(
+            CertifiedInterval(0.5, 0.5, confidence),
+            CertifiedInterval(0.30, 0.30, confidence),
+        ),
+        "U09.s": PairedTermRegion(
+            CertifiedInterval(0.5, 0.5, confidence),
+            CertifiedInterval(-0.35, -0.35, confidence),
+        ),
+    }
+    certificate = certify_paired_difference(
+        facets, table, profile, paired, confidence_id=confidence
+    )
+
+    assert certificate.error_bound > 0.0
+
+    def true_difference(shared_level: float) -> float:
+        facets_a = {
+            "U07": value_result(0.5, {"U07.s": shared_level}),
+            "U08": value_result(0.5, {"U08.s": 0.8}),
+            "U09": value_result(0.5, {"U09.s": 0.15}),
+        }
+        facets_b = {
+            "U07": value_result(0.5, {"U07.s": shared_level}),
+            "U08": value_result(0.5, {"U08.s": 0.5}),
+            "U09": value_result(0.5, {"U09.s": 0.5}),
+        }
+        return compose(facets_a, table, profile).l_total - compose(facets_b, table, profile).l_total
+
+    for shared_level in (0.0, 0.1, 0.25, 0.5, 0.75, 1.0):
+        difference = true_difference(shared_level)
+        assert certificate.interval.lo <= difference <= certificate.interval.hi, shared_level
+
+    calls = []
+    losses = {"A": 0.1, "B": 0.2}
+    result = race_candidates(
+        (
+            RaceCandidate("A", CertifiedInterval(0.0, 1.0, confidence), {"B": certificate}),
+            RaceCandidate("B", CertifiedInterval(0.0, 1.0, confidence)),
+        ),
+        lambda candidate_id: calls.append(candidate_id) or losses[candidate_id],
+        incumbent_id="B",
+        policy_margin=0.02,
+        full_score_max_candidates=0,
+        true_score_budget=None,
+    )
+
+    # The unsound zero-width certificate used to eliminate A with zero true
+    # scores; the sound bound overlaps zero, so both candidates escalate and
+    # the exact winner survives.
+    assert result.eliminations == ()
+    assert sorted(calls) == ["A", "B"]
+    assert result.winner_id == "A"

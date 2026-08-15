@@ -108,6 +108,39 @@ def test_negative_soft_gradient_improves_exact_facet_and_composite() -> None:
     assert compose(improved_facets, table, profile).l_total < soft.exact_composition.l_total
 
 
+def test_p_mean_origin_gradients_match_exact_published_sensitivity() -> None:
+    """At the zero-defect origin the soft gradient is finite and matches
+    composition.py's published one-sided sensitivity, never NaN
+    (P3REVIEW OPUS5 MAJOR-6)."""
+
+    facets = {
+        "U01": value_result(0.0, {"U01.headline": 0.0}),
+        "U03": value_result(0.0, {"U03.r_1": 0.0}),
+    }
+    table = WeightTable(
+        entries=(
+            SubtermWeight("U01.headline", "U01", "G1", 1.0),
+            SubtermWeight("U03.r_1", "U03", "G2", 1.0),
+        ),
+        d_power=20,
+    )
+    profile = CompositionProfile(CompositionFamily.P_MEAN, power=2.0)
+    probes = {
+        "U01.headline": torch.tensor(0.0, dtype=torch.float64, requires_grad=True),
+        "U03.r_1": torch.tensor(0.0, dtype=torch.float64, requires_grad=True),
+    }
+    soft = score_v4_soft(facets, table, profile, term_tensors=probes)
+    soft.l_total.backward()
+
+    exact = compose(facets, table, profile)
+    assert float(soft.l_total.detach()) == exact.l_total == 0.0
+    for subterm_id, probe in probes.items():
+        assert probe.grad is not None, subterm_id
+        assert bool(torch.isfinite(probe.grad).item()), subterm_id
+        # Two equal-mass rows at p=2: published origin sensitivity 0.5 ** 0.5.
+        assert float(probe.grad) == pytest.approx(0.5**0.5, abs=1e-15)
+
+
 def test_soft_bottleneck_forward_and_gradient_are_finite() -> None:
     """The optional exact composition family remains analytic above onset."""
 

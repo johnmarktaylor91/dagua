@@ -218,10 +218,26 @@ def _compose_soft(
     l_mean = _weighted_sum(terms)
     if profile.family is CompositionFamily.P_MEAN:
         assert profile.power is not None
+        power = profile.power
         powered = torch.stack(
-            [term.normalized_weight * term.value.pow(profile.power) for term in terms]
+            [term.normalized_weight * term.value.pow(power) for term in terms]
         ).sum()
-        return l_mean, None, powered.pow(1.0 / profile.power)
+        if float(powered.detach()) == 0.0:
+            # composition.py's origin kink rule: at the p-mean's zero-defect
+            # origin (p > 1) the exact side publishes the one-sided
+            # sensitivity normalized_mass ** (1/p). pow(1/p) back-propagates
+            # NaN at exactly zero, so the differentiable branch here is the
+            # matching linearization: value 0 at the origin, gradient
+            # normalized_weight ** (1/p) per term, exactly the frozen
+            # sibling's published derivative.
+            return (
+                l_mean,
+                None,
+                torch.stack(
+                    [term.value * term.normalized_weight ** (1.0 / power) for term in terms]
+                ).sum(),
+            )
+        return l_mean, None, powered.pow(1.0 / power)
 
     assert profile.bottleneck_mix is not None
     assert profile.bottleneck_temperature is not None
