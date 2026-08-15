@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 from dagua.eval.ruler_v4._tracing import trace_subterms
 from dagua.eval.ruler_v4.composition import compose
-from dagua.eval.ruler_v4.scene import BoxGeometry, Route, Scene, TemporalScene
+from dagua.eval.ruler_v4.scene import BoxGeometry, FacetResult, Route, Scene, TemporalScene
 from dagua.eval.ruler_v4.surrogate.scorer import SoftScoreResult, score_v4_soft
 from dagua.eval.ruler_v4.weight_table import WeightTable
 
@@ -151,6 +151,7 @@ def score_scene_soft(
     temporal_scene: Optional[TemporalScene] = None,
     *,
     positions: Optional[torch.Tensor] = None,
+    exact_facets: Optional[Mapping[str, "FacetResult"]] = None,
 ) -> TracedSoftScore:
     """Score one validated scene with position gradients end to end.
 
@@ -174,6 +175,10 @@ def score_scene_soft(
     positions : torch.Tensor or None
         Optional caller-owned position leaf. Defaults to a detached clone of
         the scene's positions with ``requires_grad=True``.
+    exact_facets : mapping[str, FacetResult] or None
+        Optional precomputed exact facet evaluation of ``scene`` under the
+        same ``profiles`` (certification harnesses score both paths and can
+        skip the duplicate float pass). Callers own the consistency claim.
 
     Returns
     -------
@@ -184,7 +189,8 @@ def score_scene_soft(
     from dagua.eval.ruler_v4.score import ScoringProfiles, _evaluate_static_facets
 
     assert isinstance(profiles, ScoringProfiles)
-    exact_facets = _evaluate_static_facets(scene, profiles, temporal_scene)
+    if exact_facets is None:
+        exact_facets = _evaluate_static_facets(scene, profiles, temporal_scene)
     if positions is None:
         positions = scene.positions.detach().clone().requires_grad_(True)
     traced_scene = build_traced_scene(scene, positions)
