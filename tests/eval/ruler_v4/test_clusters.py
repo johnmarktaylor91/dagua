@@ -168,21 +168,18 @@ def test_u30_absent_cluster_label_channel_is_typed_na() -> None:
     assert result.reason == "no_declared_cluster_labels"
 
 
-def test_u30_single_visible_cluster_label_pins_grid_envelope() -> None:
-    """U30 pins the exact pre-selection envelope for one derived cluster label."""
+def test_u30_derived_label_is_exactly_at_declared_padding() -> None:
+    """U30's derived label scores exact zero on the declared padding row."""
 
     positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [1.0, 1.0]])
-    result = U30(
-        _scene(
-            positions,
-            {"c": (0, 1, 2)},
-            cluster_labels_visible=True,
-        ),
-        None,
+    scene = _scene(
+        positions,
+        {"c": (0, 1, 2)},
+        cluster_labels_visible=True,
     )
-    assert result.state is ResultState.NA
-    assert result.reason == "alpha_grid_unselected"
-    lower, upper = result.raw["grid_envelope"]
-    # U30 contract golden 4: "the occluded party pays; permuting z never repairs
-    # a label overlap." Every preregistered alpha row therefore remains nonzero.
-    assert 0.0 < lower <= upper <= 1.0
+    result = U30(scene, 1)
+    assert result.state is ResultState.VALUE
+    # U30 contract golden 3: a label exactly at declared padding scores zero.
+    assert result.subterms["U30.ii"] == pytest.approx(0.0, abs=0.0)
+    label = scene.cluster_label_boxes["c"]
+    assert float(label.center[0]) == pytest.approx(1.0, abs=0.0)

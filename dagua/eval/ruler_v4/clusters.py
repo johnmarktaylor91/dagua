@@ -37,14 +37,14 @@ from dagua.eval.ruler_v4.scene import (
 _U30_PAD_TARGET_U = 0.50
 
 
-def _interim_cluster_label_severity(
+def _interim_cluster_severity(
     defect: float,
     overlap_area: float,
     subject_area: float,
     *,
     subject_is_lower: bool,
 ) -> float:
-    """Apply the contract-bounded z-order severity to a U30 label pair.
+    """Apply contract-bounded z-order severity to an unresolved cluster pair.
 
     Parameters
     ----------
@@ -286,6 +286,25 @@ def _regions(scene: Scene) -> Dict[str, _ClusterRegion]:
         bounds = BoxGeometry((lower + upper) / 2.0, (upper - lower) / 2.0, -1)
         regions[name] = _ClusterRegion(boxes, radius, bounds)
     return regions
+
+
+def _cluster_robust_core_center(scene: Scene, members: Sequence[int]) -> torch.Tensor:
+    """Return the U21 robust-core center for one declared cluster.
+
+    Parameters
+    ----------
+    scene : Scene
+        Validated clustered scene.
+    members : sequence[int]
+        Canonical cluster member indices.
+
+    Returns
+    -------
+    torch.Tensor
+        Robust center with shape ``[2]``.
+    """
+
+    return robust_frame(scene.positions[list(members)], scene.intrinsic_unit).center
 
 
 def _frame_box(frame: RobustFrame, owner: int = -1) -> BoxGeometry:
@@ -667,6 +686,54 @@ def _region_vertical_intervals(region: _ClusterRegion, x_value: float) -> List[T
             previous_lower, previous_upper = merged[-1]
             merged[-1] = (previous_lower, max(previous_upper, upper))
     return merged
+
+
+def _region_top_at_x(region: _ClusterRegion, x_value: float) -> float:
+    """Return the upper boundary of a rounded-box union at one x-coordinate.
+
+    Parameters
+    ----------
+    region : _ClusterRegion
+        Cluster offset-union.
+    x_value : float
+        Horizontal coordinate of the placement anchor.
+
+    Returns
+    -------
+    float
+        Highest region-boundary ordinate at the requested coordinate.
+
+    Raises
+    ------
+    ValueError
+        If the requested vertical line does not intersect the region.
+    """
+
+    intervals = _region_vertical_intervals(region, x_value)
+    if not intervals:
+        raise ValueError("cluster robust-core center does not intersect its derived region")
+    return max(upper for _, upper in intervals)
+
+
+def _signed_top_padding(box: BoxGeometry, region: _ClusterRegion) -> float:
+    """Measure signed inward padding from a label's near edge to the region top.
+
+    Parameters
+    ----------
+    box : BoxGeometry
+        Derived cluster-label box.
+    region : _ClusterRegion
+        Owning cluster region.
+
+    Returns
+    -------
+    float
+        Positive inset inside the boundary, zero at contact, and negative outside.
+    """
+
+    boundary = _region_top_at_x(region, float(box.center[0]))
+    near_edge = float(box.center[1] + box.half_extents[1])
+    return boundary - near_edge
 
 
 def _interval_measure(intervals: Sequence[Tuple[float, float]]) -> float:
@@ -1285,7 +1352,12 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             for grid_index, (alpha_clear, alpha_high) in enumerate(grid):
                 alpha = alpha_clear * (1.0 - floor_blend) + (alpha_clear * floor_blend * alpha_high)
                 node_intrusions_by_grid[grid_index].append(
-                    0.5 * (alpha * absolute + (1.0 - alpha) * excess)
+                    _interim_cluster_severity(
+                        alpha * absolute + (1.0 - alpha) * excess,
+                        1.0,
+                        1.0,
+                        subject_is_lower=False,
+                    )
                 )
             node_intrusion_masses.append(masses[node.owner] * cluster_masses[name])
         for route in resolved_routes(scene):
@@ -1594,7 +1666,7 @@ def U30(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 1.0 - float(smoothstep(torch.tensor((margin + 1.0) / 2.0, dtype=torch.float64)))
             )
             association_masses.append(label_masses[name])
-        pad = max(0.0, -own_clearance)
+        pad = _signed_top_padding(label, region)
         pad_target = _U30_PAD_TARGET_U * scene.intrinsic_unit
         deviation = abs(pad - pad_target)
         absolute = 1.0 - math.exp(-max(0.0, own_clearance) / (0.25 * scene.intrinsic_unit))
@@ -1630,7 +1702,7 @@ def U30(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             for grid_index, alpha in enumerate(alpha_grid):
                 pair_defect = alpha * absolute_occlusion + (1.0 - alpha) * excess_occlusion
                 obstacle_defects_by_grid[grid_index].append(
-                    _interim_cluster_label_severity(
+                    _interim_cluster_severity(
                         pair_defect,
                         overlap_area,
                         label_area,
@@ -1660,7 +1732,7 @@ def U30(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             for grid_index, alpha in enumerate(alpha_grid):
                 pair_defect = alpha * absolute_occlusion + (1.0 - alpha) * excess_occlusion
                 obstacle_defects_by_grid[grid_index].append(
-                    _interim_cluster_label_severity(
+                    _interim_cluster_severity(
                         pair_defect,
                         overlap_area,
                         label_area,

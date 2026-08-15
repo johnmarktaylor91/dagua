@@ -209,6 +209,30 @@ def test_coordinate_unit_reexpression_preserves_profile_identity() -> None:
     assert scaled.scene.intrinsic_unit == 10.0 * base.scene.intrinsic_unit
 
 
+def test_graph_hash_is_shared_across_profile_arms() -> None:
+    """Graph-keyed CRN samplers keep one identity across observation profiles."""
+
+    graph = _graph()
+    positions = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+    ordinary = ingest(
+        graph,
+        DrawingScene(positions),
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes"})),
+    )
+    labelled = ingest(
+        graph,
+        DrawingScene(positions),
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes", "node_labels"})),
+    )
+    assert isinstance(ordinary, ValidScene)
+    assert isinstance(labelled, ValidScene)
+    assert ordinary.scene.profile_hash != labelled.scene.profile_hash
+    # U03/U34 freeze their sampling key on graph_hash, not profile identity.
+    assert ordinary.scene.graph_hash == labelled.scene.graph_hash
+
+
 def test_nonunit_declared_axis_is_invalid() -> None:
     """Declared axes are graph-owned unit vectors, never drawing-derived hints."""
 
