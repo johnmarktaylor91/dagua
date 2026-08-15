@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import Any, Mapping, Optional, Tuple
 
 import pytest
 import torch
 
+from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile
+from dagua.eval.ruler_v4.contracts import CONTRACTS
 from dagua.eval.ruler_v4.directed import U31, U32, U33, U34, U39, _u34_blend
+from dagua.eval.ruler_v4.headline import HeadlineProfile
 from dagua.eval.ruler_v4.ingestion import ingest, ingest_temporal
 from dagua.eval.ruler_v4.packing import U38, U41, U42, _ciede2000
 from dagua.eval.ruler_v4.registry import evaluate_facet
@@ -25,6 +29,15 @@ from dagua.eval.ruler_v4.scene import (
     TemporalTransition,
     ValidScene,
     ValidTemporalScene,
+)
+from dagua.eval.ruler_v4.score import ScoringProfiles
+from dagua.eval.ruler_v4.surrogate.traced import score_scene_soft
+from dagua.eval.ruler_v4.weight_table import (
+    GATE_DIAGNOSTIC_FACETS,
+    REQUIRED_PRIOR_FLOOR_FACETS,
+    ParameterProvenance,
+    SubtermWeight,
+    WeightTable,
 )
 from dagua.eval.ruler_v4.weights import U35, U36, U37
 
@@ -420,3 +433,207 @@ def test_u42_black_white_contrast_and_ciede2000_goldens() -> None:
         (50.0, 2.6772, -79.7751),
         (50.0, 0.0, -82.7485),
     ) == pytest.approx(2.0424596801565764, abs=1e-12)
+
+
+def _traced_directed_scene() -> Scene:
+    """Build the P3 gate probe's directed semantic fixture.
+
+    Returns
+    -------
+    Scene
+        Validated scene exercising U31, U32, U33 (layered), and U34.
+    """
+
+    positions = torch.tensor(
+        [
+            [0.0, 0.0],
+            [2.0, -2.0],
+            [2.0, 2.0],
+            [4.0, -2.0],
+            [4.0, 2.0],
+            [6.0, -2.0],
+            [6.0, 2.0],
+            [8.0, 0.0],
+        ],
+        dtype=torch.float64,
+    )
+    edges: Tuple[Tuple[int, int], ...] = (
+        (0, 1),
+        (0, 2),
+        (1, 3),
+        (2, 4),
+        (3, 5),
+        (4, 6),
+        (5, 7),
+        (6, 7),
+    )
+    graph = GraphSemantics(
+        node_ids=tuple(f"n{index}" for index in range(8)),
+        edges=edges,
+        directed=True,
+        node_labels=tuple(f"n{index}" for index in range(8)),
+        edge_labels=tuple(None for _ in edges),
+        clusters={"left": (0, 1, 2, 3), "right": (4, 5, 6, 7), "parent": tuple(range(8))},
+        cluster_parents={"left": "parent", "right": "parent"},
+        ranks=(0, 1, 1, 2, 2, 3, 3, 4),
+        roots=(0,),
+        feedback=tuple(False for _ in edges),
+        edge_weights=tuple(float(index + 1) for index in range(len(edges))),
+        weight_semantics="distance_cost",
+        required_primitives=frozenset({"nodes", "routes"}),
+    )
+    graph = replace(
+        graph,
+        tree_parents=(None, 0, 0, 1, 2, 3, 4, 5),
+        tree_depths=(0, 1, 1, 2, 2, 3, 3, 4),
+        tree_layout="layered",
+        flow_axis=(1.0, 0.0),
+        ordered_children={0: (1, 2)},
+    )
+    routes = tuple(
+        Route(index, torch.stack((positions[source], positions[target])))
+        for index, (source, target) in enumerate(edges)
+    )
+    drawing = DrawingScene(positions, routes, ("nodes", "routes", "node_labels"))
+    result = ingest(
+        graph,
+        drawing,
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes", "node_labels"})),
+    )
+    assert isinstance(result, ValidScene)
+    return result.scene
+
+
+def _complete_weight_table() -> WeightTable:
+    """Return one complete explicit weight table over every scored subterm.
+
+    Returns
+    -------
+    WeightTable
+        Uniform table with diagnostics at weight zero.
+    """
+
+    entries = tuple(
+        SubtermWeight(
+            subterm_id=subterm_id,
+            facet_id=facet_id,
+            group=facet_id[:3],
+            weight=0.0 if facet_id in GATE_DIAGNOSTIC_FACETS else 1.0,
+            prior_driven=facet_id in REQUIRED_PRIOR_FLOOR_FACETS,
+            diagnostic=facet_id in GATE_DIAGNOSTIC_FACETS,
+            provenance_class=(
+                None
+                if facet_id in GATE_DIAGNOSTIC_FACETS
+                else "preregistered_prior"
+                if facet_id in REQUIRED_PRIOR_FLOOR_FACETS
+                else "contract_frozen"
+            ),
+        )
+        for facet_id, contract in CONTRACTS.items()
+        for subterm_id in contract.scored_subterms
+    )
+    return WeightTable(
+        entries=entries,
+        d_power=20,
+        prior_floors={facet_id: 1.0 for facet_id in REQUIRED_PRIOR_FLOOR_FACETS},
+    )
+
+
+def _traced_scoring_profiles() -> ScoringProfiles:
+    """Return frozen scoring profiles for the traced directed fixture.
+
+    Returns
+    -------
+    ScoringProfiles
+        P-mean composition with explicit parameter provenance.
+    """
+
+    return ScoringProfiles(
+        composition=CompositionProfile(CompositionFamily.P_MEAN, power=2.0),
+        headline=HeadlineProfile(index_span=100.0, loss_scale=1.0, version="probe"),
+        measurement_version="probe-measurement",
+        policy_version="probe-policy",
+        alpha_grid_index=1,
+        parameter_provenance={
+            "composition.power": ParameterProvenance("preregistered_prior"),
+            "headline.index_span": ParameterProvenance("contract_frozen"),
+            "headline.loss_scale": ParameterProvenance("preregistered_prior"),
+            "alpha_grid_index": ParameterProvenance("preregistered_prior"),
+        },
+    )
+
+
+def test_directed_traced_rows_carry_live_position_gradients() -> None:
+    """Traced U31/U32/U33/U34 geometry rows differentiate against positions."""
+
+    scene = _traced_directed_scene()
+    traced = score_scene_soft(scene, _complete_weight_table(), _traced_scoring_profiles())
+    live_rows = (
+        "U31.headline",
+        "U32.L_iso",
+        "U32.L_crisp",
+        "U32.L_overlap",
+        "U33.layered.1",
+        "U33.layered.3",
+        "U34.L_back",
+        "U34.L_mono",
+    )
+    for row in live_rows:
+        tensor = traced.traced_subterms[row]
+        assert tensor.requires_grad, row
+        (gradient,) = torch.autograd.grad(
+            tensor, traced.positions, retain_graph=True, allow_unused=True
+        )
+        assert gradient is not None, row
+        assert float(torch.linalg.vector_norm(gradient)) > 0.0, row
+    # Two rows are traced but exactly stationary on this symmetric fixture:
+    # layered.2's parent sits on the child centroid (offset 0 minimizes the
+    # smooth centering loss) and layered.4's declared pair is drawn exactly
+    # antiparallel to the order axis (cosine -1 is an extremum of the
+    # unit-direction dot, whose position derivative vanishes there).
+    for row in ("U33.layered.2", "U33.layered.4"):
+        tensor = traced.traced_subterms[row]
+        assert tensor.requires_grad, row
+        (gradient,) = torch.autograd.grad(
+            tensor, traced.positions, retain_graph=True, allow_unused=True
+        )
+        assert gradient is not None, row
+        assert float(torch.linalg.vector_norm(gradient)) == 0.0, row
+    # U34.L_cont is honestly constant here: every drawn junction has degree 2,
+    # which the contract assigns to U12 and excludes from U34's population, so
+    # the per-path continuity loss is the literal float 0.0 and never traces.
+    assert "U34.L_cont" not in traced.traced_subterms
+    assert traced.soft.l_total.requires_grad
+
+
+def test_directed_traced_values_match_untraced_evaluation() -> None:
+    """Traced directed subterm values agree with the exact un-traced facets."""
+
+    scene = _traced_directed_scene()
+    traced = score_scene_soft(scene, _complete_weight_table(), _traced_scoring_profiles())
+    exact: dict = {}
+    for facet in (U31, U32, U33, U34):
+        result = facet(scene)
+        assert result.state is ResultState.VALUE
+        for key, value in result.subterms.items():
+            # The exact path must keep publishing plain floats (no leaked graph).
+            assert isinstance(value, float), key
+            exact[key] = value
+    rows = (
+        "U31.headline",
+        "U32.L_iso",
+        "U32.L_crisp",
+        "U32.L_overlap",
+        "U33.layered.1",
+        "U33.layered.2",
+        "U33.layered.3",
+        "U33.layered.4",
+        "U34.L_back",
+        "U34.L_mono",
+    )
+    for row in rows:
+        traced_value = float(traced.traced_subterms[row].detach())
+        # Traced forwards may differ from exact by accumulation order only.
+        assert traced_value == pytest.approx(exact[row], rel=1e-9, abs=1e-15), row
+    assert exact["U34.L_cont"] == pytest.approx(0.0, abs=0.0)

@@ -12,6 +12,19 @@ from typing import DefaultDict, Dict, List, Optional, Tuple, Union
 
 import torch
 
+from dagua.eval.ruler_v4._tracing import (
+    Scalar,
+    as_float,
+    keep,
+    p_abs,
+    p_exp,
+    p_log1p,
+    p_max,
+    p_min,
+    p_sqrt,
+    p_sum,
+    tracing_active,
+)
 from dagua.eval.ruler_v4._util import (
     blend_with_weights,
     declared_axis,
@@ -88,27 +101,27 @@ def U31(scene: Scene) -> FacetResult:
     feedback = _feedback_mask(scene)
     ranks = resolved_ranks(scene)
     routes = {route.edge_index: route for route in resolved_routes(scene)}
-    burdens: List[float] = []
-    forward_burdens: List[float] = []
-    feedback_burdens: List[float] = []
+    burdens: List[Scalar] = []
+    forward_burdens: List[Scalar] = []
+    feedback_burdens: List[Scalar] = []
     for edge_index, (source, target) in enumerate(scene.graph.edges):
         if ranks is not None and ranks[source] == ranks[target]:
             continue
         points = routes[edge_index].points
         delta = points[-1] - points[0]
-        length = float(torch.linalg.vector_norm(delta).item())
-        if length == 0.0:
+        length = keep(torch.linalg.vector_norm(delta))
+        if as_float(length) == 0.0:
             nonzero = points[1:] - points[:-1]
             lengths = torch.linalg.vector_norm(nonzero, dim=1)
             candidates = torch.nonzero(lengths > 0.0, as_tuple=False).flatten()
             if candidates.numel() == 0:
                 return invalid_result("all_zero_required_route", {"edge_index": edge_index})
             delta = nonzero[int(candidates[0])]
-            length = float(torch.linalg.vector_norm(delta).item())
+            length = keep(torch.linalg.vector_norm(delta))
         direction_sign = -1.0 if feedback[edge_index] else 1.0
-        cosine = direction_sign * float(torch.dot(delta / length, axis).item())
+        cosine = direction_sign * keep(torch.dot(delta / length, axis))
         argument = (math.cos(math.radians(20.0)) - cosine) / 0.01
-        loss = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, argument))))
+        loss = _stable_sigmoid(argument)
         burdens.append(loss)
         (feedback_burdens if feedback[edge_index] else forward_burdens).append(loss)
     if not burdens:
@@ -120,10 +133,11 @@ def U31(scene: Scene) -> FacetResult:
         {
             "feedback_edge_count": sum(feedback),
             "feedback_source": "declared" if scene.graph.feedback is not None else "U31-DFS-FB-1",
-            "forward_mean": sum(forward_burdens) / len(forward_burdens)
+            "forward_mean": sum(as_float(value) for value in forward_burdens) / len(forward_burdens)
             if forward_burdens
             else None,
-            "feedback_mean": sum(feedback_burdens) / len(feedback_burdens)
+            "feedback_mean": sum(as_float(value) for value in feedback_burdens)
+            / len(feedback_burdens)
             if feedback_burdens
             else None,
         },
@@ -178,24 +192,24 @@ def U32(scene: Scene) -> FacetResult:
         offsets.append(offsets[-1] + pitch)
     offset_tensor = torch.tensor(offsets, dtype=torch.float64)
     fitted = pava(medians - offset_tensor, counts) + offset_tensor
-    iso_objects = []
+    iso_objects: List[Scalar] = []
     for index, count in enumerate(counts.to(torch.long)):
-        burden = 1.0 - math.exp(-((float(medians[index] - fitted[index]) / scales[index]) ** 2))
+        burden = 1.0 - p_exp(-((keep(medians[index] - fitted[index]) / scales[index]) ** 2))
         iso_objects.extend([burden] * int(count))
-    overlaps = []
+    overlaps: List[Scalar] = []
     overlap_weights = []
     for index, pitch in enumerate(pitches):
         numerator = (
-            float(medians[index] + 2.9652 * deviations[index])
-            - float(medians[index + 1] - 2.9652 * deviations[index + 1])
+            keep(medians[index] + 2.9652 * deviations[index])
+            - keep(medians[index + 1] - 2.9652 * deviations[index + 1])
             + 0.5 * pitch
         )
         argument = numerator / (0.05 * pitch)
-        overlaps.append(1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, argument)))))
+        overlaps.append(_stable_sigmoid(argument))
         overlap_weights.append(float(counts[index] + counts[index + 1]))
-    crisp_objects = []
+    crisp_objects: List[Scalar] = []
     for index, count in enumerate(counts.to(torch.long)):
-        local = 1.0 - math.exp(-((float(deviations[index]) / scales[index]) ** 2))
+        local = 1.0 - p_exp(-((keep(deviations[index]) / scales[index]) ** 2))
         left_resolution = 1.0 - overlaps[index - 1] if index > 0 else 1.0
         right_resolution = 1.0 - overlaps[index] if index < len(overlaps) else 1.0
         resolution = left_resolution * right_resolution
@@ -313,11 +327,11 @@ def _u33_layered(scene: Scene, children: DefaultDict[int, List[int]]) -> FacetRe
             subtree_cache[node] = members
         return subtree_cache[node]
 
-    separation_losses: List[float] = []
+    separation_losses: List[Scalar] = []
     separation_weights: List[float] = []
-    centering_losses: List[float] = []
-    depth_losses: List[float] = []
-    order_losses: List[float] = []
+    centering_losses: List[Scalar] = []
+    depth_losses: List[Scalar] = []
+    order_losses: List[Scalar] = []
     for parent, child_nodes in sorted(children.items()):
         if not child_nodes:
             continue
@@ -346,23 +360,23 @@ def _u33_layered(scene: Scene, children: DefaultDict[int, List[int]]) -> FacetRe
             centroid = torch.sum(child_positions * child_masses[:, None], dim=0) / torch.sum(
                 child_masses
             )
-            span = math.sqrt(
-                float(torch.mean(torch.sum((child_positions - centroid) ** 2, dim=1)).item())
+            span = p_sqrt(keep(torch.mean(torch.sum((child_positions - centroid) ** 2, dim=1))))
+            offset = p_abs(keep(torch.dot(scene.positions[parent] - centroid, cross)))
+            centering_losses.append(
+                0.0 if as_float(span) == 0.0 else 1.0 - p_exp(-((offset / span) ** 2))
             )
-            offset = abs(float(torch.dot(scene.positions[parent] - centroid, cross).item()))
-            centering_losses.append(0.0 if span == 0.0 else 1.0 - math.exp(-((offset / span) ** 2)))
     for node, parent in enumerate(scene.graph.tree_parents or ()):
         if parent is None:
             continue
         delta = scene.positions[node] - scene.positions[parent]
-        length = float(torch.linalg.vector_norm(delta).item())
-        cosine = float(torch.dot(delta / length, axis).item()) if length > 0.0 else 0.0
+        length = keep(torch.linalg.vector_norm(delta))
+        cosine = keep(torch.dot(delta / length, axis)) if as_float(length) > 0.0 else 0.0
         depth_losses.append(_stable_sigmoid((math.cos(math.radians(70.0)) - cosine) / 0.03))
     for parent, declared_order in sorted(scene.graph.ordered_children.items()):
         for left, right in zip(declared_order[:-1], declared_order[1:]):
             delta = scene.positions[right] - scene.positions[left]
-            length = float(torch.linalg.vector_norm(delta).item())
-            cosine = float(torch.dot(delta / length, cross).item()) if length > 0.0 else 0.0
+            length = keep(torch.linalg.vector_norm(delta))
+            cosine = keep(torch.dot(delta / length, cross)) if as_float(length) > 0.0 else 0.0
             order_losses.append(_stable_sigmoid((math.cos(math.radians(70.0)) - cosine) / 0.03))
     values = {
         "U33.layered.2": global_blend(centering_losses),
@@ -410,22 +424,33 @@ def _u33_radial(
         Frozen weighted radial-tree result.
     """
 
-    radial_losses: List[float] = []
-    sector_losses: List[float] = []
+    radial_losses: List[Scalar] = []
+    sector_losses: List[Scalar] = []
     sector_weights: List[float] = []
     for root in roots:
         members = _tree_members(children, root)
         root_depth = depths[root]
         local_depths = sorted(set(depths[node] - root_depth for node in members))
-        radii = torch.tensor(
-            [
-                float(
-                    torch.linalg.vector_norm(scene.positions[node] - scene.positions[root]).item()
-                )
-                for node in members
-            ],
-            dtype=torch.float64,
-        )
+        if tracing_active():
+            # Same float64 norms the float path casts; stacked to keep the graph.
+            radii = torch.stack(
+                [
+                    torch.linalg.vector_norm(scene.positions[node] - scene.positions[root])
+                    for node in members
+                ]
+            )
+        else:
+            radii = torch.tensor(
+                [
+                    float(
+                        torch.linalg.vector_norm(
+                            scene.positions[node] - scene.positions[root]
+                        ).item()
+                    )
+                    for node in members
+                ],
+                dtype=torch.float64,
+            )
         depth_tensor = torch.tensor([depths[node] - root_depth for node in members])
         medians = torch.stack(
             [_midpoint_median(radii[depth_tensor == depth]) for depth in local_depths]
@@ -437,8 +462,8 @@ def _u33_radial(
         offsets = torch.arange(len(local_depths), dtype=torch.float64) * scene.intrinsic_unit
         fitted = pava(medians - offsets, counts) + offsets
         for index, count in enumerate(counts.to(torch.long)):
-            burden = 1.0 - math.exp(
-                -((float(medians[index] - fitted[index]) / scene.intrinsic_unit) ** 2)
+            burden = 1.0 - p_exp(
+                -((keep(medians[index] - fitted[index]) / scene.intrinsic_unit) ** 2)
             )
             radial_losses.extend([burden] * int(count))
         root_children = sorted(children[root])
@@ -447,26 +472,40 @@ def _u33_radial(
             masses = [len(items) for items in child_members]
             total_mass = sum(masses)
             for items, mass in zip(child_members, masses):
-                angles = sorted(
-                    math.atan2(
-                        float((scene.positions[node] - scene.positions[root])[1]),
-                        float((scene.positions[node] - scene.positions[root])[0]),
+                if tracing_active():
+                    # Live bearings (torch.atan2 is the tensor-branch equivalent
+                    # of the float path's math.atan2); the sort key is detached.
+                    angles: List[Scalar] = sorted(
+                        (
+                            torch.atan2(
+                                (scene.positions[node] - scene.positions[root])[1],
+                                (scene.positions[node] - scene.positions[root])[0],
+                            )
+                            % (2.0 * math.pi)
+                            for node in items
+                        ),
+                        key=as_float,
                     )
-                    % (2.0 * math.pi)
-                    for node in items
-                )
+                else:
+                    angles = sorted(
+                        math.atan2(
+                            float((scene.positions[node] - scene.positions[root])[1]),
+                            float((scene.positions[node] - scene.positions[root])[0]),
+                        )
+                        % (2.0 * math.pi)
+                        for node in items
+                    )
                 if len(angles) == 1:
-                    fraction = 0.0
+                    fraction: Scalar = 0.0
                 else:
                     gaps = [
                         (angles[(index + 1) % len(angles)] - angles[index]) % (2.0 * math.pi)
                         for index in range(len(angles))
                     ]
-                    fraction = (2.0 * math.pi - max(gaps)) / (2.0 * math.pi)
+                    fraction = (2.0 * math.pi - max(gaps, key=as_float)) / (2.0 * math.pi)
                 target = mass / total_mass
                 sector_losses.append(
-                    1.0
-                    - math.exp(-(((fraction - target) / (target + 1.0 / len(root_children))) ** 2))
+                    1.0 - p_exp(-(((fraction - target) / (target + 1.0 / len(root_children))) ** 2))
                 )
                 sector_weights.append(float(mass))
     values = {"U33.radial.1": global_blend(radial_losses)}
@@ -508,22 +547,24 @@ def _tree_depths(scene: Scene) -> Optional[List[int]]:
     return depths if all(depth >= 0 for depth in depths) else None
 
 
-def _stable_sigmoid(argument: float) -> float:
+def _stable_sigmoid(argument: Scalar) -> Scalar:
     """Evaluate a numerically stable scalar logistic function.
 
     Parameters
     ----------
-    argument : float
-        Unbounded logistic coordinate.
+    argument : float or torch.Tensor
+        Unbounded logistic coordinate. The float branch executes the
+        historical clip-and-exp byte-for-byte; the tensor branch is its
+        autograd equivalent (the clamp is piecewise-constant at saturation).
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Value in ``(0, 1)``.
     """
 
-    clipped = max(-60.0, min(60.0, argument))
-    return 1.0 / (1.0 + math.exp(-clipped))
+    clipped = p_max(-60.0, p_min(60.0, argument))
+    return 1.0 / (1.0 + p_exp(-clipped))
 
 
 def _tree_members(children: DefaultDict[int, List[int]], root: int) -> List[int]:
@@ -606,7 +647,7 @@ def _convex_hull(points: torch.Tensor) -> List[torch.Tensor]:
     return lower[:-1] + upper[:-1]
 
 
-def _point_segment_distance(point: torch.Tensor, start: torch.Tensor, end: torch.Tensor) -> float:
+def _point_segment_distance(point: torch.Tensor, start: torch.Tensor, end: torch.Tensor) -> Scalar:
     """Return Euclidean point-to-segment distance.
 
     Parameters
@@ -616,20 +657,39 @@ def _point_segment_distance(point: torch.Tensor, start: torch.Tensor, end: torch
 
     Returns
     -------
-    float
-        Nonnegative distance.
+    float or torch.Tensor
+        Nonnegative distance; live inside a trace.
     """
 
     direction = end - start
-    denominator = float(torch.dot(direction, direction).item())
-    if denominator == 0.0:
-        return float(torch.linalg.vector_norm(point - start).item())
-    parameter = float(torch.dot(point - start, direction).item()) / denominator
-    parameter = min(1.0, max(0.0, parameter))
-    return float(torch.linalg.vector_norm(point - (start + parameter * direction)).item())
+    denominator = keep(torch.dot(direction, direction))
+    if as_float(denominator) == 0.0:
+        return keep(torch.linalg.vector_norm(point - start))
+    parameter = keep(torch.dot(point - start, direction)) / denominator
+    parameter = p_min(1.0, p_max(0.0, parameter))
+    return keep(torch.linalg.vector_norm(point - (start + parameter * direction)))
 
 
-def _convex_hull_signed_clearance(left: torch.Tensor, right: torch.Tensor) -> float:
+def _lift64(value: Scalar) -> Scalar:
+    """Widen a traced scalar to float64 so scalar arithmetic matches the float path.
+
+    Parameters
+    ----------
+    value : float or torch.Tensor
+        Scalar leaving a possibly-narrower tensor computation.
+
+    Returns
+    -------
+    float or torch.Tensor
+        Float64 view of the same value; floats pass through untouched.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return value.to(torch.float64)
+    return value
+
+
+def _convex_hull_signed_clearance(left: torch.Tensor, right: torch.Tensor) -> Scalar:
     """Return signed clearance between two convex node-center hulls.
 
     Parameters
@@ -639,14 +699,15 @@ def _convex_hull_signed_clearance(left: torch.Tensor, right: torch.Tensor) -> fl
 
     Returns
     -------
-    float
-        Positive Euclidean separation or negative SAT penetration depth.
+    float or torch.Tensor
+        Positive Euclidean separation or negative SAT penetration depth;
+        live inside a trace (hull and axis selection stay detached decisions).
     """
 
     hull_left = _convex_hull(left)
     hull_right = _convex_hull(right)
     if len(hull_left) == 1 and len(hull_right) == 1:
-        return float(torch.linalg.vector_norm(hull_left[0] - hull_right[0]).item())
+        return keep(torch.linalg.vector_norm(hull_left[0] - hull_right[0]))
     axes = []
     for hull in (hull_left, hull_right):
         if len(hull) < 2:
@@ -654,25 +715,45 @@ def _convex_hull_signed_clearance(left: torch.Tensor, right: torch.Tensor) -> fl
         edge_count = len(hull) if len(hull) > 2 else 1
         for index in range(edge_count):
             direction = hull[(index + 1) % len(hull)] - hull[index]
-            length = float(torch.linalg.vector_norm(direction).item())
-            if length > 0.0:
-                axes.append(
-                    torch.tensor([-float(direction[1]), float(direction[0])], dtype=torch.float64)
-                    / length
-                )
-    minimum_overlap = float("inf")
+            length = keep(torch.linalg.vector_norm(direction))
+            if as_float(length) > 0.0:
+                if tracing_active():
+                    # Same perpendicular the float path builds, with the graph kept.
+                    axes.append(torch.stack((-direction[1], direction[0])) / length)
+                else:
+                    axes.append(
+                        torch.tensor(
+                            [-float(direction[1]), float(direction[0])], dtype=torch.float64
+                        )
+                        / length
+                    )
+    minimum_overlap: Scalar = float("inf")
     separated = False
     for axis in axes:
-        left_projection = torch.tensor([float(torch.dot(point, axis)) for point in hull_left])
-        right_projection = torch.tensor([float(torch.dot(point, axis)) for point in hull_right])
-        overlap = min(float(torch.max(left_projection)), float(torch.max(right_projection))) - max(
-            float(torch.min(left_projection)), float(torch.min(right_projection))
+        if tracing_active():
+            # The float path materializes projections at the default dtype
+            # (torch.tensor without dtype); mirror that quantization exactly,
+            # differentiably, then widen the extrema back to float64 so the
+            # scalar overlap arithmetic matches the float path's Python math.
+            left_projection = torch.stack([torch.dot(point, axis) for point in hull_left]).to(
+                torch.get_default_dtype()
+            )
+            right_projection = torch.stack([torch.dot(point, axis) for point in hull_right]).to(
+                torch.get_default_dtype()
+            )
+        else:
+            left_projection = torch.tensor([float(torch.dot(point, axis)) for point in hull_left])
+            right_projection = torch.tensor([float(torch.dot(point, axis)) for point in hull_right])
+        overlap = p_min(
+            _lift64(keep(torch.max(left_projection))), _lift64(keep(torch.max(right_projection)))
+        ) - p_max(
+            _lift64(keep(torch.min(left_projection))), _lift64(keep(torch.min(right_projection)))
         )
-        if overlap < 0.0:
+        if as_float(overlap) < 0.0:
             separated = True
-        minimum_overlap = min(minimum_overlap, overlap)
-    if not separated and minimum_overlap != float("inf"):
-        return -max(0.0, minimum_overlap)
+        minimum_overlap = p_min(minimum_overlap, overlap)
+    if not separated and as_float(minimum_overlap) != float("inf"):
+        return -p_max(0.0, minimum_overlap)
     left_segments = _hull_segments(hull_left)
     right_segments = _hull_segments(hull_right)
     distances = []
@@ -686,7 +767,7 @@ def _convex_hull_signed_clearance(left: torch.Tensor, right: torch.Tensor) -> fl
                     _point_segment_distance(end_right, start_left, end_left),
                 )
             )
-    return min(distances) if distances else 0.0
+    return min(distances, key=as_float) if distances else 0.0
 
 
 def _hull_segments(hull: List[torch.Tensor]) -> List[Tuple[torch.Tensor, torch.Tensor]]:
@@ -724,10 +805,10 @@ def U34(scene: Scene) -> FacetResult:
     for source, target in scene.graph.edges:
         degrees[source] += 1
         degrees[target] += 1
-    back_losses: List[float] = []
-    mono_losses: List[float] = []
-    continuity_losses: List[float] = []
-    path_losses: List[float] = []
+    back_losses: List[Scalar] = []
+    mono_losses: List[Scalar] = []
+    continuity_losses: List[Scalar] = []
+    path_losses: List[Scalar] = []
     path_weights: List[float] = []
     path_bands: List[int] = []
     for path_nodes, path_edges, path_weight, path_band in paths:
@@ -750,32 +831,32 @@ def U34(scene: Scene) -> FacetResult:
                 junction_vectors[junction] = (-incoming_nonzero[-1], local_deltas[0])
         delta_tensor = torch.stack(deltas)
         lengths = torch.linalg.vector_norm(delta_tensor, dim=1)
-        mean_length = float(torch.mean(lengths).item())
+        mean_length = keep(torch.mean(lengths))
         tau = 0.01 * mean_length
         signed = delta_tensor @ axis
-        progress = sum(_soft_positive(float(value), tau) for value in signed)
-        backtrack = sum(_soft_positive(-float(value), tau) for value in signed)
+        progress = p_sum([_soft_positive(keep(value), tau) for value in signed])
+        backtrack = p_sum([_soft_positive(-keep(value), tau) for value in signed])
         back_loss = backtrack / (progress + backtrack)
         unit_directions = delta_tensor / lengths[:, None]
         mono_loss = snap_unit(
-            sum(
-                _stable_sigmoid(-float(torch.dot(direction, axis).item()) / 0.03)
-                for direction in unit_directions
+            p_sum(
+                [
+                    _stable_sigmoid(-keep(torch.dot(direction, axis)) / 0.03)
+                    for direction in unit_directions
+                ]
             )
             / len(unit_directions)
         )
-        junction_losses = []
+        junction_losses: List[Scalar] = []
         for junction, (incoming, outgoing) in junction_vectors.items():
             if degrees[junction] == 2:
                 continue
             incoming = incoming / torch.linalg.vector_norm(incoming)
             outgoing = outgoing / torch.linalg.vector_norm(outgoing)
             # Unit-normalized dots can exceed 1 by one ULP.
-            junction_losses.append(
-                snap_unit((1.0 + float(torch.dot(incoming, outgoing).item())) / 2.0)
-            )
+            junction_losses.append(snap_unit((1.0 + keep(torch.dot(incoming, outgoing))) / 2.0))
         continuity_loss = (
-            snap_unit(sum(junction_losses) / len(junction_losses)) if junction_losses else 0.0
+            snap_unit(p_sum(junction_losses) / len(junction_losses)) if junction_losses else 0.0
         )
         back_losses.append(back_loss)
         mono_losses.append(mono_loss)
@@ -795,13 +876,13 @@ def U34(scene: Scene) -> FacetResult:
     )
 
 
-def _u34_blend(defects: List[float], weights: List[float], bands: List[int]) -> float:
+def _u34_blend(defects: List[Scalar], weights: List[float], bands: List[int]) -> Scalar:
     """Blend path defects with U34's equal-stratum HT mean component.
 
     Parameters
     ----------
-    defects : list[float]
-        Per-path losses.
+    defects : list[float or torch.Tensor]
+        Per-path losses; live tensors inside a trace.
     weights : list[float]
         Horvitz--Thompson inverse-inclusion weights.
     bands : list[int]
@@ -809,20 +890,20 @@ def _u34_blend(defects: List[float], weights: List[float], bands: List[int]) -> 
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Global blend with the contract-specific robust-mean replacement.
     """
 
-    stratum_means = []
+    stratum_means: List[Scalar] = []
     for band in sorted(set(bands)):
         indices = [index for index, value in enumerate(bands) if value == band]
         total = sum(weights[index] for index in indices)
         stratum_means.append(
-            snap_unit(sum(weights[index] * defects[index] for index in indices) / total)
+            snap_unit(p_sum([weights[index] * defects[index] for index in indices]) / total)
         )
     # The override guard in blend_with_weights stays strict by design; the
     # equal-stratum mean is analytically in [0, 1] and sheds its dust here.
-    equal_stratum_mean = snap_unit(sum(stratum_means) / len(stratum_means))
+    equal_stratum_mean = snap_unit(p_sum(stratum_means) / len(stratum_means))
     return blend_with_weights(
         defects,
         weights,
@@ -831,30 +912,33 @@ def _u34_blend(defects: List[float], weights: List[float], bands: List[int]) -> 
     )
 
 
-def _soft_positive(value: float, temperature: float) -> float:
+def _soft_positive(value: Scalar, temperature: Scalar) -> Scalar:
     """Evaluate the scale-homogeneous soft positive-part function.
 
     Parameters
     ----------
-    value : float
+    value : float or torch.Tensor
         Signed segment progress.
-    temperature : float
-        Positive path-relative shoulder width.
+    temperature : float or torch.Tensor
+        Positive path-relative shoulder width (U34's contract-named
+        ``tau = 0.01 * mean_segment_length``; live inside a trace).
 
     Returns
     -------
-    float
-        ``temperature * log1p(exp(value/temperature))``.
+    float or torch.Tensor
+        ``temperature * log1p(exp(value/temperature))``; the branch guards are
+        read detached and each branch value flows with the graph intact.
     """
 
-    if temperature <= 0.0:
-        return max(0.0, value)
+    if as_float(temperature) <= 0.0:
+        return p_max(0.0, value)
     coordinate = value / temperature
-    if coordinate > 40.0:
+    point = as_float(coordinate)
+    if point > 40.0:
         return value
-    if coordinate < -40.0:
-        return temperature * math.exp(coordinate)
-    return temperature * math.log1p(math.exp(coordinate))
+    if point < -40.0:
+        return temperature * p_exp(coordinate)
+    return temperature * p_log1p(p_exp(coordinate))
 
 
 def _canonical_source_sink_paths(
@@ -978,7 +1062,7 @@ def U39(scene: Scene) -> FacetResult:
     if not scene.graph.ports:
         return na_result("PORTS_ABSENT")
     route_by_edge = {route.edge_index: route for route in scene.routes}
-    rows: Dict[str, List[float]] = {key: [] for key in ("U39.1", "U39.2", "U39.3", "U39.4")}
+    rows: Dict[str, List[Scalar]] = {key: [] for key in ("U39.1", "U39.2", "U39.3", "U39.4")}
     endpoints: Dict[Tuple[int, str], List[Tuple[PortDeclaration, torch.Tensor, torch.Tensor]]] = {}
     for edge_index, ports in sorted(scene.graph.ports.items()):
         route = route_by_edge.get(edge_index)
@@ -995,10 +1079,10 @@ def U39(scene: Scene) -> FacetResult:
             half_diagonal = float(
                 torch.linalg.vector_norm(scene.node_boxes[declaration.node_id].half_extents)
             )
-            displacement = float(torch.linalg.vector_norm(terminal - anchor)) / half_diagonal
-            rows["U39.1"].append(1.0 - math.exp(-((displacement / 0.05) ** 2)))
+            displacement = keep(torch.linalg.vector_norm(terminal - anchor)) / half_diagonal
+            rows["U39.1"].append(1.0 - p_exp(-((displacement / 0.05) ** 2)))
             expected = torch.tensor(declaration.expected_approach, dtype=torch.float64)
-            cosine = float(torch.dot(tangent, expected))
+            cosine = keep(torch.dot(tangent, expected))
             rows["U39.2"].append(_stable_sigmoid((math.cos(math.radians(25.0)) - cosine) / 0.02))
             sample = _sample_from_terminal(route.points, endpoint, 0.5 * scene.intrinsic_unit)
             endpoints.setdefault((declaration.node_id, declaration.side), []).append(
@@ -1021,7 +1105,7 @@ def U39(scene: Scene) -> FacetResult:
         for left_index, left in enumerate(ordered):
             for right in ordered[left_index + 1 :]:
                 separation = (
-                    float(torch.linalg.vector_norm(left[2] - right[2])) / scene.intrinsic_unit
+                    keep(torch.linalg.vector_norm(left[2] - right[2])) / scene.intrinsic_unit
                 )
                 rows["U39.4"].append(_stable_sigmoid((0.20 - separation) / 0.03))
     values = {key: global_blend(items) for key, items in rows.items() if items}
@@ -1087,8 +1171,8 @@ def _terminal_tangent(points: torch.Tensor, endpoint: int) -> Optional[torch.Ten
     ordered = points if endpoint == 0 else torch.flip(points, dims=(0,))
     for point in ordered[1:]:
         delta = point - ordered[0]
-        length = float(torch.linalg.vector_norm(delta))
-        if length > 0.0:
+        length = keep(torch.linalg.vector_norm(delta))
+        if as_float(length) > 0.0:
             return delta / length
     return None
 
@@ -1112,16 +1196,16 @@ def _sample_from_terminal(points: torch.Tensor, endpoint: int, distance: float) 
     """
 
     ordered = points if endpoint == 0 else torch.flip(points, dims=(0,))
-    remaining = distance
+    remaining: Scalar = distance
     for start, end in zip(ordered[:-1], ordered[1:]):
-        length = float(torch.linalg.vector_norm(end - start))
-        if length >= remaining and length > 0.0:
+        length = keep(torch.linalg.vector_norm(end - start))
+        if as_float(length) >= as_float(remaining) and as_float(length) > 0.0:
             return start + (remaining / length) * (end - start)
         remaining -= length
     return ordered[-1]
 
 
-def _terminal_side_coordinate(point: torch.Tensor, box: BoxGeometry, side: str) -> float:
+def _terminal_side_coordinate(point: torch.Tensor, box: BoxGeometry, side: str) -> Scalar:
     """Return the signed node-local coordinate of a route terminal.
 
     Parameters
@@ -1135,12 +1219,13 @@ def _terminal_side_coordinate(point: torch.Tensor, box: BoxGeometry, side: str) 
 
     Returns
     -------
-    float
-        Coordinate increasing with the declared side-coordinate convention.
+    float or torch.Tensor
+        Coordinate increasing with the declared side-coordinate convention;
+        live inside a trace.
     """
 
     axis = 0 if side in {"N", "S"} else 1
-    return float(point[axis] - box.center[axis])
+    return keep(point[axis] - box.center[axis])
 
 
 def U40(scene: Union[Scene, TemporalScene]) -> FacetResult:
