@@ -22,7 +22,7 @@ from dagua.eval.ruler_v4.scene import (
     ValidScene,
 )
 from dagua.eval.ruler_v4.score import ScoringProfiles
-from dagua.eval.ruler_v4.weights import (
+from dagua.eval.ruler_v4.weight_table import (
     GATE_DIAGNOSTIC_FACETS,
     REQUIRED_PRIOR_FLOOR_FACETS,
     ParameterProvenance,

@@ -6,7 +6,7 @@ import pytest
 
 from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile, compose
 from dagua.eval.ruler_v4.scene import FacetResult, value_result
-from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
 
 
 def _weights() -> WeightTable:

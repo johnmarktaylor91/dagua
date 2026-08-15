@@ -17,8 +17,8 @@ from dagua.eval.ruler_v4.composition import (
 from dagua.eval.ruler_v4.contracts import CONTRACTS
 from dagua.eval.ruler_v4.headline import HeadlineProfile, HeadlineResult, ordinal_headline
 from dagua.eval.ruler_v4.registry import evaluate_facet, validate_registry
-from dagua.eval.ruler_v4.scene import FacetResult, ResultState, Scene
-from dagua.eval.ruler_v4.weights import ParameterProvenance, PriorMassDisclosure, WeightTable
+from dagua.eval.ruler_v4.scene import FacetResult, ResultState, Scene, TemporalScene
+from dagua.eval.ruler_v4.weight_table import ParameterProvenance, PriorMassDisclosure, WeightTable
 
 
 class OutputType(str, Enum):
@@ -253,7 +253,11 @@ def validate_parameter_provenance(profiles: ScoringProfiles, weight_table: Weigh
         )
 
 
-def _evaluate_static_facets(scene: Scene, profiles: ScoringProfiles) -> Mapping[str, FacetResult]:
+def _evaluate_static_facets(
+    scene: Scene,
+    profiles: ScoringProfiles,
+    temporal_scene: Optional[TemporalScene] = None,
+) -> Mapping[str, FacetResult]:
     """Evaluate all 45 contracts under one explicit profile selection.
 
     Parameters
@@ -262,6 +266,9 @@ def _evaluate_static_facets(scene: Scene, profiles: ScoringProfiles) -> Mapping[
         Validated static scene.
     profiles : ScoringProfiles
         Facet and scoring profile parameters.
+    temporal_scene : TemporalScene or None
+        Validated temporal scene routed to U40 so the pure entrypoint can
+        publish the full 45-row table; U40 is structurally NA without it.
 
     Returns
     -------
@@ -271,6 +278,9 @@ def _evaluate_static_facets(scene: Scene, profiles: ScoringProfiles) -> Mapping[
 
     results = {}
     for facet_id in CONTRACTS:
+        if facet_id == "U40" and temporal_scene is not None:
+            results[facet_id] = evaluate_facet(facet_id, temporal_scene)
+            continue
         results[facet_id] = evaluate_facet(
             facet_id,
             scene,
@@ -281,7 +291,12 @@ def _evaluate_static_facets(scene: Scene, profiles: ScoringProfiles) -> Mapping[
     return results
 
 
-def score(scene: Scene, weight_table: WeightTable, profiles: ScoringProfiles) -> ScoreResult:
+def score(
+    scene: Scene,
+    weight_table: WeightTable,
+    profiles: ScoringProfiles,
+    temporal_scene: Optional[TemporalScene] = None,
+) -> ScoreResult:
     """Score one validated scene deterministically with no I/O.
 
     Parameters
@@ -292,6 +307,9 @@ def score(scene: Scene, weight_table: WeightTable, profiles: ScoringProfiles) ->
         Complete explicit per-sub-term weights and provenance.
     profiles : ScoringProfiles
         Frozen facet, composition, headline, measurement, and policy profiles.
+    temporal_scene : TemporalScene or None
+        Validated temporal scene for U40 (mental-map continuity), when
+        ingestion produced one. Without it U40 publishes its structural NA.
 
     Returns
     -------
@@ -308,7 +326,7 @@ def score(scene: Scene, weight_table: WeightTable, profiles: ScoringProfiles) ->
     validate_registry()
     weight_table.validate_for_contracts()
     validate_parameter_provenance(profiles, weight_table)
-    facet_results = _evaluate_static_facets(scene, profiles)
+    facet_results = _evaluate_static_facets(scene, profiles, temporal_scene)
     invalid = {
         facet_id: result.reason
         for facet_id, result in facet_results.items()
@@ -355,7 +373,12 @@ def score(scene: Scene, weight_table: WeightTable, profiles: ScoringProfiles) ->
     )
 
 
-def score_scene(scene: Scene, weight_table: WeightTable, profiles: ScoringProfiles) -> ScoreResult:
+def score_scene(
+    scene: Scene,
+    weight_table: WeightTable,
+    profiles: ScoringProfiles,
+    temporal_scene: Optional[TemporalScene] = None,
+) -> ScoreResult:
     """Call :func:`score` using the explicit scene-oriented name.
 
     Parameters
@@ -366,6 +389,8 @@ def score_scene(scene: Scene, weight_table: WeightTable, profiles: ScoringProfil
         Complete explicit per-sub-term weights.
     profiles : ScoringProfiles
         Frozen scoring profiles and version ids.
+    temporal_scene : TemporalScene or None
+        Validated temporal scene for U40, when available.
 
     Returns
     -------
@@ -373,4 +398,4 @@ def score_scene(scene: Scene, weight_table: WeightTable, profiles: ScoringProfil
         Deterministic structured score.
     """
 
-    return score(scene, weight_table, profiles)
+    return score(scene, weight_table, profiles, temporal_scene)

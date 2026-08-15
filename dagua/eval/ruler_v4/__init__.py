@@ -39,7 +39,7 @@ from dagua.eval.ruler_v4.score import (
     score_scene,
     validate_parameter_provenance,
 )
-from dagua.eval.ruler_v4.weights import (
+from dagua.eval.ruler_v4.weight_table import (
     DofAccount,
     ParameterProvenance,
     PriorMassDisclosure,
