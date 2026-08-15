@@ -1073,8 +1073,11 @@ def _alpha_grid_for_budget(scene: Scene, budget: float) -> Tuple[float, ...]:
     floor = 0.25 * scene.intrinsic_unit
     argument = (budget - floor) / (0.5 * floor)
     blend = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, argument))))
+    # No snap here: with alpha_clear in (0, 0.5] and alpha_high in [0, 1]
+    # the blend lies strictly inside (0, 0.5], and the grid weights are
+    # not a guarded [0, 1] quantity in the first place.
     return tuple(
-        snap_unit(alpha_clear * (1.0 - blend) + alpha_clear * blend * alpha_high)
+        alpha_clear * (1.0 - blend) + alpha_clear * blend * alpha_high
         for _, alpha_clear, alpha_high in ALPHA_GRID
     )
 
