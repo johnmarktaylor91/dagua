@@ -11,6 +11,18 @@ from typing import Dict, List, Sequence, Set, Tuple
 
 import torch
 
+from dagua.eval.ruler_v4._tracing import (
+    Scalar,
+    as_float,
+    keep,
+    p_abs,
+    p_exp,
+    p_log,
+    p_max,
+    p_min,
+    p_sqrt,
+    p_sum,
+)
 from dagua.eval.ruler_v4._util import (
     aabb_pair,
     adjacency,
@@ -25,6 +37,7 @@ from dagua.eval.ruler_v4._util import (
     node_degrees,
     primary_isotonic_fit,
     resolved_routes,
+    route_lengths,
     smoothstep,
     snap_unit,
     soft_pos,
@@ -40,6 +53,27 @@ from dagua.eval.ruler_v4.scene import (
 )
 
 
+def _smoothstep_scalar(argument: Scalar) -> torch.Tensor:
+    """Evaluate the quintic smoothstep on one polymorphic scalar.
+
+    Parameters
+    ----------
+    argument : float or torch.Tensor
+        Kernel argument. A tensor keeps its autograd graph (smoothstep is
+        tensor-native); a float executes the historical
+        ``torch.tensor(x, dtype=torch.float64)`` promotion byte-for-byte.
+
+    Returns
+    -------
+    torch.Tensor
+        Zero-dimensional smoothstep value.
+    """
+
+    if isinstance(argument, torch.Tensor):
+        return smoothstep(argument)
+    return smoothstep(torch.tensor(argument, dtype=torch.float64))
+
+
 def U01(scene: Scene) -> FacetResult:
     """Distance/stress fidelity. Frozen SHA-256: 0db6143734cebf7f28d5a3f231cc7accb4010b8fed86c78ab470927e93651641."""
 
@@ -49,14 +83,14 @@ def U01(scene: Scene) -> FacetResult:
     order = torch.cat([item[2] for item in strata])
     layout = torch.cat([item[3] for item in strata])
     fitted = primary_isotonic_fit(order, layout)
-    values: List[float] = []
+    values: List[Scalar] = []
     weights: List[float] = []
     published: Dict[str, float] = {}
     cursor = 0
     for component_index, band, local_order, local_layout in strata:
         count = local_order.numel()
         stress = _stress_from_fit(local_order, local_layout, fitted[cursor : cursor + count])
-        published[f"component_{component_index}.{band}"] = stress
+        published[f"component_{component_index}.{band}"] = as_float(stress)
         values.append(stress)
         weights.append(float(count))
         cursor += count
@@ -77,7 +111,7 @@ def U01b(scene: Scene) -> FacetResult:
     order = torch.cat([item[2] for item in strata])
     layout = torch.cat([item[3] for item in strata])
     fitted = primary_isotonic_fit(order, layout)
-    by_band: Dict[str, List[float]] = {"local": [], "long": []}
+    by_band: Dict[str, List[Scalar]] = {"local": [], "long": []}
     band_weights: Dict[str, List[float]] = {"local": [], "long": []}
     band_counts = {"local": 0, "long": 0}
     component_band_counts: Dict[str, List[int]] = {"local": [], "long": []}
@@ -92,7 +126,7 @@ def U01b(scene: Scene) -> FacetResult:
             band_counts[band] += count
             component_band_counts[band].append(count)
         cursor += count
-    values: Dict[str, float] = {}
+    values: Dict[str, Scalar] = {}
     dropped = []
     for band in ("local", "long"):
         if component_band_counts[band] and max(component_band_counts[band]) >= 30:
@@ -163,7 +197,7 @@ def _distance_strata(
     return result
 
 
-def _stress_from_fit(order: torch.Tensor, layout: torch.Tensor, fitted: torch.Tensor) -> float:
+def _stress_from_fit(order: torch.Tensor, layout: torch.Tensor, fitted: torch.Tensor) -> Scalar:
     """Read one stratum's Kruskal stress from a shared isotonic fit.
 
     Parameters
@@ -173,22 +207,31 @@ def _stress_from_fit(order: torch.Tensor, layout: torch.Tensor, fitted: torch.Te
 
     Returns
     -------
-    float
-        Stress-1 with the frozen zero-layout convention.
+    float or torch.Tensor
+        Stress-1 with the frozen zero-layout convention; live inside a trace.
     """
 
-    denominator = float(torch.sum(layout * layout).item())
-    if denominator == 0.0:
+    denominator = keep(torch.sum(layout * layout))
+    if as_float(denominator) == 0.0:
         return 1.0 if torch.unique(order).numel() > 1 else 0.0
-    residual = float(torch.sum((layout - fitted) ** 2).item())
-    return min(1.0, math.sqrt(residual / denominator))
+    residual = keep(torch.sum((layout - fitted) ** 2))
+    if isinstance(residual, torch.Tensor) and as_float(residual) == 0.0:
+        # An exactly-perfect fit is where sqrt's chain rule degenerates to
+        # the 0 * inf autograd artifact (NaN). The residual is locally
+        # identically zero (every single-block stratum) or at a cusp
+        # minimum whose standard subgradient is zero, so the zero residual
+        # tensor itself carries the honest a.e. gradient. Exact-path ops
+        # are untouched: the float branch never enters, and the traced
+        # value equals min(1.0, sqrt(0.0 / denominator)) == 0.0 exactly.
+        return residual
+    return p_min(1.0, p_sqrt(residual / denominator))
 
 
 def U02(scene: Scene) -> FacetResult:
     """Shepard rank fidelity. Frozen SHA-256: d4a6ff0c6a7699832bfe925d38feee236309ca858a371b36ba4fb5169e294235."""
 
     distances = graph_distances(scene)
-    component_defects: List[float] = []
+    component_defects: List[Scalar] = []
     component_weights: List[float] = []
     graph_values: List[float] = []
     degenerate_count = 0
@@ -203,7 +246,7 @@ def U02(scene: Scene) -> FacetResult:
         layout = torch.linalg.vector_norm(scene.positions[source] - scene.positions[target], dim=1)
         graph_values.extend(float(value) for value in graph_order)
         if torch.unique(graph_order).numel() == 1 or torch.unique(layout).numel() == 1:
-            defect = 0.5
+            defect: Scalar = 0.5
             degenerate_count += 1
         else:
             defect = correlation_defect(midranks(graph_order), midranks(layout))
@@ -254,14 +297,14 @@ def U03(scene: Scene) -> FacetResult:
 
     graph_order = graph_distances(scene)
     layout_order = torch.cdist(scene.positions, scene.positions)
-    values: Dict[str, float] = {}
+    values: Dict[str, Scalar] = {}
     eligibility: Dict[str, bool] = {}
     degree_terciles: Dict[str, Tuple[Tuple[int, ...], ...]] = {}
     degree_stratum_defects: Dict[str, Tuple[float, ...]] = {}
     center_panels: Dict[str, Tuple[int, ...]] = {}
     graph_adjacency = adjacency(scene)
     for radius in (1, 2, 4):
-        component_values: List[float] = []
+        component_values: List[Scalar] = []
         component_weights: List[float] = []
         radius_eligible = False
         for component_index, members in enumerate(components(scene)):
@@ -317,9 +360,9 @@ def U03(scene: Scene) -> FacetResult:
             ]
             statistic_key = f"r_{radius}.component_{component_index}"
             degree_terciles[statistic_key] = tuple(tuple(centers) for centers in terciles)
-            tercile_values: List[float] = []
+            tercile_values: List[Scalar] = []
             for centers in terciles:
-                center_defects: List[float] = []
+                center_defects: List[Scalar] = []
                 for node in centers:
                     expected = _radius_neighbors(graph_order, node, radius) & member_set
                     if not expected:
@@ -327,27 +370,29 @@ def U03(scene: Scene) -> FacetResult:
                     candidate_nodes = [candidate for candidate in members if candidate != node]
                     candidate_distances = layout_order[node, candidate_nodes]
                     k_value = len(expected)
-                    rho = float(torch.kthvalue(candidate_distances, k_value).values)
-                    if rho == 0.0:
+                    # The k-th order-statistic PICK is detached control flow;
+                    # the picked element is gathered live so rho's value
+                    # carries the a.e. gradient (piecewise-constant index).
+                    kth_index = int(torch.kthvalue(candidate_distances.detach(), k_value).indices)
+                    rho = keep(candidate_distances[kth_index])
+                    if as_float(rho) == 0.0:
                         center_defects.append(0.0)
                         continue
-                    credits = []
+                    credits: List[Scalar] = []
                     for neighbor in expected:
-                        argument = (rho - float(layout_order[node, neighbor])) / (0.25 * rho)
-                        argument = max(-60.0, min(60.0, argument))
-                        credits.append(1.0 / (1.0 + math.exp(-argument)))
-                    raw_defect = 1.0 - sum(credits) / k_value
-                    gate = float(
-                        smoothstep(
-                            torch.tensor(rho / (0.1 * scene.intrinsic_unit), dtype=torch.float64)
-                        )
-                    )
+                        argument = (rho - keep(layout_order[node, neighbor])) / (0.25 * rho)
+                        argument = p_max(-60.0, p_min(60.0, argument))
+                        credits.append(1.0 / (1.0 + p_exp(-argument)))
+                    raw_defect = 1.0 - p_sum(credits) / k_value
+                    gate = keep(_smoothstep_scalar(rho / (0.1 * scene.intrinsic_unit)))
                     center_defects.append(gate * raw_defect)
                 if center_defects:
                     tercile_values.append(global_blend(center_defects))
-            degree_stratum_defects[statistic_key] = tuple(tercile_values)
+            degree_stratum_defects[statistic_key] = tuple(
+                as_float(value) for value in tercile_values
+            )
             if tercile_values:
-                component_values.append(snap_unit(sum(tercile_values) / len(tercile_values)))
+                component_values.append(snap_unit(p_sum(tercile_values) / len(tercile_values)))
                 # Section 4 weights block: "Components pooled by node-count
                 # input mass". Section 7's "components by node mass" summary
                 # conflicts; the dedicated weights block governs (docketed).
@@ -355,7 +400,9 @@ def U03(scene: Scene) -> FacetResult:
         eligibility[f"r_{radius}"] = radius_eligible
         if component_values:
             values[f"U03.r_{radius}"] = snap_unit(
-                sum(weight * value for weight, value in zip(component_weights, component_values))
+                p_sum(
+                    [weight * value for weight, value in zip(component_weights, component_values)]
+                )
                 / sum(component_weights)
             )
     if not values:
@@ -1154,7 +1201,7 @@ def U06(scene: Scene) -> FacetResult:
 
     if not scene.graph.symmetry_generators:
         return na_result("no_certified_symmetry")
-    residuals: List[float] = []
+    residuals: List[Scalar] = []
     for permutation in scene.graph.symmetry_generators:
         moved = [index for index, target in enumerate(permutation) if index != target]
         if not moved:
@@ -1165,24 +1212,22 @@ def U06(scene: Scene) -> FacetResult:
         target = target - torch.mean(target, dim=0)
         left, _, right = torch.linalg.svd(source.T @ target)
         rotation = left @ right
-        denominator = float(torch.sum(source * source).item())
+        denominator = keep(torch.sum(source * source))
         scale = (
-            float(torch.sum(torch.linalg.svdvals(source.T @ target)).item()) / denominator
-            if denominator > 0.0
+            keep(torch.sum(torch.linalg.svdvals(source.T @ target))) / denominator
+            if as_float(denominator) > 0.0
             else 0.0
         )
         center = torch.median(source, dim=0).values
-        spread = float(torch.median(torch.linalg.vector_norm(source - center, dim=1)).item())
-        if spread == 0.0:
+        spread = keep(torch.median(torch.linalg.vector_norm(source - center, dim=1)))
+        if as_float(spread) == 0.0:
             residuals.append(1.0)
             continue
         aligned = scale * source @ rotation
         residual = torch.sqrt(torch.mean(torch.sum((aligned - target) ** 2, dim=1)))
-        ratio = float(residual) / spread
+        ratio = keep(residual) / spread
         raw = ratio * ratio / (1.0 + ratio * ratio)
-        gate = float(
-            smoothstep(torch.tensor(spread / (0.1 * scene.intrinsic_unit), dtype=torch.float64))
-        )
+        gate = keep(_smoothstep_scalar(spread / (0.1 * scene.intrinsic_unit)))
         residuals.append(gate * raw + (1.0 - gate))
     if not residuals:
         return na_result("no_certified_symmetry")
@@ -1199,13 +1244,7 @@ def U09(scene: Scene) -> FacetResult:
 
     if scene.edge_count < 5:
         return na_result("too_few_edges")
-    lengths = torch.tensor(
-        [
-            float(torch.sum(torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1)))
-            for route in resolved_routes(scene)
-        ],
-        dtype=torch.float64,
-    )
+    lengths = route_lengths(scene)
     log_lengths = torch.log(lengths + 1e-12 * scene.intrinsic_unit)
     if scene.graph.edge_weights is not None and scene.graph.weight_semantics == "target_length":
         targets = torch.tensor(scene.graph.edge_weights, dtype=torch.float64)
@@ -1221,16 +1260,16 @@ def U09(scene: Scene) -> FacetResult:
     merged = [index for indices in strata.values() if len(indices) < 5 for index in indices]
     if merged:
         large_strata.append(merged)
-    defects: List[float] = []
+    defects: List[Scalar] = []
     weights: List[float] = []
     dispersions: List[float] = []
     for indices in large_strata:
         local_values = log_lengths[indices]
         median = torch.median(local_values)
-        dispersion = 1.4826 * float(torch.median(torch.abs(local_values - median)).item())
+        dispersion = 1.4826 * keep(torch.median(torch.abs(local_values - median)))
         defects.append(dispersion / (dispersion + math.log(2.0)))
         weights.append(float(len(indices)))
-        dispersions.append(dispersion)
+        dispersions.append(as_float(dispersion))
     defect = global_blend(defects, weights)
     return value_result(
         defect,
@@ -1269,31 +1308,33 @@ def U14(scene: Scene) -> FacetResult:
         if degree == 0:
             raw = 1.5 * diagonals[node] / 2.0
         budgets.append(max(raw, 0.125 * scene.intrinsic_unit))
-    survival = [1.0] * scene.node_count
+    survival: List[Scalar] = [1.0] * scene.node_count
     raw_pairs: List[Dict[str, float]] = []
     floor = 0.25 * scene.intrinsic_unit
     for left, right in pair_population:
         signed_gap, _ = aabb_pair(scene.node_boxes[left], scene.node_boxes[right])
-        gap = max(0.0, signed_gap)
+        gap = p_max(0.0, signed_gap)
         normalized = gap / scene.intrinsic_unit
-        absolute = (1.0 - normalized * normalized) ** 2 if normalized < 1.0 else 0.0
+        absolute: Scalar = (
+            (1.0 - normalized * normalized) ** 2 if as_float(normalized) < 1.0 else 0.0
+        )
         achievable = min(budgets[left], budgets[right])
-        achievement = 1.0 - float(smoothstep(torch.tensor(gap / achievable, dtype=torch.float64)))
+        achievement = 1.0 - keep(_smoothstep_scalar(gap / achievable))
         argument = (achievable - floor) / (0.5 * floor)
         blend = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, argument))))
         pair_defect = snap_unit((1.0 - blend) * absolute + blend * achievement)
-        survival[left] *= 1.0 - pair_defect
-        survival[right] *= 1.0 - pair_defect
+        survival[left] = survival[left] * (1.0 - pair_defect)
+        survival[right] = survival[right] * (1.0 - pair_defect)
         raw_pairs.append(
             {
                 "left": float(left),
                 "right": float(right),
-                "gap_over_u": normalized,
+                "gap_over_u": as_float(normalized),
                 "budget_over_u": achievable / scene.intrinsic_unit,
                 "lambda": blend,
-                "d_abs": absolute,
-                "d_ach": achievement,
-                "defect": pair_defect,
+                "d_abs": as_float(absolute),
+                "d_ach": as_float(achievement),
+                "defect": as_float(pair_defect),
             }
         )
     node_defects = [1.0 - value for value in survival]
@@ -1308,7 +1349,7 @@ def U14(scene: Scene) -> FacetResult:
         {"U14.headline": defect},
         {
             "pair_count": len(pair_population),
-            "node_defects": tuple(node_defects),
+            "node_defects": tuple(as_float(value) for value in node_defects),
             "top_pairs": tuple(sorted(raw_pairs, key=lambda row: row["defect"], reverse=True)[:20]),
         },
     )
@@ -1423,13 +1464,13 @@ def U22(scene: Scene) -> FacetResult:
         exemption = f"class:{declared_class}"
     else:
         exemption = "unit"
-    excess = soft_pos(abs(math.log(observed / target)) - math.log(3.0))
+    excess = soft_pos(p_abs(p_log(observed / target)) - math.log(3.0))
     defect = excess / (1.0 + excess)
     return value_result(
         defect,
         {"U22.headline": defect},
         {
-            "aspect_ratio": observed,
+            "aspect_ratio": as_float(observed),
             "target": target,
             "measurement": measurement,
             "exemption": exemption,
@@ -1441,7 +1482,7 @@ def U22(scene: Scene) -> FacetResult:
 def U23(scene: Scene) -> FacetResult:
     """Visual balance. Frozen SHA-256: c14a86d9e00099c5db2c6d571e1af057896146222e96737678253a76ffdd5972."""
 
-    defects: List[float] = []
+    defects: List[Scalar] = []
     weights: List[float] = []
     normalized_values: List[float] = []
     measurement = "rotation_averaged"
@@ -1462,7 +1503,7 @@ def U23(scene: Scene) -> FacetResult:
         if axis is not None:
             cross = torch.tensor([-axis[1], axis[0]], dtype=torch.float64)
             extent = robust_projection(points @ cross, scene.intrinsic_unit)
-            normalized = abs(float(torch.dot(offset, cross))) / extent.half_extent
+            normalized = p_abs(keep(torch.dot(offset, cross))) / extent.half_extent
             measurement = "declared_cross_axis"
         else:
             extents = []
@@ -1472,10 +1513,10 @@ def U23(scene: Scene) -> FacetResult:
                 extents.append(
                     robust_projection(points @ direction, scene.intrinsic_unit).half_extent
                 )
-            normalized = float(torch.linalg.vector_norm(offset)) / (sum(extents) / len(extents))
-        defects.append(float(smoothstep(torch.tensor(normalized / 0.5, dtype=torch.float64))))
+            normalized = keep(torch.linalg.vector_norm(offset)) / (sum(extents) / len(extents))
+        defects.append(keep(_smoothstep_scalar(normalized / 0.5)))
         weights.append(float(torch.sum(local_masses)))
-        normalized_values.append(normalized)
+        normalized_values.append(as_float(normalized))
     if not defects:
         return na_result("component_too_small")
     defect = global_blend(defects, weights)
@@ -1497,16 +1538,17 @@ def U24(scene: Scene) -> FacetResult:
     component_count = len(components(scene))
     area_reference = primitive_area / 0.10 * (1.0 + 0.5 * (component_count - 1))
     ideal_spacing = math.sqrt(area_reference / scene.node_count)
-    route_length = 0.0
-    for route in resolved_routes(scene):
-        route_length += float(
-            torch.sum(torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1))
-        )
+    route_length = p_sum(
+        [
+            keep(torch.sum(torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1)))
+            for route in resolved_routes(scene)
+        ]
+    )
     ink_ratio = route_length / (scene.edge_count * ideal_spacing)
-    excess = soft_pos(math.log(ink_ratio / 3.0)) if ink_ratio > 0.0 else 0.0
+    excess: Scalar = soft_pos(p_log(ink_ratio / 3.0)) if as_float(ink_ratio) > 0.0 else 0.0
     defect = excess / (1.0 + excess)
     return value_result(
         defect,
         {"U24.headline": defect},
-        {"ink_ratio": ink_ratio, "ideal_spacing": ideal_spacing},
+        {"ink_ratio": as_float(ink_ratio), "ideal_spacing": ideal_spacing},
     )
