@@ -893,6 +893,7 @@ def U21(scene: Scene) -> FacetResult:
             "A_content": content_area,
             "phi_ink": content_area / frame.area,
             "R": frame.area / content_area if content_area > 0.0 else float("inf"),
+            "A_ref": area_reference,
             "mass_out": mass_out,
             "o_min": anchor,
             "overflow_anchor": anchor,
