@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
 from typing import Mapping, Optional, Tuple
 
 from dagua.eval.ruler_v4.composition import (
+    CompositionFamily,
     CompositionProfile,
     CompositionResult,
     SubtermContribution,
@@ -17,7 +18,7 @@ from dagua.eval.ruler_v4.contracts import CONTRACTS
 from dagua.eval.ruler_v4.headline import HeadlineProfile, HeadlineResult, ordinal_headline
 from dagua.eval.ruler_v4.registry import evaluate_facet, validate_registry
 from dagua.eval.ruler_v4.scene import FacetResult, ResultState, Scene
-from dagua.eval.ruler_v4.weights import PriorMassDisclosure, WeightTable
+from dagua.eval.ruler_v4.weights import ParameterProvenance, PriorMassDisclosure, WeightTable
 
 
 class OutputType(str, Enum):
@@ -47,6 +48,11 @@ class ScoringProfiles:
         Optional U07 fitted crossing-severity scale.
     crossing_tail_weight : float or None
         Optional U07 fitted tail weight.
+    parameter_provenance : mapping[str, ParameterProvenance]
+        A18 provenance classification for every active score-visible profile
+        scalar. The score path refuses an unclassified scalar, and a scalar
+        classified as fitted must resolve to an identity in the weight
+        table's dof ledger (V4_SPEC_r4 3.6 counting rule).
     """
 
     composition: CompositionProfile
@@ -56,6 +62,7 @@ class ScoringProfiles:
     alpha_grid_index: Optional[int] = None
     crossing_gamma: Optional[float] = None
     crossing_tail_weight: Optional[float] = None
+    parameter_provenance: Mapping[str, ParameterProvenance] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Require both frozen artifact version strings.
@@ -63,11 +70,45 @@ class ScoringProfiles:
         Raises
         ------
         ValueError
-            If either artifact version is empty.
+            If either artifact version is empty or a provenance key is blank.
         """
 
         if not self.measurement_version or not self.policy_version:
             raise ValueError("measurement and policy versions must be nonempty")
+        provenance = dict(self.parameter_provenance)
+        if any(not name for name in provenance):
+            raise ValueError("provenance keys must be nonempty scalar names")
+        object.__setattr__(self, "parameter_provenance", MappingProxyType(provenance))
+
+    def score_visible_scalars(self) -> Tuple[str, ...]:
+        """Enumerate the active score-visible scalar parameters of this call.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Stable names for every independently adjustable scalar that can
+            move the published score under these profiles.
+        """
+
+        names = []
+        if self.composition.family is CompositionFamily.P_MEAN:
+            names.append("composition.power")
+        else:
+            names.append("composition.bottleneck_mix")
+            names.append("composition.bottleneck_temperature")
+            names.extend(
+                f"composition.group_allowances.{group}"
+                for group in sorted(self.composition.group_allowances)
+            )
+        names.append("headline.index_span")
+        names.append("headline.loss_scale")
+        if self.alpha_grid_index is not None:
+            names.append("alpha_grid_index")
+        if self.crossing_gamma is not None:
+            names.append("crossing_gamma")
+        if self.crossing_tail_weight is not None:
+            names.append("crossing_tail_weight")
+        return tuple(names)
 
 
 @dataclass(frozen=True)
@@ -161,6 +202,57 @@ class ScoreResult:
     policy_version: str
 
 
+def validate_parameter_provenance(profiles: ScoringProfiles, weight_table: WeightTable) -> None:
+    """Refuse profile scalars that hide from the A18 dof account.
+
+    Every active score-visible profile scalar must carry a provenance class,
+    and every fitted one must resolve to an identity the weight table already
+    declares, so ``DofAccount.used`` covers the whole score path
+    (V4_SPEC_r4 3.6: independently adjustable score-visible scalar parameters
+    across ALL fitting stages).
+
+    Parameters
+    ----------
+    profiles : ScoringProfiles
+        Profile set about to be scored.
+    weight_table : WeightTable
+        Table whose dof ledger must absorb the fitted profile scalars.
+
+    Raises
+    ------
+    ValueError
+        If a scalar is unclassified, a classification names an inactive
+        scalar, or a fitted identity is absent from the table's ledger.
+    """
+
+    active = profiles.score_visible_scalars()
+    declared = set(profiles.parameter_provenance)
+    missing = sorted(set(active) - declared)
+    if missing:
+        raise ValueError(f"score-visible profile scalars lack provenance: {missing}")
+    unknown = sorted(declared - set(active))
+    if unknown:
+        raise ValueError(f"provenance declared for inactive profile scalars: {unknown}")
+    ledger = {
+        name
+        for name in (
+            *(entry.fitted_parameter for entry in weight_table.entries),
+            *weight_table.other_fitted_parameters,
+        )
+        if name is not None
+    }
+    unledgered = sorted(
+        name
+        for name in active
+        if (identity := profiles.parameter_provenance[name].fitted_identity) is not None
+        and identity not in ledger
+    )
+    if unledgered:
+        raise ValueError(
+            f"fitted profile scalars missing from the weight-table dof ledger: {unledgered}"
+        )
+
+
 def _evaluate_static_facets(scene: Scene, profiles: ScoringProfiles) -> Mapping[str, FacetResult]:
     """Evaluate all 45 contracts under one explicit profile selection.
 
@@ -215,6 +307,7 @@ def score(scene: Scene, weight_table: WeightTable, profiles: ScoringProfiles) ->
 
     validate_registry()
     weight_table.validate_for_contracts()
+    validate_parameter_provenance(profiles, weight_table)
     facet_results = _evaluate_static_facets(scene, profiles)
     invalid = {
         facet_id: result.reason

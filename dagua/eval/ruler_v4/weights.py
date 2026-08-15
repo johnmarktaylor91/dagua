@@ -23,6 +23,23 @@ _LOCAL_ORDER_SEMANTICS = frozenset({"distance_cost", "connection_strength"})
 FITTED_DOF_CAP = 20
 PRIOR_MASS_DISCLOSURE_GATE = 0.15
 REQUIRED_PRIOR_FLOOR_FACETS = frozenset({"U12", "U13", "U34"})
+# Frozen manifest provenance vocabulary (MANIFEST.json provenance_class).
+PROVENANCE_CLASSES = frozenset(
+    {"contract_frozen", "preregistered_prior", "fitted", "controlled_stimulus"}
+)
+FITTED_PROVENANCE_CLASSES = frozenset({"fitted", "controlled_stimulus"})
+# A18 sec 7 preregistered dof allocation (PILOT_GATES_REPORT: N_u 9 + UNSPENT 1
+# + N_s 3 + N_g 4 + N_t 3 = 20). UNSPENT is reserved headroom, never assignable.
+DOF_ALLOCATION = MappingProxyType(
+    {
+        "universal": 9,
+        "unspent": 1,
+        "semantic": 3,
+        "group_model": 4,
+        "aggregation": 3,
+    }
+)
+ASSIGNABLE_DOF_BUCKETS = frozenset(DOF_ALLOCATION) - {"unspent"}
 GATE_DIAGNOSTIC_FACETS = frozenset(
     {
         "U02",
@@ -54,16 +71,25 @@ class SubtermWeight:
     facet_id : str
         Owning facet id.
     group : str
-        Reporting group used by composition attribution.
+        Reporting rollup label. Score-inert under the shipped p-mean family
+        (V4_SPEC_r4 3.3: no weight semantics of its own).
     weight : float
         Nonnegative composite mass supplied by the P5 fit or frozen prior.
     fitted_parameter : str or None
         Identity of the independently adjustable scalar that produced this
-        mass. Reusing one identity across a fixed-ratio bundle counts one dof.
+        mass. Reusing one identity across a fixed-ratio bundle counts one dof
+        only when the internal ratios were fixed a priori (V4_SPEC_r4 3.6);
+        the manifest ``fitted_dof_declaration`` cross-check is a P5 gate.
     prior_driven : bool
         Whether this mass enters PM-1's numerator for the active profile.
+        Per-profile by convention: one table serves exactly one observation
+        profile (a table reused across profiles would report one profile's
+        provenance for all).
     diagnostic : bool
         Whether the term is carried at weight zero outside the headline.
+    provenance_class : str or None
+        Frozen manifest provenance of this mass (``contract_frozen``,
+        ``preregistered_prior``, ``fitted``, or ``controlled_stimulus``).
     """
 
     subterm_id: str
@@ -73,6 +99,42 @@ class SubtermWeight:
     fitted_parameter: Optional[str] = None
     prior_driven: bool = False
     diagnostic: bool = False
+    provenance_class: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ParameterProvenance:
+    """Classify one score-visible profile scalar for the A18 dof ledger.
+
+    Parameters
+    ----------
+    provenance_class : str
+        Frozen manifest provenance vocabulary member.
+    fitted_identity : str or None
+        Dof-ledger identity, required exactly when the class is ``fitted`` or
+        ``controlled_stimulus``. The identity must be declared in the weight
+        table's ``other_fitted_parameters`` so the scalar enters the account.
+    """
+
+    provenance_class: str
+    fitted_identity: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        """Validate the class and its identity obligation.
+
+        Raises
+        ------
+        ValueError
+            If the class is unknown or the identity obligation is violated.
+        """
+
+        if self.provenance_class not in PROVENANCE_CLASSES:
+            raise ValueError(f"unknown provenance class: {self.provenance_class}")
+        if self.provenance_class in FITTED_PROVENANCE_CLASSES:
+            if not self.fitted_identity:
+                raise ValueError("fitted provenance requires a dof-ledger identity")
+        elif self.fitted_identity is not None:
+            raise ValueError("non-fitted provenance must not carry a dof identity")
 
 
 @dataclass(frozen=True)
@@ -91,6 +153,12 @@ class DofAccount:
         Nonnegative unspent allowance.
     within_cap : bool
         Whether the table respects the allowed capacity.
+    bucket_usage : mapping[str, int]
+        Identities spent per preregistered A18 allocation bucket.
+    unassigned_identities : tuple[str, ...]
+        Fitted identities carrying no declared allocation bucket.
+    within_buckets : bool
+        Whether every identity has a bucket and no A18 bucket is exceeded.
     """
 
     d_power: int
@@ -98,6 +166,9 @@ class DofAccount:
     used: int
     remaining: int
     within_cap: bool
+    bucket_usage: Mapping[str, int]
+    unassigned_identities: Tuple[str, ...]
+    within_buckets: bool
 
 
 @dataclass(frozen=True)
@@ -133,20 +204,27 @@ class WeightTable:
     ----------
     entries : tuple[SubtermWeight, ...]
         Per-sub-term masses. P5 supplies fitted values; this class contains no
-        default weights.
+        default weights. One table serves exactly one observation profile
+        (PM-1 provenance is per-profile).
     d_power : int
         Information-limited fitted capacity used by the A18 cap formula.
     prior_floors : mapping[str, float]
         Positive facet-level floors for U12, U13, and U34.
     other_fitted_parameters : tuple[str, ...]
         Score-visible fitted scalars outside sub-term masses, including group,
-        aggregation, and headline-model parameters.
+        aggregation, and headline-model parameters. The score path refuses a
+        profile whose fitted scalars do not resolve into this ledger.
+    fitted_parameter_buckets : mapping[str, str]
+        Preregistered A18 allocation bucket per fitted identity. Required for
+        every identity before the table can validate for contracts; the
+        ``unspent`` reserve is never assignable.
     """
 
     entries: Tuple[SubtermWeight, ...]
     d_power: int
     prior_floors: Mapping[str, float] = field(default_factory=dict)
     other_fitted_parameters: Tuple[str, ...] = ()
+    fitted_parameter_buckets: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Freeze mappings and validate local table invariants.
@@ -188,9 +266,42 @@ class WeightTable:
         )
         if any(not name for name in parameter_names):
             raise ValueError("fitted parameter identities must be nonempty")
+        bundle_classes: DefaultDict[str, set] = defaultdict(set)
+        for entry in entries:
+            if entry.provenance_class is not None:
+                if entry.provenance_class not in PROVENANCE_CLASSES:
+                    raise ValueError(f"unknown provenance class: {entry.provenance_class}")
+                if (
+                    entry.provenance_class in FITTED_PROVENANCE_CLASSES
+                    and entry.fitted_parameter is None
+                ):
+                    raise ValueError(
+                        f"{entry.subterm_id}: fitted provenance requires a fitted identity"
+                    )
+                if (
+                    entry.provenance_class not in FITTED_PROVENANCE_CLASSES
+                    and entry.fitted_parameter is not None
+                ):
+                    raise ValueError(
+                        f"{entry.subterm_id}: a fitted identity requires fitted provenance"
+                    )
+            if entry.fitted_parameter is not None:
+                bundle_classes[entry.fitted_parameter].add(entry.provenance_class)
+        inconsistent = sorted(
+            identity for identity, classes in bundle_classes.items() if len(classes) > 1
+        )
+        if inconsistent:
+            raise ValueError(f"bundles mix provenance classes: {inconsistent}")
+        buckets = dict(self.fitted_parameter_buckets)
+        for identity, bucket in buckets.items():
+            if not identity:
+                raise ValueError("bucket assignments require nonempty identities")
+            if bucket not in ASSIGNABLE_DOF_BUCKETS:
+                raise ValueError(f"{identity}: unknown or reserved A18 bucket {bucket!r}")
         object.__setattr__(self, "entries", entries)
         object.__setattr__(self, "prior_floors", MappingProxyType(floors))
         object.__setattr__(self, "other_fitted_parameters", other_parameters)
+        object.__setattr__(self, "fitted_parameter_buckets", MappingProxyType(buckets))
 
     @property
     def by_subterm(self) -> Mapping[str, SubtermWeight]:
@@ -224,12 +335,26 @@ class WeightTable:
         }
         allowed = min(FITTED_DOF_CAP, self.d_power)
         used = len(parameter_names)
+        bucket_usage: DefaultDict[str, int] = defaultdict(int)
+        unassigned = []
+        for name in sorted(parameter_names):
+            bucket = self.fitted_parameter_buckets.get(name)
+            if bucket is None:
+                unassigned.append(name)
+            else:
+                bucket_usage[bucket] += 1
+        within_buckets = not unassigned and all(
+            count <= DOF_ALLOCATION[bucket] for bucket, count in bucket_usage.items()
+        )
         return DofAccount(
             d_power=self.d_power,
             allowed=allowed,
             used=used,
             remaining=max(0, allowed - used),
             within_cap=used <= allowed,
+            bucket_usage=MappingProxyType(dict(bucket_usage)),
+            unassigned_identities=tuple(unassigned),
+            within_buckets=within_buckets,
         )
 
     def validate_for_contracts(self) -> None:
@@ -273,8 +398,21 @@ class WeightTable:
         for facet_id, floor in self.prior_floors.items():
             if facet_mass[facet_id] < floor:
                 raise ValueError(f"{facet_id} mass is below its preregistered prior floor")
-        if not self.dof_account.within_cap:
+        account = self.dof_account
+        if not account.within_cap:
             raise ValueError("fitted parameter count exceeds min(20, D_power)")
+        if account.unassigned_identities:
+            raise ValueError(
+                "fitted identities lack a preregistered A18 allocation bucket: "
+                f"{sorted(account.unassigned_identities)}"
+            )
+        if not account.within_buckets:
+            over = sorted(
+                bucket
+                for bucket, count in account.bucket_usage.items()
+                if count > DOF_ALLOCATION[bucket]
+            )
+            raise ValueError(f"A18 allocation buckets exceeded: {over}")
 
     def prior_mass_disclosure(self, applicable_subterms: FrozenSet[str]) -> PriorMassDisclosure:
         """Compute PM-1 after excluding NA and diagnostic terms.
