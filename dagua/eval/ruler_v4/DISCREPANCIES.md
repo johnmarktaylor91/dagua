@@ -370,3 +370,44 @@ the production port; none of the entries below overrides a contract.
     rule beyond the contract-named set can be admitted.
     `SurrogateTermTrace.smoothing` is typed `Optional[str]` so the
     contract-named class is recordable today.
+39. V4_SPEC_r4 6.3's conformance gates are implemented at pilot tier, not
+    P5 tier, and the gap is deliberate scope (P3REVIEW OPUS5 MAJOR-1/-7,
+    FABLE M1). Shipped now: rank-fidelity machinery (`certify_rank_fidelity`,
+    fail-closed on zero comparable pairs), a deterministic stratified PILOT
+    bank (`tests/eval/ruler_v4/scene_bank.py`: 4 structural classes x 3 size
+    bands x 6 graded drawings, seeded, digest-frozen per run), per-cell
+    soft-path tau gates on that bank, and 6.2a's two pre-P3 conformance
+    numbers (L_mean-vs-L_total ordered top-2 disagreement per cell;
+    per-tier pruning power under paired, paired-CRN, and marginal
+    certificates with published pilot policy: margin 0.01, tier half-widths
+    {0, 0.02, 0.1, 0.3}). NOT shipped, P5-owned because they require the
+    frozen production bank, the fitted weight table, the JND artifact, and
+    battery-#6 adversarial geometry, none of which exist before calibration:
+    pairwise decision agreement outside the full-ruler JND region;
+    disagreement concentration on honest interval overlap; the adversarial
+    sacrificial-tail winner-retention/zero-confident-elimination gate; the
+    escalation-cost histogram; the 6.2d bias diagnostic and
+    second-order-corrected tier estimate. OWNER: P5 calibration campaign
+    (surrogate-certification stage) -- these gates run once on the frozen
+    bank against the fitted table before any tier is licensed to prune in
+    production.
+40. V4_SPEC_r4 6.2(b)'s anytime-valid confidence machinery is not
+    constructed anywhere in phase 3, and racing is single-round (P3REVIEW
+    OPUS5 MAJOR-3/-7, FABLE M2). What exists: `confidence_id` is a required
+    allocation label enforced for CONSISTENCY across every candidate
+    interval and paired certificate in a race (one race, one allocation),
+    and budget exhaustion with an eliminated incumbent fails closed to a
+    typed inconclusive result. What does NOT exist: construction or
+    validation of simultaneous/anytime-valid confidence sequences, a
+    preregistered familywise error allocation across candidates, facets,
+    and escalation rounds, a multi-round escalation ladder
+    (tier -> wider-budget tier -> full), budget concentration on near-ties,
+    or coverage validation under the actual adaptive racing policy. Callers
+    supplying ordinary fixed-sample z-intervals under a shared label WILL be
+    treated as certified: the label is caller-asserted trust, not a checked
+    property. OWNER: P5 calibration campaign (racing-activation stage) --
+    the confidence-sequence construction and the multi-round ladder are
+    licensed only with the fitted tier definitions, and no production
+    selection may rely on `race_candidates` pruning before that lands;
+    until then every published score stays full-tier (6.1's "only B2/full
+    enters tallies" already guarantees tally integrity independently).
