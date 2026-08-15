@@ -1259,3 +1259,126 @@ def test_paired_certificate_covers_bottleneck_shared_level_exchange_rate() -> No
     assert result.eliminations == ()
     assert sorted(calls) == ["A", "B"]
     assert result.winner_id == "A"
+
+
+def _u33_scene(
+    tree_parents: "Optional[Tuple[Optional[int], ...]]" = None,
+    tree_depths: "Optional[Tuple[int, ...]]" = None,
+    tree_layout: "Optional[str]" = None,
+) -> Scene:
+    """Ingest the U33 disposition repro scene with an optional tree block.
+
+    Parameters
+    ----------
+    tree_parents : tuple[int | None, ...] or None
+        Declared parent ids, if any.
+    tree_depths : tuple[int, ...] or None
+        Declared integer depths, if any.
+    tree_layout : str or None
+        Declared tree layout mode, if any.
+
+    Returns
+    -------
+    Scene
+        Validated static scene.
+    """
+
+    from dataclasses import replace
+
+    positions = torch.tensor([[0.0, 0.0], [2.0, 0.0], [4.0, 0.0]], dtype=torch.float64)
+    graph = GraphSemantics(
+        ("n0", "n1", "n2"),
+        ((0, 1), (1, 2)),
+        flow_axis=(1.0, 0.0),
+    )
+    graph = replace(
+        graph,
+        tree_parents=tree_parents,
+        tree_depths=tree_depths,
+        tree_layout=tree_layout,
+    )
+    routes = tuple(
+        Route(index, torch.stack((positions[source], positions[target])))
+        for index, (source, target) in enumerate(graph.edges)
+    )
+    result = ingest(
+        graph,
+        DrawingScene(positions, routes),
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes"})),
+    )
+    assert isinstance(result, ValidScene)
+    return result.scene
+
+
+def test_u33_absent_tree_semantics_is_na_not_invalid() -> None:
+    """U33 on a scene with NO declared tree block is typed NA, never INVALID.
+
+    Banked from the P3FIX2 conformance fix (commit 531eadc7): the P4 port
+    refused undeclared-tree scenes as INVALID:TREE_SEMANTICS_ABSENT, which
+    made whole 6.3 bank classes unscorable. The frozen contract pins the
+    other disposition: "U33 is applicable to a nontrivial declared rooted
+    tree/forest. Absence is `NA:TREE_SEMANTICS_ABSENT`; malformed
+    parent/depth/order data are invalid" (U33.md, "Input schema and
+    applicability"). DISCREPANCIES entry 41.
+    """
+
+    from dagua.eval.ruler_v4.directed import U33
+
+    result = U33(_u33_scene())
+    assert result.state is ResultState.NA
+    assert result.reason == "TREE_SEMANTICS_ABSENT"
+
+    # A declared but trivial tree (roots without a single child anywhere) is
+    # outside "a nontrivial declared rooted tree/forest": NA, same reason.
+    trivial = U33(
+        _u33_scene(
+            tree_parents=(None, None, None),
+            tree_depths=(0, 0, 0),
+            tree_layout="layered",
+        )
+    )
+    assert trivial.state is ResultState.NA
+    assert trivial.reason == "TREE_SEMANTICS_ABSENT"
+
+
+def test_u33_partial_or_malformed_tree_block_stays_invalid() -> None:
+    """A partially declared or malformed tree block is INVALID, not NA.
+
+    "Missing required tree fields is invalid, not NA per drawing" (U33.md,
+    "Failure and envelope"): partial declaration is not absence. Malformed
+    parent/depth/order data are invalid per the applicability rule.
+    DISCREPANCIES entry 41.
+    """
+
+    from dagua.eval.ruler_v4.directed import U33
+
+    partial = U33(
+        _u33_scene(
+            tree_parents=(None, 0, 1),
+            tree_depths=(0, 1, 2),
+            tree_layout=None,
+        )
+    )
+    assert partial.state is ResultState.INVALID
+    assert partial.reason == "missing_required_tree_fields"
+
+    bad_token = U33(
+        _u33_scene(
+            tree_parents=(None, 0, 1),
+            tree_depths=(0, 1, 2),
+            tree_layout="spiral",
+        )
+    )
+    assert bad_token.state is ResultState.INVALID
+    assert bad_token.reason == "invalid_tree_layout"
+
+    depth_mismatch = U33(
+        _u33_scene(
+            tree_parents=(None, 0, 1),
+            tree_depths=(0, 2, 3),
+            tree_layout="layered",
+        )
+    )
+    assert depth_mismatch.state is ResultState.INVALID
+    assert depth_mismatch.reason == "malformed_tree_semantics"

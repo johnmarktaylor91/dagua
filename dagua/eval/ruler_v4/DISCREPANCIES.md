@@ -425,3 +425,11 @@ the production port; none of the entries below overrides a contract.
     depth mismatch) stay INVALID. Surfaced by the 6.3 pilot bank's
     clustered class, whose scenes declare no tree semantics and were
     unscorable end to end under the port's refusal.
+    P3FIX3 refinement: NA is reserved for FULL absence of the tree block
+    (no parents, no depths, no layout). A partially declared tree is not
+    absence -- "Missing required tree fields is invalid, not NA per
+    drawing" (U33.md, "Failure and envelope") -- so declaring some tree
+    fields while omitting others returns
+    `invalid_result("missing_required_tree_fields")`. Both dispositions
+    are banked with their citations in
+    `tests/eval/ruler_v4/test_review_repros.py`.
