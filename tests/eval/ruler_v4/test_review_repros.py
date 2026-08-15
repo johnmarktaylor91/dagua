@@ -139,9 +139,12 @@ def test_scattered_cluster_scene_ingests_and_every_facet_evaluates() -> None:
     assert isinstance(result, ValidScene)
     for facet_id in sorted(FACET_FUNCTIONS):
         evaluate_facet(facet_id, result.scene)
-    punished = evaluate_facet("U30", result.scene, alpha_grid_index=1)
-    assert punished.state is ResultState.VALUE
-    assert punished.value is not None and punished.value > 0.0
+    # The load-bearing claim is ingest + a typed result on the fallback path.
+    # Scattering is NOT punished by U29/U30 (measured: the label lands in
+    # empty space and sub-term (iii) sees no occluder; DISCREPANCIES.md 19).
+    scored = evaluate_facet("U30", result.scene, alpha_grid_index=1)
+    assert scored.state is ResultState.VALUE
+    assert scored.value is not None
 
 
 # --- P4REVERIFY3_FABLE blocker 4: the global blend must stay total on ---
@@ -206,6 +209,67 @@ def test_smoothstep_never_exceeds_one() -> None:
     )
     assert float(smoothstep(overshoot_input)) <= 1.0
     assert float(smoothstep(torch.tensor(1.0, dtype=torch.float64))) == 1.0
+
+
+# --- P4REVERIFY2..4 recurring minor (fourth round naming it): no test ---
+# asserted U17 golden 11 / U27 golden 12 -- the CC-20 property the whole A6
+# input-only repair exists to guarantee. The clearance budgets a_v (U17 sec
+# 6b) and a_c (U27 sec 6b) are pure functions of the quantities pinned here.
+
+
+def test_input_only_quantities_are_bit_identical_across_candidate_drawings() -> None:
+    """u, extents, masses, and applicability never depend on positions.
+
+    Across candidate drawings of one (graph, StyleContract), every input to
+    the a_v / a_c budget constructions -- the intrinsic unit, the derived
+    node and label box half-extents, the node masses, and each facet's
+    applicability -- must be bit-identical (U17 golden 11, U27 golden 12).
+    """
+
+    from dagua.eval.ruler_v4 import evaluate_facet
+
+    graph = GraphSemantics(
+        tuple(f"n{index}" for index in range(9)),
+        tuple((index, index + 1) for index in range(8)) + ((0, 4), (2, 6)),
+        node_masses=tuple(1.0 + 0.25 * index for index in range(9)),
+        clusters={"left": (0, 1, 2, 3), "right": (5, 6, 7, 8)},
+    )
+    generator = torch.Generator().manual_seed(11)
+    candidates = [
+        30.0 * torch.rand((9, 2), generator=generator, dtype=torch.float64) for _ in range(4)
+    ]
+    candidates.append(
+        torch.tensor([[4.0 * index, 0.5 * index**2] for index in range(9)], dtype=torch.float64)
+    )
+    candidates.append(1e3 * candidates[0])
+    fingerprints = []
+    for positions in candidates:
+        routes = tuple(
+            Route(index, torch.stack((positions[source], positions[target])))
+            for index, (source, target) in enumerate(graph.edges)
+        )
+        result = ingest(
+            graph,
+            DrawingScene(positions, routes),
+            StyleContract(),
+            ObservationProfile(visible_channels=frozenset({"nodes", "routes", "cluster_labels"})),
+        )
+        assert isinstance(result, ValidScene)
+        scene = result.scene
+        u17 = evaluate_facet("U17", scene, alpha_grid_index=1)
+        u27 = evaluate_facet("U27", scene, alpha_grid_index=1)
+        fingerprints.append(
+            (
+                scene.intrinsic_unit,
+                tuple(tuple(box.half_extents.tolist()) for box in scene.node_boxes),
+                tuple(tuple(box.half_extents.tolist()) for box in scene.node_label_boxes),
+                tuple(scene.graph.node_masses),
+                u17.state,
+                u17.raw["pair_count"],
+                u27.state,
+            )
+        )
+    assert all(item == fingerprints[0] for item in fingerprints[1:])
 
 
 def test_snap_unit_absorbs_dust_and_passes_real_violations() -> None:
@@ -482,7 +546,10 @@ def test_u22_ranks_only_graph_keeps_layer_profile_target() -> None:
     )
     facet = U22(_node_scene(positions, ranks=(0, 1, 1, 2, 2, 3, 3, 4)))
     assert facet.state is ResultState.VALUE
-    # max_layer_width / n_layers = 2/5, folded to the >= 1 side of the
-    # direction-free rotation frame.
-    assert facet.raw["target"] == pytest.approx(2.5, abs=0.0)
+    # Contract quantity (U22.md sec 6): "A_target = max_layer_width /
+    # n_layers" = 2/5 = 0.4. The rotation-scan A_obs of the direction-free
+    # frame is >= 1 by construction, so DISCREPANCIES.md entry 26 folds the
+    # orientation-less target onto the same side of unity: 1 / 0.4 = 2.5.
+    profile = 2.0 / 5.0
+    assert facet.raw["target"] == pytest.approx(1.0 / profile, abs=0.0)
     assert facet.raw["measurement"] == "frozen_direction_set"
