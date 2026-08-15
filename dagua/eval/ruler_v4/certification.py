@@ -119,17 +119,24 @@ class RankFidelityResult:
     Parameters
     ----------
     tau : float
-        Kendall tau-b between surrogate and true losses.
+        Kendall tau-b between surrogate and true losses. Reported as ``0.0``
+        when no comparable pair exists; that batch is never certified.
     threshold : float
         Explicit fit-time acceptance threshold.
     certified : bool
-        Whether ``tau >= threshold``.
+        Whether ``tau >= threshold`` AND at least one comparable pair
+        exists. A batch of joint ties carries zero rank information and
+        fails closed rather than certifying vacuously.
     comparable_pairs : int
         Pair count after joint ties are excluded.
     concordant_pairs : int
         Concordant pair count.
     discordant_pairs : int
         Discordant pair count.
+    true_tie_pairs : int
+        Pairs tied on the true losses only.
+    surrogate_tie_pairs : int
+        Pairs tied on the surrogate losses only.
     """
 
     tau: float
@@ -138,6 +145,8 @@ class RankFidelityResult:
     comparable_pairs: int
     concordant_pairs: int
     discordant_pairs: int
+    true_tie_pairs: int
+    surrogate_tie_pairs: int
 
 
 @dataclass(frozen=True)
@@ -401,17 +410,22 @@ def certify_rank_fidelity(
                 concordant += 1
             else:
                 discordant += 1
+    comparable = concordant + discordant
     denominator = math.sqrt(
         (concordant + discordant + true_ties) * (concordant + discordant + soft_ties)
     )
-    tau = (concordant - discordant) / denominator if denominator > 0.0 else 1.0
+    # Zero comparable pairs carry zero rank information: fail closed with an
+    # uncertifiable result and published tie counts instead of a vacuous pass.
+    tau = (concordant - discordant) / denominator if denominator > 0.0 else 0.0
     return RankFidelityResult(
         tau=tau,
         threshold=threshold,
-        certified=tau >= threshold,
-        comparable_pairs=concordant + discordant,
+        certified=comparable > 0 and tau >= threshold,
+        comparable_pairs=comparable,
         concordant_pairs=concordant,
         discordant_pairs=discordant,
+        true_tie_pairs=true_ties,
+        surrogate_tie_pairs=soft_ties,
     )
 
 

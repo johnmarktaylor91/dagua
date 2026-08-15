@@ -26,6 +26,7 @@ from dagua.eval.ruler_v4.ingestion import ingest, ingest_record, ingest_temporal
 from dagua.eval.ruler_v4.racing import (
     EliminationRecord,
     EliminationRule,
+    InconsistentCertificateError,
     PairedDifferenceCertificate,
     PairedTermRegion,
     RaceCandidate,
@@ -104,6 +105,7 @@ __all__ = [
     "OutputType",
     "ParameterProvenance",
     "PairedDifferenceCertificate",
+    "InconsistentCertificateError",
     "PairedTermRegion",
     "PriorMassDisclosure",
     "RaceCandidate",

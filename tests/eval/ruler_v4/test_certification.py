@@ -92,6 +92,34 @@ def test_rank_fidelity_reports_tau_and_explicit_threshold() -> None:
     assert result.concordant_pairs == 6
 
 
+def test_rank_fidelity_with_zero_comparable_pairs_fails_closed() -> None:
+    """A batch of joint ties never certifies (P3REVIEW OPUS5 MAJOR-2)."""
+
+    result = certify_rank_fidelity(
+        [0.3, 0.3, 0.3],
+        [0.7, 0.7, 0.7],
+        threshold=0.85,
+    )
+
+    assert result.comparable_pairs == 0
+    assert not result.certified
+    assert result.tau == 0.0
+
+
+def test_rank_fidelity_publishes_one_sided_tie_counts() -> None:
+    """Pairs tied on exactly one side are published, not silently dropped."""
+
+    result = certify_rank_fidelity(
+        [0.1, 0.1, 0.4],
+        [0.2, 0.3, 0.9],
+        threshold=0.85,
+    )
+
+    assert result.true_tie_pairs == 1
+    assert result.surrogate_tie_pairs == 0
+    assert result.comparable_pairs == 2
+
+
 @pytest.mark.parametrize("value", [0.2, 0.5, 0.8])
 def test_gradient_sanity_agrees_and_improves_exact(value: float) -> None:
     """Three analytic probes agree with finite differences and improve exact."""
