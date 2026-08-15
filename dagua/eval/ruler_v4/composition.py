@@ -137,7 +137,13 @@ class SubtermContribution:
 
 @dataclass(frozen=True)
 class GroupContribution:
-    """Publish one applicable reporting group's composed loss.
+    """Publish one reporting group's rolled-up loss attribution.
+
+    Under the shipped ``P_MEAN`` family the group label is a pure reporting
+    rollup with no weight semantics of its own (V4_SPEC_r4 3.3): relabelling
+    groups never changes ``l_total``. Only the optional soft-bottleneck family
+    consumes the partition, through its explicit per-group allowances
+    (DISCREPANCIES entry 33).
 
     Parameters
     ----------
@@ -331,6 +337,12 @@ def compose(
 ) -> CompositionResult:
     """Compose independent facets in loss space with exact NA exclusion.
 
+    The shipped ``P_MEAN`` family aggregates the frozen scored sub-term rows
+    directly; ``SubtermWeight.group`` is a reporting rollup with no weight
+    semantics (V4_SPEC_r4 3.3). The optional soft-bottleneck family consumes
+    the group partition through its explicit allowances; that partition is a
+    P5/freeze input (DISCREPANCIES entry 33).
+
     Parameters
     ----------
     facet_results : mapping[str, FacetResult]
@@ -389,8 +401,12 @@ def compose(
     l_mean = math.fsum(group.loss * group.normalized_mass for group in groups)
     if profile.family is CompositionFamily.P_MEAN:
         assert profile.power is not None
+        # The shipped default composes over the frozen scored sub-term rows,
+        # the finest partition already frozen in the contract inventory, so no
+        # free-form label carries weight semantics (V4_SPEC_r4 3.3) and a
+        # catastrophic row inside a populated group stays visible at p > 1.
         l_total = math.fsum(
-            group.normalized_mass * group.loss**profile.power for group in groups
+            (entry.weight / total_mass) * value**profile.power for entry, value in active_entries
         ) ** (1.0 / profile.power)
         l_bottleneck = None
     else:
