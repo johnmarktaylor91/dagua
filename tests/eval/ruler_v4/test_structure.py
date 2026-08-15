@@ -237,6 +237,135 @@ def test_u22_unknown_declared_class_is_typed_invalid() -> None:
     assert result.reason == "unknown_declared_class"
 
 
+# --- U22 section 6 class-exemption table goldens (P4REVERIFY5 MINOR-1): ---
+# every multiplier entry, in both orientations where a direction exists.
+# kappa_class constants are elongation magnitudes; in the signed declared-axis
+# frame each maps through its class's elongation direction (DISCREPANCIES.md
+# entry 30).
+
+
+def _soft_pos(argument: float) -> float:
+    """Evaluate U22 section 6's frozen C^1 hinge."""
+
+    return 0.0 if argument <= 0.0 else argument**2 / (argument + 0.5)
+
+
+def _u22_closed_form(observed: float, target: float) -> float:
+    """Evaluate D_U22 from section 6's frozen normalization."""
+
+    excess = _soft_pos(abs(math.log(observed / target)) - math.log(3.0))
+    return excess / (1.0 + excess)
+
+
+def test_u22_declared_path_target_is_reciprocal_kappa_in_signed_frame() -> None:
+    """path/chain kappa = 8 elongates along the axis: signed target 1/8."""
+
+    along = torch.tensor([[0.0, 3.0 * index] for index in range(10)], dtype=torch.float64)
+    across = torch.tensor([[3.0 * index, 0.0] for index in range(10)], dtype=torch.float64)
+    for declared in ("path", "chain"):
+        options = {"flow_axis": (0.0, 1.0), "declared_graph_class": declared}
+        correct = U22(_scene(along, (), options))
+        wrong = U22(_scene(across, (), options))
+        assert correct.raw["target"] == pytest.approx(1.0 / 8.0, abs=0.0)
+        # Drawing a declared path along its declared flow must beat drawing
+        # it at 90 degrees (V4_SPEC 5.3 #17 mutation direction).
+        assert correct.value < 0.02 < 0.75 < wrong.value
+        assert correct.value == pytest.approx(
+            _u22_closed_form(correct.raw["aspect_ratio"], 1.0 / 8.0), abs=1e-12
+        )
+
+
+def test_u22_declared_tree_breadth_fold_passes_through_signed_frame() -> None:
+    """tree max(1, b/d) is already breadth-over-depth: wide is expected."""
+
+    wide = torch.tensor(
+        [[0.0, 0.0], [-4.5, 3.0], [-1.5, 3.0], [1.5, 3.0], [4.5, 3.0]], dtype=torch.float64
+    )
+    deep = torch.tensor(
+        [[0.0, 0.0], [3.0, -4.5], [3.0, -1.5], [3.0, 1.5], [3.0, 4.5]], dtype=torch.float64
+    )
+    options = {
+        "flow_axis": (0.0, 1.0),
+        "declared_graph_class": "tree",
+        "tree_depths": (0, 2, 2, 2, 2),
+    }
+    correct = U22(_scene(wide, (), options))
+    wrong = U22(_scene(deep, (), options))
+    # b = 4 leaves on one level, depth d = 2: kappa = max(1, b/d) = 2.
+    assert correct.raw["target"] == pytest.approx(2.0, abs=0.0)
+    assert correct.value == pytest.approx(0.0, abs=0.0)
+    assert wrong.value is not None and wrong.value > 0.4
+
+
+def test_u22_declared_grid_aspect_is_signed_and_orientation_sensitive() -> None:
+    """grid dims are width/height in the signed frame; mis-declaring pays."""
+
+    positions = torch.tensor(
+        [[3.0 * column, 3.0 * row] for row in range(2) for column in range(4)],
+        dtype=torch.float64,
+    )
+    correct = U22(
+        _scene(
+            positions,
+            (),
+            {
+                "flow_axis": (0.0, 1.0),
+                "declared_graph_class": "grid",
+                "lattice_dimensions": (4, 2),
+            },
+        )
+    )
+    mis_declared = U22(
+        _scene(
+            positions,
+            (),
+            {
+                "flow_axis": (0.0, 1.0),
+                "declared_graph_class": "grid",
+                "lattice_dimensions": (2, 4),
+            },
+        )
+    )
+    # A 4x3u-by-1x3u lattice of unit-mass points has exact aspect 2.
+    assert correct.raw["aspect_ratio"] == pytest.approx(2.0, abs=1e-12)
+    assert correct.value == pytest.approx(0.0, abs=0.0)
+    # Mis-declared dims: x = |log(2 / 0.5)|, through the frozen hinge.
+    assert mis_declared.value == pytest.approx(_u22_closed_form(2.0, 0.5), abs=1e-12)
+    assert mis_declared.value == pytest.approx(0.095079, abs=1e-6)
+
+
+def test_u22_direction_free_grid_target_folds_onto_elongation_side() -> None:
+    """Without an axis the sub-unit declared aspect folds to >= 1 (entry 26)."""
+
+    positions = torch.tensor(
+        [[3.0 * column, 3.0 * row] for row in range(4) for column in range(2)],
+        dtype=torch.float64,
+    )
+    facet = U22(
+        _scene(
+            positions,
+            (),
+            {"declared_graph_class": "grid", "lattice_dimensions": (2, 4)},
+        )
+    )
+    assert facet.raw["measurement"] == "frozen_direction_set"
+    assert facet.raw["target"] == pytest.approx(2.0, abs=0.0)
+    assert facet.value == pytest.approx(0.0, abs=0.0)
+
+
+def test_u22_declared_ring_keeps_unit_target() -> None:
+    """cycle/ring kappa = 1 is convention-free; a round ring is at target."""
+
+    angles = torch.arange(8, dtype=torch.float64) * (2.0 * math.pi / 8.0)
+    positions = 6.0 * torch.stack((torch.cos(angles), torch.sin(angles)), dim=1)
+    for declared in ("cycle", "ring"):
+        facet = U22(
+            _scene(positions, (), {"flow_axis": (0.0, 1.0), "declared_graph_class": declared})
+        )
+        assert facet.raw["target"] == pytest.approx(1.0, abs=0.0)
+        assert facet.value == pytest.approx(0.0, abs=0.0)
+
+
 def test_u23_symmetric_fixture_is_balanced(semantic_scene: Scene) -> None:
     """U23 returns exact zero for a centered symmetric drawing."""
 
