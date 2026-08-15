@@ -21,6 +21,7 @@ from dagua.eval.ruler_v4._util import (
     resolved_routes,
     selected_alpha_grid_offset,
     smoothstep,
+    snap_unit,
     soft_pos,
 )
 from dagua.eval.ruler_v4.frames import (
@@ -100,7 +101,7 @@ def U17(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 )
             for grid_index, (alpha_clear, alpha_high) in enumerate(grid):
                 alpha = alpha_clear * (1.0 - floor_blend) + (alpha_clear * floor_blend * alpha_high)
-                pair_defect = alpha * absolute + (1.0 - alpha) * excess
+                pair_defect = snap_unit(alpha * absolute + (1.0 - alpha) * excess)
                 if overlap_area > 0.0:
                     left_area = float(4.0 * torch.prod(scene.node_boxes[left].half_extents))
                     left_effective = pair_defect * (0.5 + 0.5 * min(1.0, overlap_area / left_area))
@@ -224,7 +225,7 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
         )
         for grid_index, (alpha_clear, alpha_high) in enumerate(grid):
             alpha = alpha_clear * (1.0 - floor_blend) + (alpha_clear * floor_blend * alpha_high)
-            defect = alpha * absolute + (1.0 - alpha) * excess
+            defect = snap_unit(alpha * absolute + (1.0 - alpha) * excess)
             if occluded_fraction is not None:
                 defect *= 0.5 + 0.5 * occluded_fraction
             survival[grid_index][label_index][class_index] *= 1.0 - defect

@@ -11,7 +11,7 @@ from typing import DefaultDict, List
 
 import torch
 
-from dagua.eval.ruler_v4._util import global_blend, graph_distances, primary_isotonic_fit
+from dagua.eval.ruler_v4._util import global_blend, graph_distances, primary_isotonic_fit, snap_unit
 from dagua.eval.ruler_v4.scene import FacetResult, Scene, na_result, value_result
 from dagua.eval.ruler_v4.structure import _distance_strata, _stress_from_fit
 
@@ -136,7 +136,7 @@ def U36(scene: Scene) -> FacetResult:
                 scaled = max(-60.0, min(60.0, margin / 0.03))
                 burdens.append(1.0 / (1.0 + math.exp(-scaled)))
         if burdens:
-            node_defects.append(sum(burdens) / len(burdens))
+            node_defects.append(snap_unit(sum(burdens) / len(burdens)))
             node_weights.append(float(len(burdens)))
             comparison_count += len(burdens)
     if not node_defects:
@@ -168,10 +168,10 @@ def U37(scene: Scene) -> FacetResult:
         argument = float((torch.log(widths[left]) - torch.log(widths[right])) / 0.02)
         argument = max(-60.0, min(60.0, argument))
         order_losses.append(1.0 / (1.0 + math.exp(-argument)))
-    per_edge = float(torch.mean(edge_losses))
+    per_edge = snap_unit(float(torch.mean(edge_losses)))
     if order_losses:
-        order_loss = sum(order_losses) / len(order_losses)
-        defect = 0.75 * per_edge + 0.25 * order_loss
+        order_loss = snap_unit(sum(order_losses) / len(order_losses))
+        defect = snap_unit(0.75 * per_edge + 0.25 * order_loss)
     else:
         order_loss = 0.0
         defect = per_edge

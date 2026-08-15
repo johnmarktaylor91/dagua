@@ -168,6 +168,38 @@ def bounded(value: float) -> float:
     return nonnegative / (1.0 + nonnegative)
 
 
+_UNIT_DUST = 1e-12
+
+
+def snap_unit(value: float) -> float:
+    """Snap float dust off an analytically-``[0, 1]`` quantity.
+
+    Producers whose closed form is bounded to the unit interval can still
+    leave it by accumulated rounding: signed log sums (Jensen-Shannon
+    divergences), renormalized convex combinations, and equal/weighted
+    means of in-range populations. That dust is clamped here, at the
+    producer. Excess beyond ``_UNIT_DUST`` is a real range violation and
+    is returned unchanged so the downstream ``[0, 1]`` guards
+    (``value_result``, the blend domain checks) still raise on it.
+
+    Parameters
+    ----------
+    value : float
+        Producer output whose analytic range is ``[0, 1]``.
+
+    Returns
+    -------
+    float
+        The value with sub-dust excess clamped into ``[0, 1]``.
+    """
+
+    if -_UNIT_DUST <= value < 0.0:
+        return 0.0
+    if 1.0 < value <= 1.0 + _UNIT_DUST:
+        return 1.0
+    return value
+
+
 def mean_result(
     facet_id: str,
     values: Mapping[str, float],
@@ -219,7 +251,9 @@ def mean_result(
             survival *= (1.0 - float(values[key])) ** weight
         result = 1.0 - survival
     else:
-        result = sum(effective[key] * float(values[key]) for key in effective)
+        # The renormalized row weights are a convex combination only up to
+        # rounding; on saturated rows the sum can carry one ULP of dust.
+        result = snap_unit(sum(effective[key] * float(values[key]) for key in effective))
     return value_result(result, values, raw)
 
 

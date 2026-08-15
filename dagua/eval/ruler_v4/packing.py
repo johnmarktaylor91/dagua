@@ -19,6 +19,7 @@ from dagua.eval.ruler_v4._util import (
     resolved_routes,
     route_segments,
     smoothstep,
+    snap_unit,
 )
 from dagua.eval.ruler_v4.frames import RobustFrame, robust_frame
 from dagua.eval.ruler_v4.legibility import _box_segment_clearance, _segment_segment_distance
@@ -101,7 +102,7 @@ def U38(scene: Scene) -> FacetResult:
     )
     equal_mean = sum(component_losses) / len(component_losses)
     tail = _equal_cvar(component_losses, 0.20)
-    clear = 0.50 * mass_mean + 0.25 * equal_mean + 0.25 * tail
+    clear = snap_unit(0.50 * mass_mean + 0.25 * equal_mean + 0.25 * tail)
 
     global_frame = robust_frame(scene.positions, scene.intrinsic_unit)
     component_areas = _raster_component_areas(
@@ -120,7 +121,9 @@ def U38(scene: Scene) -> FacetResult:
             jsd += 0.5 * area * math.log(area / middle)
         if mass > 0.0:
             jsd += 0.5 * mass * math.log(mass / middle)
-    proportionality = jsd / math.log(2.0)
+    # The Jensen-Shannon divergence is analytically >= 0, but the signed log
+    # sum returns ~-8e-17 when the two share vectors agree to within dust.
+    proportionality = snap_unit(jsd / math.log(2.0))
     values = {
         "U38.L_clear": clear,
         "U38.L_pack": pack,
