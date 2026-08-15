@@ -208,6 +208,21 @@ def test_smoothstep_never_exceeds_one() -> None:
     assert float(smoothstep(torch.tensor(1.0, dtype=torch.float64))) == 1.0
 
 
+def test_snap_unit_absorbs_dust_and_passes_real_violations() -> None:
+    """The producer-side snap clamps <= 1e-12 excess and nothing more."""
+
+    from dagua.eval.ruler_v4._util import snap_unit
+
+    assert snap_unit(-8.008566e-17) == 0.0
+    assert snap_unit(1.0 + 2.220446049250313e-16) == 1.0
+    assert snap_unit(0.0) == 0.0
+    assert snap_unit(1.0) == 1.0
+    assert snap_unit(0.5) == 0.5
+    # Beyond dust is a real range violation: it must reach the guard intact.
+    assert snap_unit(-1e-9) == -1e-9
+    assert snap_unit(1.0 + 1e-9) == 1.0 + 1e-9
+
+
 def test_u30_derived_placement_scores_on_every_alpha_row() -> None:
     """Labels landing exactly on pad_target must score, not crash the blend."""
 
@@ -334,6 +349,34 @@ def test_u11_grid_of_paths_scores_interior_nodes_clean() -> None:
     )
     facet = U11(_node_scene(torch.tensor(points, dtype=torch.float64), edges=edges))
     assert facet.subterms["U11.v"] == pytest.approx(0.0, abs=1e-12)
+
+
+# --- P4REVERIFY4_OPUS blocker 3: U38's Jensen-Shannon divergence is ---
+# analytically >= 0, but the signed log sum returns ~-8e-17 when the area
+# and mass shares agree to within dust, and value_result's unclamped guard
+# raised an untyped ValueError. Opus's edgeless-column sweep raised at
+# N in {8, 9, 23} of the 39 sizes 2..40; this port of the fixture raises
+# at N = 31 at c2a40b0c (same defect, same guard, box sizes differ).
+
+
+@pytest.mark.parametrize("size", (8, 9, 23, 31))
+def test_u38_edgeless_column_scores_instead_of_crashing(size: int) -> None:
+    """Every single-node component column returns a typed U38 result."""
+
+    from dagua.eval.ruler_v4.packing import U38
+
+    positions = torch.tensor([[0.0, 3.0 * index] for index in range(size)], dtype=torch.float64)
+    graph = GraphSemantics(tuple(f"n{index}" for index in range(size)), ())
+    result = ingest(
+        graph,
+        DrawingScene(positions),
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes"})),
+    )
+    assert isinstance(result, ValidScene)
+    facet = U38(result.scene)
+    assert facet.state is ResultState.VALUE
+    assert facet.subterms["U38.L_prop"] >= 0.0
 
 
 # --- P4REVERIFY4_OPUS blocker 2: the declared-axis branch compared ---

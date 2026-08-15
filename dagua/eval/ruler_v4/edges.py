@@ -23,6 +23,7 @@ from dagua.eval.ruler_v4._util import (
     resolved_routes,
     route_segments,
     smoothstep,
+    snap_unit,
 )
 from dagua.eval.ruler_v4.scene import (
     BoxGeometry,
@@ -361,7 +362,9 @@ def U08(scene: Scene) -> FacetResult:
             defects.append(0.0)
             continue
         node_defect = 0.1 * math.log(weighted_exponentials / total_weight)
-        defects.append(fade * node_defect)
+        # The log-sum-exp mean is analytically in [0, 1] for pair defects in
+        # [0, 1]; the normalized mean can carry one ULP of dust either side.
+        defects.append(snap_unit(fade * node_defect))
     if not defects:
         return na_result("no_high_degree_nodes")
     defect = global_blend(defects)
@@ -968,7 +971,7 @@ def U11(scene: Scene) -> FacetResult:
                             -((_oriented_angle(left[1], right[1]) / math.radians(15.0)) ** 2)
                         )
                     )
-            node_defects.append(sum(confusability) / len(confusability))
+            node_defects.append(snap_unit(sum(confusability) / len(confusability)))
             node_weights.append(float(len(records)))
         if node_defects:
             values["U11.v"] = global_blend(node_defects, node_weights)

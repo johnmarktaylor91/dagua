@@ -21,6 +21,7 @@ from dagua.eval.ruler_v4._util import (
     resolved_routes,
     selected_alpha_grid_offset,
     smoothstep,
+    snap_unit,
     soft_pos,
 )
 from dagua.eval.ruler_v4.frames import RobustFrame, robust_frame
@@ -1073,7 +1074,7 @@ def _alpha_grid_for_budget(scene: Scene, budget: float) -> Tuple[float, ...]:
     argument = (budget - floor) / (0.5 * floor)
     blend = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, argument))))
     return tuple(
-        alpha_clear * (1.0 - blend) + alpha_clear * blend * alpha_high
+        snap_unit(alpha_clear * (1.0 - blend) + alpha_clear * blend * alpha_high)
         for _, alpha_clear, alpha_high in ALPHA_GRID
     )
 
@@ -1361,7 +1362,7 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 alpha = alpha_clear * (1.0 - floor_blend) + (alpha_clear * floor_blend * alpha_high)
                 node_intrusions_by_grid[grid_index].append(
                     _interim_cluster_severity(
-                        alpha * absolute + (1.0 - alpha) * excess,
+                        snap_unit(alpha * absolute + (1.0 - alpha) * excess),
                         1.0,
                         1.0,
                         subject_is_lower=False,
