@@ -625,3 +625,79 @@ def test_u22_declared_path_rewards_drawing_along_its_declared_axis() -> None:
     assert wrong.value == pytest.approx(0.791270, abs=1e-6)
     # The regression's signature was this exact pair, swapped.
     assert correct.value < 0.02 < 0.75 < wrong.value
+
+
+# --- P2REVIEW_OPUS blocker 1: the free-form reporting-group string was ---
+# score-visible under p > 1 (relabelling alone moved l_total 0.4583 -> 0.3606
+# on identical rows). V4_SPEC_r4 3.3: groups are a reporting rollup with no
+# weight semantics of their own.
+
+
+def _relabel_probe_table(groups: Tuple[str, ...]):
+    """Build the reviewer's four-row probe table under one group labelling.
+
+    Parameters
+    ----------
+    groups : tuple[str, ...]
+        One reporting-group label per row.
+
+    Returns
+    -------
+    WeightTable
+        Four unit-mass rows.
+    """
+
+    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+
+    return WeightTable(
+        entries=tuple(
+            SubtermWeight(f"F{index}.x", f"F{index}", group, 1.0)
+            for index, group in enumerate(groups)
+        ),
+        d_power=0,
+    )
+
+
+def test_group_relabelling_is_score_inert_under_the_shipped_p_mean() -> None:
+    """The Opus P2 probe: (0.9, 0.1, 0.1, 0.1) at p=2 under three labellings."""
+
+    from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile, compose
+    from dagua.eval.ruler_v4.scene import value_result
+
+    results = {
+        f"F{index}": value_result(value, {f"F{index}.x": value})
+        for index, value in enumerate((0.9, 0.1, 0.1, 0.1))
+    }
+    profile = CompositionProfile(CompositionFamily.P_MEAN, power=2.0)
+    labellings = (
+        ("A", "B", "B", "B"),
+        ("A", "A", "B", "B"),
+        ("A", "B", "C", "D"),
+        ("A", "A", "A", "A"),
+    )
+    totals = {
+        compose(results, _relabel_probe_table(labels), profile).l_total for labels in labellings
+    }
+    assert len(totals) == 1
+
+
+def test_p_mean_sees_a_catastrophic_row_inside_a_populated_group() -> None:
+    """The Opus P2 within-group probe: (1,0,...) != (0.111...,) at p > 1."""
+
+    from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile, compose
+    from dagua.eval.ruler_v4.scene import value_result
+    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+
+    table = WeightTable(
+        entries=tuple(SubtermWeight(f"A.{index}", "A", "one_group", 1.0) for index in range(9)),
+        d_power=0,
+    )
+    concentrated = {
+        "A": value_result(1.0, {f"A.{index}": 1.0 if index == 0 else 0.0 for index in range(9)})
+    }
+    diffuse = {"A": value_result(1.0 / 9.0, {f"A.{index}": 1.0 / 9.0 for index in range(9)})}
+    profile = CompositionProfile(CompositionFamily.P_MEAN, power=2.0)
+    concentrated_result = compose(concentrated, table, profile)
+    diffuse_result = compose(diffuse, table, profile)
+    assert concentrated_result.l_mean == pytest.approx(diffuse_result.l_mean)
+    assert concentrated_result.l_total > diffuse_result.l_total
