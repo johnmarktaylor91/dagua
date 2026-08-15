@@ -460,9 +460,14 @@ def U20a(scene: Scene) -> FacetResult:
     if core.shape[0] < 2:
         rank_collapse = 1.0
     else:
-        centered = _rank_residual_core(scene, core, core_mask, frame.center)
-        singular = torch.linalg.svdvals(centered)
-        ratio = float(singular[1] / singular[0]) if float(singular[0]) > 0.0 else 1.0
+        ratio = _isotropy_quotient(core - frame.center)
+        if scene.graph.ranks is not None and scene.graph.flow_axis is not None:
+            # E2 is exemption-only: the residual frame may excuse collinearity
+            # that the declared rank axis explains, but never lowers the raw
+            # quotient of a healthy drawing -- otherwise declaring ranks would
+            # exempt cross-axis line collapse, the E3-banned channel.
+            residual = _rank_residual_core(scene, core, core_mask)
+            ratio = max(ratio, _isotropy_quotient(residual))
         rank_collapse = 1.0 - float(smoothstep(torch.tensor(ratio / 0.05, dtype=torch.float64)))
     routes = resolved_routes(scene)
     node_route_opportunities = scene.node_count * scene.edge_count
@@ -555,33 +560,49 @@ def U20a(scene: Scene) -> FacetResult:
     return mean_result("U20a", values)
 
 
+def _isotropy_quotient(centered: torch.Tensor) -> float:
+    """Singular-value quotient of one centered retained-position cloud.
+
+    Parameters
+    ----------
+    centered : torch.Tensor
+        Centered positions with shape ``[K, 2]``.
+
+    Returns
+    -------
+    float
+        ``sigma_2 / sigma_1`` in ``[0, 1]``; ``1.0`` for a zero cloud, whose
+        every direction is equally (vacuously) occupied.
+    """
+
+    singular = torch.linalg.svdvals(centered)
+    if float(singular[0]) <= 0.0:
+        return 1.0
+    return float(singular[1] / singular[0])
+
+
 def _rank_residual_core(
     scene: Scene,
     core: torch.Tensor,
     core_mask: torch.Tensor,
-    frame_center: torch.Tensor,
 ) -> torch.Tensor:
     """Remove rank-explained declared-axis variance from retained positions.
 
     Parameters
     ----------
     scene : Scene
-        Validated scene.
+        Validated scene with declared ranks and a declared flow axis.
     core : torch.Tensor
         Retained positions with shape ``[K, 2]``.
     core_mask : torch.Tensor
         Retained-node mask with shape ``[N]``.
-    frame_center : torch.Tensor
-        U21 robust-frame center with shape ``[2]``.
 
     Returns
     -------
     torch.Tensor
-        Centered raw or rank-residual positions with shape ``[K, 2]``.
+        Centered rank-residual positions with shape ``[K, 2]``.
     """
 
-    if scene.graph.ranks is None or scene.graph.flow_axis is None:
-        return core - frame_center
     axis = torch.tensor(scene.graph.flow_axis, dtype=torch.float64)
     cross = torch.tensor([-axis[1], axis[0]], dtype=torch.float64)
     ranks = torch.tensor(scene.graph.ranks, dtype=torch.long)[core_mask]
@@ -593,14 +614,7 @@ def _rank_residual_core(
     residual_axis = axis_projection - explained
     cross_projection = core @ cross
     residual = residual_axis[:, None] * axis + cross_projection[:, None] * cross
-    residual -= torch.mean(residual, dim=0)
-    # With no within-rank axis variance, every apparent one-dimensionality is
-    # precisely the declared layering that E2 removes from this sub-term.
-    if float(torch.linalg.vector_norm(residual_axis)) <= 1e-12 * max(
-        1.0, float(torch.linalg.vector_norm(cross_projection))
-    ):
-        return torch.zeros_like(residual)
-    return residual
+    return residual - torch.mean(residual, dim=0)
 
 
 def _accumulate_object_loss(
