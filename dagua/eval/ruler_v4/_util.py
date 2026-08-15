@@ -435,7 +435,10 @@ def blend_with_weights(
     smooth_max = maximum + _SMOOTH_MAX_TEMPERATURE * math.log(exponential_mean)
     mean_weight, cvar_weight, maximum_weight = blend_weights
     blend = mean_weight * trimmed + cvar_weight * cvar + maximum_weight * smooth_max
-    return min(1.0, max(0.0, blend))
+    # The blend is a convex combination of in-[0, 1] components (the
+    # smooth maximum is bounded by [weighted mean, max] via Jensen), so
+    # only float dust is shed; real violations pass through to the guards.
+    return snap_unit(blend)
 
 
 def adjacency(scene: Scene) -> List[Set[int]]:
