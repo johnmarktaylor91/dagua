@@ -796,3 +796,67 @@ def test_provenance_for_an_inactive_scalar_is_refused() -> None:
     table = WeightTable(entries=(), d_power=20)
     with pytest.raises(ValueError, match="inactive profile scalars"):
         validate_parameter_provenance(profiles, table)
+
+
+# --- P2REVIEW_FABLE finding 1: id-less occurrences of one event type ---
+# collapsed to a single max'd bound instead of the CC-1 SUM, so a pair at
+# decision margin 0.045 with two 0.03 manifolds nearby won strictly.
+
+
+def test_idless_event_occurrences_sum_into_the_cc1_margin() -> None:
+    """The Fable P2 probe: two id-less U41 splits budget 0.06, not 0.03."""
+
+    from dataclasses import replace
+
+    from dagua.eval.ruler_v4.composition import (
+        ComparisonVerdict,
+        CompositionFamily,
+        CompositionProfile,
+        NearbyEvent,
+        compare_with_event_margin,
+        compose,
+    )
+    from dagua.eval.ruler_v4.events import load_event_registry
+    from dagua.eval.ruler_v4.scene import value_result
+    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+
+    table = WeightTable(entries=(SubtermWeight("A.1", "A", "g", 1.0),), d_power=0)
+    base = compose(
+        {"A": value_result(0.2, {"A.1": 0.2})},
+        table,
+        CompositionProfile(CompositionFamily.P_MEAN, power=1.0),
+    )
+    registry = load_event_registry()
+    idless_pair = (
+        NearbyEvent("U41_FACE_SPLIT", {"F0": 100.0}),
+        NearbyEvent("U41_FACE_SPLIT", {"F0": 100.0}),
+    )
+    limited = compare_with_event_margin(
+        base,
+        replace(base, l_total=base.l_total + 0.045),
+        idless_pair,
+        (),
+        registry,
+    )
+    assert limited.event_margin == pytest.approx(0.06)
+    assert limited.verdict is ComparisonVerdict.EVENT_MARGIN_LIMITED
+
+    # Id-less occurrences never merge across rows either: the same
+    # occurrence near both rows is double-charged unless the caller
+    # supplies the shared id (the conservative direction).
+    shared_without_id = compare_with_event_margin(
+        base,
+        replace(base, l_total=base.l_total + 0.045),
+        (NearbyEvent("U41_FACE_SPLIT", {"F0": 100.0}),),
+        (NearbyEvent("U41_FACE_SPLIT", {"F0": 100.0}),),
+        registry,
+    )
+    assert shared_without_id.event_margin == pytest.approx(0.06)
+    shared_with_id = compare_with_event_margin(
+        base,
+        replace(base, l_total=base.l_total + 0.045),
+        (NearbyEvent("U41_FACE_SPLIT", {"F0": 100.0}, "shared-face"),),
+        (NearbyEvent("U41_FACE_SPLIT", {"F0": 100.0}, "shared-face"),),
+        registry,
+    )
+    assert shared_with_id.event_margin == pytest.approx(0.03)
