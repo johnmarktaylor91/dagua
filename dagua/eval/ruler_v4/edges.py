@@ -13,6 +13,20 @@ from typing import DefaultDict, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
+from dagua.eval.ruler_v4._tracing import (
+    Scalar,
+    as_float,
+    keep,
+    p_abs,
+    p_exp,
+    p_log,
+    p_max,
+    p_min,
+    p_sqrt,
+    p_sum,
+    record_subterm,
+    tracing_active,
+)
 from dagua.eval.ruler_v4._util import (
     aabb_pair,
     blend_with_weights,
@@ -37,6 +51,127 @@ from dagua.eval.ruler_v4.scene import (
 
 _ANGULAR_ZERO_ENVELOPE = 1e-12
 
+
+def _p_sin(value: Scalar) -> Scalar:
+    """Sine; ``math.sin`` on floats, ``torch.sin`` on tensors."""
+
+    if isinstance(value, torch.Tensor):
+        return torch.sin(value)
+    return math.sin(value)
+
+
+def _p_cos(value: Scalar) -> Scalar:
+    """Cosine; ``math.cos`` on floats, ``torch.cos`` on tensors."""
+
+    if isinstance(value, torch.Tensor):
+        return torch.cos(value)
+    return math.cos(value)
+
+
+def _p_acos(value: Scalar) -> Scalar:
+    """Arccosine; ``math.acos`` on floats, ``torch.acos`` on tensors."""
+
+    if isinstance(value, torch.Tensor):
+        return torch.acos(value)
+    return math.acos(value)
+
+
+def _p_asinh(value: Scalar) -> Scalar:
+    """Inverse hyperbolic sine; ``math.asinh`` on floats, ``torch.asinh`` on tensors."""
+
+    if isinstance(value, torch.Tensor):
+        return torch.asinh(value)
+    return math.asinh(value)
+
+
+def _p_atan2(numerator: Scalar, denominator: Scalar) -> Scalar:
+    """Two-argument arctangent; ``math.atan2`` on floats, ``torch.atan2`` on tensors."""
+
+    if isinstance(numerator, torch.Tensor) or isinstance(denominator, torch.Tensor):
+        return torch.atan2(_scalar_tensor(numerator), _scalar_tensor(denominator))
+    return math.atan2(numerator, denominator)
+
+
+def _p_mod(value: Scalar, modulus: float) -> Scalar:
+    """Modulo; Python ``%`` on floats, ``torch.remainder`` on tensors."""
+
+    if isinstance(value, torch.Tensor):
+        return torch.remainder(value, modulus)
+    return value % modulus
+
+
+def _scalar_tensor(value: Scalar) -> torch.Tensor:
+    """Promote one scalar to a float64 tensor, preserving any graph."""
+
+    if isinstance(value, torch.Tensor):
+        return value
+    return torch.tensor(float(value), dtype=torch.float64)
+
+
+def _smooth_fade(value: Scalar) -> Scalar:
+    """Evaluate the shared quintic-smoothstep fade on one scalar.
+
+    Parameters
+    ----------
+    value : float or torch.Tensor
+        Fade argument in the gate's own units.
+
+    Returns
+    -------
+    float or torch.Tensor
+        ``float(smoothstep(tensor(value)))`` on the exact path (the historical
+        expression, bit-identical), or the live smoothstep tensor in a trace.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return smoothstep(value)
+    return float(smoothstep(torch.tensor(value, dtype=torch.float64)))
+
+
+def _norm_or_zero(vector: torch.Tensor) -> Scalar:
+    """Keep a Euclidean norm, detaching only the exact-zero boundary.
+
+    ``vector_norm`` has an undefined (NaN) gradient at the zero vector; every
+    consumer reads the distance through an even or hinged kernel whose slope at
+    exact contact is zero, so the detached 0.0 is the exact subgradient there.
+
+    Parameters
+    ----------
+    vector : torch.Tensor
+        Difference vector with shape ``[2]``.
+
+    Returns
+    -------
+    float or torch.Tensor
+        ``keep(norm)`` off the boundary, the float 0.0 exactly on it.
+    """
+
+    norm = keep(torch.linalg.vector_norm(vector))
+    if as_float(norm) == 0.0:
+        return 0.0
+    return norm
+
+
+def _raw(value: Scalar) -> object:
+    """Cast one raw diagnostic to its published float, preserving float types.
+
+    Parameters
+    ----------
+    value : float or torch.Tensor
+        Scalar leaving the score-visible chain into a raw= mapping.
+
+    Returns
+    -------
+    object
+        ``float(value.detach().item())`` for tensors, the value unchanged
+        otherwise (so historical int/float raw entries keep their exact type).
+    """
+
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().item())
+    return value
+
+
 _U07_WORKED_EXAMPLE_GAMMA = 1.0
 _U07_WORKED_EXAMPLE_LAMBDA_T = 0.5
 _U11_TERMINAL_DISK_SIDES = 16
@@ -53,29 +188,29 @@ class _CrossingEvent:
         Declared edge indices.
     point : torch.Tensor
         Event point with shape ``[2]``.
-    angle : float
-        Acute crossing angle in radians.
-    proximity : float
+    angle : float or torch.Tensor
+        Acute crossing angle in radians (live tensor inside a trace).
+    proximity : float or torch.Tensor
         Nearest graph-terminal distance in intrinsic-unit multiples.
     pair_multiplicity : int
         Total event count for the unordered edge pair.
-    density : float
+    density : float or torch.Tensor
         Local crossing-density argument.
-    severity : float
+    severity : float or torch.Tensor
         Frozen four-component severity.
     """
 
     edge_a: int
     edge_b: int
     point: torch.Tensor
-    angle: float
-    proximity: float
+    angle: Scalar
+    proximity: Scalar
     pair_multiplicity: int
-    density: float
-    severity: float
+    density: Scalar
+    severity: Scalar
 
 
-def _segment_angle(first: torch.Tensor, second: torch.Tensor) -> float:
+def _segment_angle(first: torch.Tensor, second: torch.Tensor) -> Scalar:
     """Return the acute unoriented angle between two vectors.
 
     Parameters
@@ -85,18 +220,22 @@ def _segment_angle(first: torch.Tensor, second: torch.Tensor) -> float:
 
     Returns
     -------
-    float
-        Angle in radians in ``[0, pi/2]``.
+    float or torch.Tensor
+        Angle in radians in ``[0, pi/2]``; a live tensor inside a trace.
     """
 
     denominator = torch.linalg.vector_norm(first) * torch.linalg.vector_norm(second)
     if float(denominator) == 0.0:
         return 0.0
-    cosine = min(1.0, max(-1.0, abs(float(torch.dot(first, second) / denominator))))
-    return math.acos(cosine)
+    cosine = p_min(1.0, p_max(-1.0, p_abs(keep(torch.dot(first, second) / denominator))))
+    if as_float(cosine) >= 1.0:
+        # acos is non-differentiable at the clamp boundary (infinite slope);
+        # the historical float value there is exactly acos(1) = 0.
+        return math.acos(1.0)
+    return _p_acos(cosine)
 
 
-def _oriented_angle(first: torch.Tensor, second: torch.Tensor) -> float:
+def _oriented_angle(first: torch.Tensor, second: torch.Tensor) -> Scalar:
     """Return the oriented angle between two direction vectors.
 
     Unlike :func:`_segment_angle`, no absolute value is taken, so
@@ -112,15 +251,19 @@ def _oriented_angle(first: torch.Tensor, second: torch.Tensor) -> float:
 
     Returns
     -------
-    float
-        Angle in radians in ``[0, pi]``.
+    float or torch.Tensor
+        Angle in radians in ``[0, pi]``; a live tensor inside a trace.
     """
 
     denominator = torch.linalg.vector_norm(first) * torch.linalg.vector_norm(second)
     if float(denominator) == 0.0:
         return 0.0
-    cosine = min(1.0, max(-1.0, float(torch.dot(first, second) / denominator)))
-    return math.acos(cosine)
+    cosine = p_min(1.0, p_max(-1.0, keep(torch.dot(first, second) / denominator)))
+    if as_float(cosine) >= 1.0:
+        return math.acos(1.0)
+    if as_float(cosine) <= -1.0:
+        return math.acos(-1.0)
+    return _p_acos(cosine)
 
 
 def _segment_event_point(
@@ -128,7 +271,7 @@ def _segment_event_point(
     end_a: torch.Tensor,
     start_b: torch.Tensor,
     end_b: torch.Tensor,
-) -> Optional[Tuple[torch.Tensor, float]]:
+) -> Optional[Tuple[torch.Tensor, Scalar]]:
     """Return a proper crossing point and acute angle when one event exists.
 
     Parameters
@@ -138,19 +281,19 @@ def _segment_event_point(
 
     Returns
     -------
-    tuple[torch.Tensor, float] or None
+    tuple[torch.Tensor, float or torch.Tensor] or None
         Event point and acute angle. Positive-length collinear overlap produces
         its midpoint with angle zero.
     """
 
     direction_a = end_a - start_a
     direction_b = end_b - start_b
-    cross = float(direction_a[0] * direction_b[1] - direction_a[1] * direction_b[0])
-    if cross != 0.0:
+    cross = keep(direction_a[0] * direction_b[1] - direction_a[1] * direction_b[0])
+    if as_float(cross) != 0.0:
         offset = start_b - start_a
-        parameter_a = float(offset[0] * direction_b[1] - offset[1] * direction_b[0]) / cross
-        parameter_b = float(offset[0] * direction_a[1] - offset[1] * direction_a[0]) / cross
-        if 0.0 < parameter_a < 1.0 and 0.0 < parameter_b < 1.0:
+        parameter_a = keep(offset[0] * direction_b[1] - offset[1] * direction_b[0]) / cross
+        parameter_b = keep(offset[0] * direction_a[1] - offset[1] * direction_a[0]) / cross
+        if 0.0 < as_float(parameter_a) < 1.0 and 0.0 < as_float(parameter_b) < 1.0:
             return start_a + parameter_a * direction_a, _segment_angle(direction_a, direction_b)
         return None
     if (
@@ -158,14 +301,14 @@ def _segment_event_point(
         != 0.0
     ):
         return None
-    length_squared = float(torch.dot(direction_a, direction_a))
-    if length_squared == 0.0:
+    length_squared = keep(torch.dot(direction_a, direction_a))
+    if as_float(length_squared) == 0.0:
         return None
-    left = float(torch.dot(start_b - start_a, direction_a)) / length_squared
-    right = float(torch.dot(end_b - start_a, direction_a)) / length_squared
-    overlap_start = max(0.0, min(left, right))
-    overlap_end = min(1.0, max(left, right))
-    if overlap_end <= overlap_start:
+    left = keep(torch.dot(start_b - start_a, direction_a)) / length_squared
+    right = keep(torch.dot(end_b - start_a, direction_a)) / length_squared
+    overlap_start = p_max(0.0, p_min(left, right))
+    overlap_end = p_min(1.0, p_max(left, right))
+    if as_float(overlap_end) <= as_float(overlap_start):
         return None
     midpoint = start_a + ((overlap_start + overlap_end) / 2.0) * direction_a
     return midpoint, 0.0
@@ -188,7 +331,7 @@ def _crossing_events(scene: Scene, gamma: float) -> List[_CrossingEvent]:
     """
 
     segments = route_segments(scene)
-    provisional: List[Tuple[int, int, torch.Tensor, float, float]] = []
+    provisional: List[Tuple[int, int, torch.Tensor, Scalar, Scalar]] = []
     for index, (edge_a, _, start_a, end_a) in enumerate(segments):
         terminals_a = scene.graph.edges[edge_a]
         for edge_b, _, start_b, end_b in segments[index + 1 :]:
@@ -200,25 +343,28 @@ def _crossing_events(scene: Scene, gamma: float) -> List[_CrossingEvent]:
             point, angle = event
             terminals_b = scene.graph.edges[edge_b]
             terminal_points = scene.positions[list((*terminals_a, *terminals_b))]
-            proximity = float(torch.min(torch.linalg.vector_norm(terminal_points - point, dim=1)))
+            proximity = keep(torch.min(torch.linalg.vector_norm(terminal_points - point, dim=1)))
+            if as_float(proximity) == 0.0:
+                # vector_norm has a NaN gradient exactly at zero; the severity
+                # reads proximity only through rho^2, whose slope there is 0.
+                proximity = 0.0
             provisional.append((min(edge_a, edge_b), max(edge_a, edge_b), point, angle, proximity))
     multiplicities = Counter((left, right) for left, right, _, _, _ in provisional)
     results = []
     for event_index, (edge_a, edge_b, point, angle, proximity) in enumerate(provisional):
-        sine_squared = math.sin(angle) ** 2
-        density = 0.0
+        sine_squared = _p_sin(angle) ** 2
+        density: Scalar = 0.0
         for other_index, (_, _, other_point, other_angle, _) in enumerate(provisional):
             if event_index == other_index:
                 continue
             normalized_squared = (
-                float(torch.sum((point - other_point) ** 2).item())
-                / (6.0 * scene.intrinsic_unit) ** 2
+                keep(torch.sum((point - other_point) ** 2)) / (6.0 * scene.intrinsic_unit) ** 2
             )
-            density += math.sin(other_angle) ** 2 * max(0.0, 1.0 - normalized_squared) ** 2
+            density += _p_sin(other_angle) ** 2 * p_max(0.0, 1.0 - normalized_squared) ** 2
         multiplicity = multiplicities[(edge_a, edge_b)]
-        angle_term = math.cos(angle) ** 2
+        angle_term = _p_cos(angle) ** 2
         proximity_ratio = proximity / scene.intrinsic_unit
-        proximity_term = max(0.0, 1.0 - proximity_ratio**2 / 16.0) ** 2
+        proximity_term = p_max(0.0, 1.0 - proximity_ratio**2 / 16.0) ** 2
         repeat_term = (multiplicity - 1.0) / multiplicity
         density_term = density / (density + 3.0)
         severity = gamma * (
@@ -281,16 +427,16 @@ def U07(
         for right in range(left + 1, scene.edge_count):
             if not set(scene.graph.edges[left]) & set(scene.graph.edges[right]):
                 eligible += 1
-    base_raw = sum(1.0 + event.severity for event in events)
+    base_raw = p_sum([1.0 + event.severity for event in events])
     threshold = 0.5 * gamma
-    tail_raw = sum(max(0.0, event.severity - threshold) for event in events)
+    tail_raw = p_sum([p_max(0.0, event.severity - threshold) for event in events])
     opportunity = eligible + 1
     normalized = (base_raw + lambda_T * tail_raw) / opportunity
-    defect = normalized / (normalized + 0.25) if normalized > 0.0 else 0.0
+    defect = normalized / (normalized + 0.25) if as_float(normalized) > 0.0 else 0.0
     base_x = base_raw / opportunity
     tail_x = lambda_T * tail_raw / opportunity
-    base = base_x / (base_x + 0.25) if base_x > 0.0 else 0.0
-    tail = tail_x / (tail_x + 0.25) if tail_x > 0.0 else 0.0
+    base = base_x / (base_x + 0.25) if as_float(base_x) > 0.0 else 0.0
+    tail = tail_x / (tail_x + 0.25) if as_float(tail_x) > 0.0 else 0.0
     return value_result(
         defect,
         {"U7.base": base, "U7.tail": tail},
@@ -298,19 +444,19 @@ def U07(
             "crossing_count": len(events),
             "eligible_pairs": eligible,
             "opportunity_guarded": opportunity,
-            "base_raw": base_raw,
-            "tail_raw": tail_raw,
+            "base_raw": _raw(base_raw),
+            "tail_raw": _raw(tail_raw),
             "gamma": gamma,
             "lambda_T": lambda_T,
             "events": tuple(
                 {
                     "edge_pair": (event.edge_a, event.edge_b),
                     "point": event.point.tolist(),
-                    "angle": event.angle,
-                    "proximity": event.proximity,
+                    "angle": _raw(event.angle),
+                    "proximity": _raw(event.proximity),
                     "multiplicity": event.pair_multiplicity,
-                    "density": event.density,
-                    "severity": event.severity,
+                    "density": _raw(event.density),
+                    "severity": _raw(event.severity),
                 }
                 for event in events
             ),
@@ -329,19 +475,19 @@ def U08(scene: Scene) -> FacetResult:
         else:
             input_degrees[source] += 1
             input_degrees[target] += 1
-    defects: List[float] = []
+    defects: List[Scalar] = []
     for node, degree in enumerate(input_degrees):
         if degree < 3:
             continue
-        records = sorted(directions[node], key=lambda item: (item[0], item[1]))
-        effective_count = sum(confidence for _, _, confidence in records)
-        fade = float(smoothstep(torch.tensor(effective_count - 2.0, dtype=torch.float64)))
-        if fade == 0.0:
+        records = sorted(directions[node], key=lambda item: (as_float(item[0]), item[1]))
+        effective_count = p_sum([confidence for _, _, confidence in records])
+        fade = _smooth_fade(effective_count - 2.0)
+        if as_float(fade) == 0.0:
             defects.append(0.0)
             continue
         fair_share = 2.0 * math.pi / effective_count
-        weighted_exponentials = 0.0
-        total_weight = 0.0
+        weighted_exponentials: Scalar = 0.0
+        total_weight: Scalar = 0.0
         count = len(records)
         for left in range(count):
             for step in range(1, count):
@@ -350,18 +496,18 @@ def U08(scene: Scene) -> FacetResult:
                 weight = records[left][2] * records[right][2]
                 for middle in between:
                     weight *= 1.0 - records[middle][2]
-                if weight == 0.0:
+                if as_float(weight) == 0.0:
                     continue
-                delta = (records[right][0] - records[left][0]) % (2.0 * math.pi)
-                pair_defect = max(0.0, 1.0 - delta / fair_share)
-                if pair_defect <= _ANGULAR_ZERO_ENVELOPE:
+                delta = _p_mod(records[right][0] - records[left][0], 2.0 * math.pi)
+                pair_defect = p_max(0.0, 1.0 - delta / fair_share)
+                if as_float(pair_defect) <= _ANGULAR_ZERO_ENVELOPE:
                     pair_defect = 0.0
-                weighted_exponentials += weight * math.exp(pair_defect / 0.1)
+                weighted_exponentials += weight * p_exp(pair_defect / 0.1)
                 total_weight += weight
-        if total_weight == 0.0:
+        if as_float(total_weight) == 0.0:
             defects.append(0.0)
             continue
-        node_defect = 0.1 * math.log(weighted_exponentials / total_weight)
+        node_defect = 0.1 * p_log(weighted_exponentials / total_weight)
         # The log-sum-exp mean is analytically in [0, 1] for pair defects in
         # [0, 1]; the normalized mean can carry one ULP of dust either side.
         defects.append(snap_unit(fade * node_defect))
@@ -388,21 +534,21 @@ def _point_at_arc_fraction(points: torch.Tensor, fraction: float) -> torch.Tenso
     """
 
     lengths = torch.linalg.vector_norm(points[1:] - points[:-1], dim=1)
-    total = float(torch.sum(lengths).item())
-    if total == 0.0:
+    total = keep(torch.sum(lengths))
+    if as_float(total) == 0.0:
         return points[0]
     target = min(1.0, max(0.0, fraction)) * total
-    cumulative = 0.0
+    cumulative: Scalar = 0.0
     for index, length_tensor in enumerate(lengths):
-        length = float(length_tensor)
-        if cumulative + length >= target:
-            local = (target - cumulative) / length if length > 0.0 else 0.0
+        length = keep(length_tensor)
+        if as_float(cumulative + length) >= as_float(target):
+            local = (target - cumulative) / length if as_float(length) > 0.0 else 0.0
             return points[index] + local * (points[index + 1] - points[index])
         cumulative += length
     return points[-1]
 
 
-def _incident_secants(scene: Scene) -> DefaultDict[int, List[Tuple[float, int, float]]]:
+def _incident_secants(scene: Scene) -> DefaultDict[int, List[Tuple[Scalar, int, Scalar]]]:
     """Extract U08 departure angles and tangent confidences at every endpoint.
 
     Parameters
@@ -412,19 +558,17 @@ def _incident_secants(scene: Scene) -> DefaultDict[int, List[Tuple[float, int, f
 
     Returns
     -------
-    defaultdict[int, list[tuple[float, int, float]]]
+    defaultdict[int, list[tuple[float or torch.Tensor, int, float or torch.Tensor]]]
         Node to ``(angle, canonical endpoint key, confidence)`` records.
     """
 
-    records: DefaultDict[int, List[Tuple[float, int, float]]] = defaultdict(list)
+    records: DefaultDict[int, List[Tuple[Scalar, int, Scalar]]] = defaultdict(list)
     for route in resolved_routes(scene):
         source, target = scene.graph.edges[route.edge_index]
         lengths = torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1)
-        total = float(torch.sum(lengths).item())
-        confidence = float(
-            smoothstep(torch.tensor(total / (0.1 * scene.intrinsic_unit), dtype=torch.float64))
-        )
-        if confidence == 0.0:
+        total = keep(torch.sum(lengths))
+        confidence = _smooth_fade(total / (0.1 * scene.intrinsic_unit))
+        if as_float(confidence) == 0.0:
             if source == target:
                 records[source].extend(
                     ((0.0, 2 * route.edge_index, 0.0), (0.0, 2 * route.edge_index + 1, 0.0))
@@ -435,11 +579,11 @@ def _incident_secants(scene: Scene) -> DefaultDict[int, List[Tuple[float, int, f
             continue
         source_vector = _point_at_arc_fraction(route.points, 0.10) - scene.positions[source]
         target_vector = _point_at_arc_fraction(route.points, 0.90) - scene.positions[target]
-        source_angle = math.atan2(float(source_vector[1]), float(source_vector[0])) % (
-            2.0 * math.pi
+        source_angle = _p_mod(
+            _p_atan2(keep(source_vector[1]), keep(source_vector[0])), 2.0 * math.pi
         )
-        target_angle = math.atan2(float(target_vector[1]), float(target_vector[0])) % (
-            2.0 * math.pi
+        target_angle = _p_mod(
+            _p_atan2(keep(target_vector[1]), keep(target_vector[0])), 2.0 * math.pi
         )
         records[source].append((source_angle, 2 * route.edge_index, confidence))
         records[target].append((target_angle, 2 * route.edge_index + 1, confidence))
@@ -512,33 +656,38 @@ def _unit_interval_quadratic_roots(a: float, b: float, c: float) -> List[float]:
     return sorted({root for root in roots if 0.0 < root < 1.0})
 
 
-def _sqrt_quadratic_primitive(a: float, b: float, c: float, value: float) -> float:
+def _sqrt_quadratic_primitive(a: Scalar, b: Scalar, c: Scalar, value: float) -> Scalar:
     """Evaluate U10 section 5a's primitive of ``sqrt(a*t^2+b*t+c)``.
 
     Parameters
     ----------
-    a, b, c : float
+    a, b, c : float or torch.Tensor
         Quadratic coefficients with a globally nonnegative quadratic.
     value : float
         Evaluation coordinate.
 
     Returns
     -------
-    float
-        Closed-form primitive value.
+    float or torch.Tensor
+        Closed-form primitive value; a live tensor inside a trace.
     """
 
-    quadratic = max(0.0, a * value * value + b * value + c)
-    if a == 0.0:
-        return math.sqrt(max(0.0, c)) * value
-    delta = max(0.0, 4.0 * a * c - b * b)
-    root = math.sqrt(quadratic)
-    if delta == 0.0:
+    quadratic = p_max(0.0, a * value * value + b * value + c)
+    if as_float(a) == 0.0:
+        return p_sqrt(p_max(0.0, c)) * value
+    delta = p_max(0.0, 4.0 * a * c - b * b)
+    if as_float(quadratic) == 0.0:
+        # sqrt has an infinite slope at exactly zero; the historical float
+        # value there is exactly 0 (a breakpoint sitting on the tangency).
+        root: Scalar = 0.0
+    else:
+        root = p_sqrt(quadratic)
+    if as_float(delta) == 0.0:
         center = -b / (2.0 * a)
-        sign = -1.0 if value < center else 1.0
-        return math.sqrt(a) * sign * (value - center) ** 2 / 2.0
-    return (2.0 * a * value + b) * root / (4.0 * a) + delta / (8.0 * a**1.5) * math.asinh(
-        (2.0 * a * value + b) / math.sqrt(delta)
+        sign = -1.0 if value < as_float(center) else 1.0
+        return p_sqrt(a) * sign * (value - center) ** 2 / 2.0
+    return (2.0 * a * value + b) * root / (4.0 * a) + delta / (8.0 * a**1.5) * _p_asinh(
+        (2.0 * a * value + b) / p_sqrt(delta)
     )
 
 
@@ -548,7 +697,7 @@ def _segment_box_deficit_integral(
     box: BoxGeometry,
     stroke_half_width: float,
     intrinsic_unit: float,
-) -> Tuple[float, bool]:
+) -> Tuple[Scalar, bool]:
     """Integrate U10's exact clearance-deficit kernel on one segment.
 
     Parameters
@@ -564,14 +713,17 @@ def _segment_box_deficit_integral(
 
     Returns
     -------
-    tuple[float, bool]
+    tuple[float or torch.Tensor, bool]
         Dimensionless exact integral and whether the segment penetrates the box.
+        The piece partition is decided on detached values; the integrand is
+        continuous across every internal breakpoint, so boundary-motion terms
+        cancel and the detached-partition gradient is the a.e.-exact one.
     """
 
     local_start = start - box.center
     direction = end - start
-    length = float(torch.linalg.vector_norm(direction))
-    if length == 0.0:
+    length = keep(torch.linalg.vector_norm(direction))
+    if as_float(length) == 0.0:
         return 0.0, False
     half = box.half_extents
     clearance_band = 0.5 * intrinsic_unit
@@ -622,11 +774,11 @@ def _segment_box_deficit_integral(
                 )
             )
     ordered = sorted(set(breaks))
-    total = 0.0
+    total: Scalar = 0.0
     penetrates = False
     maximum = (1.0 + radius / clearance_band) ** 2
 
-    def signed_distance(parameter: float) -> float:
+    def signed_distance(parameter: float) -> Scalar:
         """Return exact signed point-to-box distance in the box frame.
 
         Parameters
@@ -636,15 +788,15 @@ def _segment_box_deficit_integral(
 
         Returns
         -------
-        float
+        float or torch.Tensor
             Positive exterior distance or negative interior depth.
         """
 
         point = local_start + parameter * direction
         excess = torch.abs(point) - half
         if bool((excess > 0.0).any()):
-            return float(torch.linalg.vector_norm(torch.clamp(excess, min=0.0)))
-        return max(float(excess[0]), float(excess[1]))
+            return keep(torch.linalg.vector_norm(torch.clamp(excess, min=0.0)))
+        return p_max(keep(excess[0]), keep(excess[1]))
 
     for lower, upper in zip(ordered[:-1], ordered[1:]):
         if upper <= lower:
@@ -654,10 +806,10 @@ def _segment_box_deficit_integral(
         excess = torch.abs(point) - half
         distance = signed_distance(midpoint)
         clearance = distance - stroke_half_width
-        penetrates = penetrates or distance < 0.0
-        if clearance >= clearance_band:
+        penetrates = penetrates or as_float(distance) < 0.0
+        if as_float(clearance) >= clearance_band:
             continue
-        if clearance <= -radius:
+        if as_float(clearance) <= -radius:
             total += maximum * (upper - lower)
             continue
         positive_axes = excess > 0.0
@@ -665,9 +817,9 @@ def _segment_box_deficit_integral(
             signs = torch.where(point >= 0.0, 1.0, -1.0)
             constants = signs * local_start - half
             slopes = signs * direction
-            a = float(torch.dot(slopes, slopes))
-            b = 2.0 * float(torch.dot(constants, slopes))
-            c = float(torch.dot(constants, constants))
+            a = keep(torch.dot(slopes, slopes))
+            b = 2.0 * keep(torch.dot(constants, slopes))
+            c = keep(torch.dot(constants, constants))
             polynomial = (
                 band_radius * band_radius * (upper - lower)
                 + a * (upper**3 - lower**3) / 3.0
@@ -683,7 +835,7 @@ def _segment_box_deficit_integral(
         distance_upper = signed_distance(upper)
         slope = (distance_upper - distance_lower) / (upper - lower)
         intercept = distance_lower - slope * lower - stroke_half_width
-        if slope == 0.0:
+        if as_float(slope) == 0.0:
             total += ((clearance_band - intercept) / clearance_band) ** 2 * (upper - lower)
         else:
             primitive_upper = -((clearance_band - slope * upper - intercept) ** 3) / (
@@ -693,30 +845,30 @@ def _segment_box_deficit_integral(
                 3.0 * slope * clearance_band**2
             )
             total += primitive_upper - primitive_lower
-    return max(0.0, length * total / intrinsic_unit), penetrates
+    return p_max(0.0, length * total / intrinsic_unit), penetrates
 
 
-def _raw_u10_blend(values: List[float], opportunity: int) -> float:
+def _raw_u10_blend(values: List[Scalar], opportunity: int) -> Scalar:
     """Apply U10's raw-component aggregation and common saturation map.
 
     Parameters
     ----------
-    values : list[float]
+    values : list[float or torch.Tensor]
         Full input-only population of nonnegative per-pair integrals.
     opportunity : int
         Analytic scored-pair count, equal to ``len(values)``.
 
     Returns
     -------
-    float
-        Contract U10 defect in ``[0, 1)``.
+    float or torch.Tensor
+        Contract U10 defect in ``[0, 1)``; a live tensor inside a trace.
     """
 
-    ordered = sorted(values)
-    mean = sum(ordered) / opportunity
+    ordered = sorted(values, key=as_float)
+    mean = p_sum(ordered) / opportunity
     tail_mass = 0.10 * opportunity
     remaining = tail_mass
-    tail_sum = 0.0
+    tail_sum: Scalar = 0.0
     for value in reversed(ordered):
         mass = min(1.0, remaining)
         tail_sum += mass * value
@@ -725,25 +877,25 @@ def _raw_u10_blend(values: List[float], opportunity: int) -> float:
             break
     cvar = tail_sum / tail_mass
     maximum = ordered[-1]
-    smooth_maximum = maximum + 0.05 * math.log(
-        sum(math.exp((value - maximum) / 0.05) for value in ordered) / opportunity
+    smooth_maximum = maximum + 0.05 * p_log(
+        p_sum([p_exp((value - maximum) / 0.05) for value in ordered]) / opportunity
     )
 
-    def saturate(value: float) -> float:
+    def saturate(value: Scalar) -> Scalar:
         """Map one nonnegative component through U10's frozen x0 curve.
 
         Parameters
         ----------
-        value : float
+        value : float or torch.Tensor
             Nonnegative raw component.
 
         Returns
         -------
-        float
+        float or torch.Tensor
             Saturated component.
         """
 
-        return value / (value + 0.01) if value > 0.0 else 0.0
+        return value / (value + 0.01) if as_float(value) > 0.0 else 0.0
 
     return 0.65 * saturate(mean) + 0.25 * saturate(cvar) + 0.10 * saturate(smooth_maximum)
 
@@ -753,7 +905,7 @@ def U10(scene: Scene) -> FacetResult:
 
     if scene.edge_count < 1 or scene.node_count < 3:
         return na_result("too_few_objects")
-    burdens: List[float] = []
+    burdens: List[Scalar] = []
     penetration_count = 0
     for route in resolved_routes(scene):
         incident = set(scene.graph.edges[route.edge_index])
@@ -765,7 +917,7 @@ def U10(scene: Scene) -> FacetResult:
             else scene.style.route_stroke_width * scene.style.coordinate_scale
         )
         for box in obstacles:
-            burden = 0.0
+            burden: Scalar = 0.0
             penetrates = False
             for start, end in zip(route.points[:-1], route.points[1:]):
                 segment_burden, segment_penetrates = _segment_box_deficit_integral(
@@ -788,8 +940,8 @@ def U10(scene: Scene) -> FacetResult:
         {
             "pair_count": len(burdens),
             "penetration_count": penetration_count,
-            "pair_integrals": tuple(burdens),
-            "sum_D_eb": sum(burdens),
+            "pair_integrals": tuple(_raw(burden) for burden in burdens),
+            "sum_D_eb": _raw(p_sum(burdens)),
         },
     )
 
@@ -825,10 +977,10 @@ def U11(scene: Scene) -> FacetResult:
     """Routed-edge quality: NORMATIVE CONTRACT (A1). Frozen SHA-256: 411dab9b787a8465d2f2591f3048bb6d11d1e57075071532d37c647e74e71dfd."""
 
     self_crossings = 0
-    row_one: List[float] = []
-    row_two: List[float] = []
-    row_three: List[float] = []
-    row_four: List[float] = []
+    row_one: List[Scalar] = []
+    row_two: List[Scalar] = []
+    row_three: List[Scalar] = []
+    row_four: List[Scalar] = []
     terminal_records: DefaultDict[int, List[Tuple[torch.Tensor, Optional[torch.Tensor]]]] = (
         defaultdict(list)
     )
@@ -839,20 +991,20 @@ def U11(scene: Scene) -> FacetResult:
         points = route.points
         vectors = points[1:] - points[:-1]
         lengths = torch.linalg.vector_norm(vectors, dim=1)
-        arc = float(torch.sum(lengths))
+        arc = keep(torch.sum(lengths))
         source, target = scene.graph.edges[route.edge_index]
         source_tangent = _first_nonzero_tangent(points, False)
         target_tangent = _first_nonzero_tangent(points, True)
         terminal_records[source].append((points[0], source_tangent))
         terminal_records[target].append((points[-1], target_tangent))
-        if arc == 0.0:
+        if as_float(arc) == 0.0:
             continue
         chord_vector = points[-1] - points[0]
-        chord = float(torch.linalg.vector_norm(chord_vector))
+        chord = keep(torch.linalg.vector_norm(chord_vector))
         chord_direction = (
-            chord_vector / chord if chord > 0.0 else torch.zeros(2, dtype=torch.float64)
+            chord_vector / chord if as_float(chord) > 0.0 else torch.zeros(2, dtype=torch.float64)
         )
-        event_severity = 0.0
+        event_severity: Scalar = 0.0
         for left in range(points.shape[0] - 1):
             for right in range(left + 2, points.shape[0] - 1):
                 if proper_intersection(
@@ -860,49 +1012,62 @@ def U11(scene: Scene) -> FacetResult:
                 ):
                     self_crossings += 1
                     angle = _segment_angle(vectors[left], vectors[right])
-                    event_severity += 1.0 + math.cos(angle) ** 2
-        self_defect = 1.0 - math.exp(-math.log(2.0) * event_severity)
-        route_diameter = float(torch.max(torch.cdist(points, points)))
-        backtracking = sum(
-            max(0.0, -float(torch.dot(chord_direction, vector / length))) * float(length)
-            for vector, length in zip(vectors, lengths)
-            if float(length) > 0.0
+                    event_severity += 1.0 + _p_cos(angle) ** 2
+        self_defect = 1.0 - p_exp(-math.log(2.0) * event_severity)
+        if tracing_active():
+            # torch.cdist's backward is NaN at the (always-present) zero
+            # diagonal; max over squared distances then sqrt is the same value
+            # with a well-defined gradient (arc > 0 guarantees a positive max).
+            pair_differences = points[:, None, :] - points[None, :, :]
+            route_diameter: Scalar = torch.sqrt((pair_differences**2).sum(dim=-1).max())
+        else:
+            route_diameter = keep(torch.max(torch.cdist(points, points)))
+        backtracking = p_sum(
+            [
+                p_max(0.0, -keep(torch.dot(chord_direction, vector / length))) * keep(length)
+                for vector, length in zip(vectors, lengths)
+                if float(length) > 0.0
+            ]
         )
-        backtracking_defect = 1.0 - math.exp(-backtracking / max(chord, route_diameter, 1e-300))
+        backtracking_defect = 1.0 - p_exp(
+            -backtracking / p_max(p_max(chord, route_diameter), 1e-300)
+        )
         row_one.append(1.0 - (1.0 - self_defect) * (1.0 - backtracking_defect))
 
         turns = _signed_route_turns(points)
-        total_turn = sum(abs(turn) for turn in turns)
-        wiggle = total_turn - abs(sum(turns))
+        total_turn = p_sum([p_abs(turn) for turn in turns])
+        wiggle = total_turn - p_abs(p_sum(turns))
         baseline_length, baseline_turn = _route_baseline(scene, route)
         if scene.graph.edge_styles is not None and source != target:
             style = scene.graph.edge_styles[route.edge_index]
             excess_turn = _zero_hinge(total_turn - baseline_turn, 0.05)
             if style == "straight":
-                bend_defect = 1.0 - math.exp(-total_turn / (math.pi / 2.0))
+                bend_defect = 1.0 - p_exp(-total_turn / (math.pi / 2.0))
             elif style == "orthogonal":
                 off_axis = (
-                    sum(
-                        float(length)
-                        * (1.0 - math.cos(4.0 * _nearest_axis_deviation(vector)))
-                        / 2.0
-                        for vector, length in zip(vectors, lengths)
-                        if float(length) > 0.0
+                    p_sum(
+                        [
+                            keep(length)
+                            * (1.0 - _p_cos(4.0 * _nearest_axis_deviation(vector)))
+                            / 2.0
+                            for vector, length in zip(vectors, lengths)
+                            if float(length) > 0.0
+                        ]
                     )
                     / arc
                 )
-                bend_defect = 0.5 * (1.0 - math.exp(-off_axis / 0.15)) + 0.5 * (
-                    1.0 - math.exp(-excess_turn / (math.pi / 2.0))
+                bend_defect = 0.5 * (1.0 - p_exp(-off_axis / 0.15)) + 0.5 * (
+                    1.0 - p_exp(-excess_turn / (math.pi / 2.0))
                 )
             else:
                 turn_weight, wiggle_weight = (0.7, 0.3) if style == "polyline" else (0.6, 0.4)
                 bend_defect = turn_weight * (
-                    1.0 - math.exp(-excess_turn / (math.pi / 2.0))
-                ) + wiggle_weight * (1.0 - math.exp(-wiggle / (math.pi / 2.0)))
+                    1.0 - p_exp(-excess_turn / (math.pi / 2.0))
+                ) + wiggle_weight * (1.0 - p_exp(-wiggle / (math.pi / 2.0)))
             row_two.append(bend_defect)
         if source != target:
-            log_ratio = math.log(arc / baseline_length)
-            row_three.append(1.0 - math.exp(-_zero_hinge(log_ratio, 0.05) / math.log(2.0)))
+            log_ratio = p_log(arc / baseline_length)
+            row_three.append(1.0 - p_exp(-_zero_hinge(log_ratio, 0.05) / math.log(2.0)))
         feedback = scene.graph.feedback is not None and scene.graph.feedback[route.edge_index]
         same_rank = ranks is not None and ranks[source] == ranks[target]
         if (
@@ -913,24 +1078,26 @@ def U11(scene: Scene) -> FacetResult:
             and not same_rank
         ):
             axis = torch.tensor(scene.graph.flow_axis, dtype=torch.float64)
-            counterflow = sum(
-                max(0.0, -float(torch.dot(axis, vector / length))) * float(length)
-                for vector, length in zip(vectors, lengths)
-                if float(length) > 0.0
+            counterflow = p_sum(
+                [
+                    p_max(0.0, -keep(torch.dot(axis, vector / length))) * keep(length)
+                    for vector, length in zip(vectors, lengths)
+                    if float(length) > 0.0
+                ]
             )
-            row_four.append(1.0 - math.exp(-(counterflow / arc) / 0.25))
+            row_four.append(1.0 - p_exp(-(counterflow / arc) / 0.25))
         raw_edges.append(
             {
                 "edge": float(route.edge_index),
-                "arc_length": arc,
-                "baseline_length": baseline_length,
-                "total_turn": total_turn,
-                "baseline_turn": baseline_turn,
-                "backtracking": backtracking,
-                "self_event_severity": event_severity,
+                "arc_length": _raw(arc),
+                "baseline_length": _raw(baseline_length),
+                "total_turn": _raw(total_turn),
+                "baseline_turn": _raw(baseline_turn),
+                "backtracking": _raw(backtracking),
+                "self_event_severity": _raw(event_severity),
             }
         )
-    values: Dict[str, float] = {}
+    values: Dict[str, Scalar] = {}
     if row_one:
         values["U11.i"] = global_blend(row_one)
     if row_two:
@@ -940,23 +1107,22 @@ def U11(scene: Scene) -> FacetResult:
     if row_four:
         values["U11.iv"] = global_blend(row_four)
     if not scene.graph.ports:
-        node_defects: List[float] = []
+        node_defects: List[Scalar] = []
         node_weights: List[float] = []
         for records in terminal_records.values():
             if len(records) < 2:
                 continue
-            confusability = []
+            confusability: List[Scalar] = []
             for left_index, left in enumerate(records):
                 for right in records[left_index + 1 :]:
-                    gap_factor = math.exp(
-                        -(
-                            (
-                                float(torch.linalg.vector_norm(left[0] - right[0]))
-                                / (scene.intrinsic_unit / 4.0)
-                            )
-                            ** 2
-                        )
-                    )
+                    gap_norm = keep(torch.linalg.vector_norm(left[0] - right[0]))
+                    if as_float(gap_norm) == 0.0:
+                        # vector_norm has an undefined (NaN) gradient at the
+                        # exact-coincidence point, but the Gaussian kernel
+                        # exp(-(|d|/s)^2) is smooth there with slope exactly 0:
+                        # the detached constant IS the exact gradient.
+                        gap_norm = 0.0
+                    gap_factor = p_exp(-((gap_norm / (scene.intrinsic_unit / 4.0)) ** 2))
                     if left[1] is None or right[1] is None:
                         # The gap factor of the closed form stays well defined
                         # when a zero-arc route has no initial tangent; only the
@@ -967,14 +1133,22 @@ def U11(scene: Scene) -> FacetResult:
                         continue
                     confusability.append(
                         gap_factor
-                        * math.exp(
-                            -((_oriented_angle(left[1], right[1]) / math.radians(15.0)) ** 2)
-                        )
+                        * p_exp(-((_oriented_angle(left[1], right[1]) / math.radians(15.0)) ** 2))
                     )
-            node_defects.append(snap_unit(sum(confusability) / len(confusability)))
+            node_defects.append(snap_unit(p_sum(confusability) / len(confusability)))
             node_weights.append(float(len(records)))
         if node_defects:
             values["U11.v"] = global_blend(node_defects, node_weights)
+    published: Dict[str, float] = {}
+    for key, item in values.items():
+        if isinstance(item, torch.Tensor):
+            # Mirror of scene.value_result's traced seam: U11 builds its
+            # FacetResult directly (headline None), so the live subterm tensors
+            # are recorded here and published as the same detached floats.
+            record_subterm(key, item)
+            published[key] = float(item.detach().item())
+        else:
+            published[key] = item
     dropped_subterms = []
     if scene.graph.edge_styles is None:
         dropped_subterms.append("U11.ii:no_declared_style")
@@ -983,7 +1157,7 @@ def U11(scene: Scene) -> FacetResult:
         ResultState.VALUE,
         None,
         None,
-        values,
+        published,
         {
             "self_intersection_count": self_crossings,
             "edges": tuple(raw_edges),
@@ -996,7 +1170,7 @@ def U11(scene: Scene) -> FacetResult:
     )
 
 
-def _signed_route_turns(points: torch.Tensor) -> List[float]:
+def _signed_route_turns(points: torch.Tensor) -> List[Scalar]:
     """Return signed exterior turns of a flattened polyline.
 
     Parameters
@@ -1006,11 +1180,11 @@ def _signed_route_turns(points: torch.Tensor) -> List[float]:
 
     Returns
     -------
-    list[float]
-        Signed turns in radians.
+    list[float or torch.Tensor]
+        Signed turns in radians; live tensors inside a trace.
     """
 
-    turns: List[float] = []
+    turns: List[Scalar] = []
     for index in range(1, points.shape[0] - 1):
         incoming = points[index] - points[index - 1]
         outgoing = points[index + 1] - points[index]
@@ -1019,36 +1193,38 @@ def _signed_route_turns(points: torch.Tensor) -> List[float]:
             or float(torch.linalg.vector_norm(outgoing)) == 0.0
         ):
             continue
-        cross = float(incoming[0] * outgoing[1] - incoming[1] * outgoing[0])
-        dot = float(torch.dot(incoming, outgoing))
-        turns.append(math.atan2(cross, dot))
+        cross = keep(incoming[0] * outgoing[1] - incoming[1] * outgoing[0])
+        dot = keep(torch.dot(incoming, outgoing))
+        turns.append(_p_atan2(cross, dot))
     return turns
 
 
-def _zero_hinge(value: float, width: float) -> float:
+def _zero_hinge(value: Scalar, width: float) -> Scalar:
     """Evaluate U11's zero-anchored C1 excess hinge.
 
     Parameters
     ----------
-    value : float
+    value : float or torch.Tensor
         Signed excess.
     width : float
         Positive quadratic transition width.
 
     Returns
     -------
-    float
-        Zero for nonpositive input and asymptotically linear excess.
+    float or torch.Tensor
+        Zero for nonpositive input and asymptotically linear excess. The
+        branch is decided on the detached value; the nonpositive branch is the
+        hinge's exact constant-zero arm (zero value and zero slope at onset).
     """
 
-    if value <= 0.0:
+    if as_float(value) <= 0.0:
         return 0.0
-    if value <= width:
+    if as_float(value) <= width:
         return value * value / (2.0 * width)
     return value - width / 2.0
 
 
-def _nearest_axis_deviation(vector: torch.Tensor) -> float:
+def _nearest_axis_deviation(vector: torch.Tensor) -> Scalar:
     """Return acute direction deviation from the nearest page axis.
 
     Parameters
@@ -1058,12 +1234,12 @@ def _nearest_axis_deviation(vector: torch.Tensor) -> float:
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Deviation in ``[0, pi/4]``.
     """
 
-    angle = math.atan2(float(vector[1]), float(vector[0])) % (math.pi / 2.0)
-    return min(angle, math.pi / 2.0 - angle)
+    angle = _p_mod(_p_atan2(keep(vector[1]), keep(vector[0])), math.pi / 2.0)
+    return p_min(angle, math.pi / 2.0 - angle)
 
 
 def _first_nonzero_tangent(points: torch.Tensor, reverse: bool) -> Optional[torch.Tensor]:
@@ -1085,8 +1261,8 @@ def _first_nonzero_tangent(points: torch.Tensor, reverse: bool) -> Optional[torc
     ordered = torch.flip(points, dims=(0,)) if reverse else points
     for point in ordered[1:]:
         vector = point - ordered[0]
-        length = float(torch.linalg.vector_norm(vector))
-        if length > 0.0:
+        length = keep(torch.linalg.vector_norm(vector))
+        if as_float(length) > 0.0:
             return vector / length
     return None
 
@@ -1130,12 +1306,22 @@ def _box_boundary_segments(box: BoxGeometry) -> List[Tuple[torch.Tensor, torch.T
 
     lower = box.center - box.half_extents
     upper = box.center + box.half_extents
-    corners = [
-        torch.tensor([lower[0], lower[1]], dtype=torch.float64),
-        torch.tensor([upper[0], lower[1]], dtype=torch.float64),
-        torch.tensor([upper[0], upper[1]], dtype=torch.float64),
-        torch.tensor([lower[0], upper[1]], dtype=torch.float64),
-    ]
+    if tracing_active():
+        # Graph-preserving construction: torch.tensor([...]) would detach the
+        # live corner coordinates; stacking yields bit-identical values.
+        corners = [
+            torch.stack((lower[0], lower[1])),
+            torch.stack((upper[0], lower[1])),
+            torch.stack((upper[0], upper[1])),
+            torch.stack((lower[0], upper[1])),
+        ]
+    else:
+        corners = [
+            torch.tensor([lower[0], lower[1]], dtype=torch.float64),
+            torch.tensor([upper[0], lower[1]], dtype=torch.float64),
+            torch.tensor([upper[0], upper[1]], dtype=torch.float64),
+            torch.tensor([lower[0], upper[1]], dtype=torch.float64),
+        ]
     return list(zip(corners, corners[1:] + corners[:1]))
 
 
@@ -1164,7 +1350,7 @@ def _segment_boundary_parameter(
     end: torch.Tensor,
     boundary_start: torch.Tensor,
     boundary_end: torch.Tensor,
-) -> Optional[Tuple[float, torch.Tensor]]:
+) -> Optional[Tuple[Scalar, torch.Tensor]]:
     """Return one transversal segment-boundary intersection.
 
     Parameters
@@ -1176,19 +1362,19 @@ def _segment_boundary_parameter(
 
     Returns
     -------
-    tuple[float, torch.Tensor] or None
+    tuple[float or torch.Tensor, torch.Tensor] or None
         Query parameter and intersection point, including endpoints.
     """
 
     query = end - start
     boundary = boundary_end - boundary_start
-    denominator = float(query[0] * boundary[1] - query[1] * boundary[0])
-    if denominator == 0.0:
+    denominator = keep(query[0] * boundary[1] - query[1] * boundary[0])
+    if as_float(denominator) == 0.0:
         return None
     offset = boundary_start - start
-    query_parameter = float(offset[0] * boundary[1] - offset[1] * boundary[0]) / denominator
-    boundary_parameter = float(offset[0] * query[1] - offset[1] * query[0]) / denominator
-    if 0.0 <= query_parameter <= 1.0 and 0.0 <= boundary_parameter <= 1.0:
+    query_parameter = keep(offset[0] * boundary[1] - offset[1] * boundary[0]) / denominator
+    boundary_parameter = keep(offset[0] * query[1] - offset[1] * query[0]) / denominator
+    if 0.0 <= as_float(query_parameter) <= 1.0 and 0.0 <= as_float(boundary_parameter) <= 1.0:
         return query_parameter, start + query_parameter * query
     return None
 
@@ -1272,7 +1458,7 @@ def _segment_cleared_obstacle_interior_intersection(
     for boundary_start, boundary_end in boundaries:
         intersection = _segment_boundary_parameter(start, end, boundary_start, boundary_end)
         if intersection is not None:
-            parameters.append(intersection[0])
+            parameters.append(as_float(intersection[0]))
     ordered = sorted(set(parameters))
     direction = end - start
     return any(
@@ -1331,7 +1517,7 @@ def _cleared_obstacle_vertices(
     return [unique[key] for key in sorted(unique)]
 
 
-def _route_baseline(scene: Scene, route: Route) -> Tuple[float, float]:
+def _route_baseline(scene: Scene, route: Route) -> Tuple[Scalar, Scalar]:
     """Compute U11's obstacle-aware capped visibility-path baseline.
 
     Parameters
@@ -1343,15 +1529,19 @@ def _route_baseline(scene: Scene, route: Route) -> Tuple[float, float]:
 
     Returns
     -------
-    tuple[float, float]
-        Capped baseline length and its total absolute turning.
+    tuple[float or torch.Tensor, float or torch.Tensor]
+        Capped baseline length and its total absolute turning. Inside a trace
+        the visibility-graph search still runs on detached floats (a shortest
+        PATH is a decision); the chosen path's length is then rebuilt live from
+        the vertex geometry, and the contract-named ``softmin`` with
+        ``t_soft = 0.1 * chord_e`` (U11.md sec 7 step 4) flows tensors.
     """
 
     source, target = scene.graph.edges[route.edge_index]
     start = route.points[0]
     end = route.points[-1]
-    chord = float(torch.linalg.vector_norm(end - start))
-    if chord == 0.0:
+    chord = keep(torch.linalg.vector_norm(end - start))
+    if as_float(chord) == 0.0:
         return max(scene.intrinsic_unit, 1e-300), 0.0
     cap = 4.0 * chord
     clear_radius = _U11_TERMINAL_CLEAR_RADIUS * scene.intrinsic_unit
@@ -1365,7 +1555,7 @@ def _route_baseline(scene: Scene, route: Route) -> Tuple[float, float]:
         if box.owner not in {source, target}
         and float(torch.linalg.vector_norm(box.center - start))
         + float(torch.linalg.vector_norm(box.center - end))
-        <= cap
+        <= as_float(cap)
     ]
     if not any(
         _segment_cleared_obstacle_interior_intersection(
@@ -1419,16 +1609,28 @@ def _route_baseline(scene: Scene, route: Route) -> Tuple[float, float]:
                 distances[neighbor] = candidate
                 paths[neighbor] = candidate_path
                 heapq.heappush(queue, (candidate, candidate_path, neighbor))
-    visible = distances[1]
+    visible: Scalar = distances[1]
     temperature = 0.1 * chord
-    if math.isfinite(visible):
-        minimum = min(visible, cap)
-        soft_min = minimum - temperature * math.log(
-            math.exp(-(visible - minimum) / temperature) + math.exp(-(cap - minimum) / temperature)
+    if math.isfinite(distances[1]):
+        if tracing_active():
+            # The float Dijkstra above decided WHICH path is shortest; the
+            # chosen path's length is rebuilt live from the vertex geometry
+            # (accumulation order may differ from the float search by ULPs,
+            # the measured traced-vs-exact envelope, never the decision).
+            path_indices = paths[1]
+            visible = torch.stack(
+                [
+                    torch.linalg.vector_norm(vertices[second] - vertices[first])
+                    for first, second in zip(path_indices[:-1], path_indices[1:])
+                ]
+            ).sum()
+        minimum = p_min(visible, cap)
+        soft_min = minimum - temperature * p_log(
+            p_exp(-(visible - minimum) / temperature) + p_exp(-(cap - minimum) / temperature)
         )
-        baseline = max(chord, soft_min)
+        baseline = p_max(chord, soft_min)
         path_points = torch.stack([vertices[index] for index in paths[1]])
-        turning = sum(abs(value) for value in _signed_route_turns(path_points))
+        turning = p_sum([p_abs(value) for value in _signed_route_turns(path_points)])
     else:
         baseline = cap
         turning = 0.0
@@ -1451,7 +1653,7 @@ def U12(scene: Scene) -> FacetResult:
     nodes = [node for node, degree in enumerate(degrees) if degree == 2 and node not in loop_nodes]
     if len(nodes) < 5:
         return na_result("no_degree2_chains")
-    deviations = []
+    deviations: List[Scalar] = []
     for node in nodes:
         records = directions[node]
         if len(records) != 2:
@@ -1459,10 +1661,27 @@ def U12(scene: Scene) -> FacetResult:
             continue
         left_angle, _, left_confidence = records[0]
         right_angle, _, right_confidence = records[1]
-        left = torch.tensor([math.cos(left_angle), math.sin(left_angle)], dtype=torch.float64)
-        right = torch.tensor([math.cos(right_angle), math.sin(right_angle)], dtype=torch.float64)
-        cosine = min(1.0, max(-1.0, float(torch.dot(-left, right))))
-        deviation = math.acos(cosine) / math.pi
+        if isinstance(left_angle, torch.Tensor) or isinstance(right_angle, torch.Tensor):
+            left = torch.stack(
+                (_p_cos(_scalar_tensor(left_angle)), _p_sin(_scalar_tensor(left_angle)))
+            )
+            right = torch.stack(
+                (_p_cos(_scalar_tensor(right_angle)), _p_sin(_scalar_tensor(right_angle)))
+            )
+        else:
+            left = torch.tensor([math.cos(left_angle), math.sin(left_angle)], dtype=torch.float64)
+            right = torch.tensor(
+                [math.cos(right_angle), math.sin(right_angle)], dtype=torch.float64
+            )
+        cosine = p_min(1.0, p_max(-1.0, keep(torch.dot(-left, right))))
+        if as_float(cosine) >= 1.0:
+            # acos has infinite slope at the clamp boundary; the historical
+            # float value there is exactly acos(1)/pi = 0 (perfect continuation).
+            deviation: Scalar = math.acos(1.0) / math.pi
+        elif as_float(cosine) <= -1.0:
+            deviation = math.acos(-1.0) / math.pi
+        else:
+            deviation = _p_acos(cosine) / math.pi
         deviations.append(left_confidence * right_confidence * deviation)
     defect = global_blend(deviations)
     return value_result(
@@ -1479,7 +1698,7 @@ def U13(scene: Scene) -> FacetResult:
         return na_result("too_few_edges")
     routes = resolved_routes(scene)
     bundles = scene.graph.edge_bundles or tuple(None for _ in range(scene.edge_count))
-    contributions: List[float] = []
+    contributions: List[Scalar] = []
     pair_records: List[Tuple[int, int, float]] = []
     for left_index, left in enumerate(routes):
         for right in routes[left_index + 1 :]:
@@ -1508,17 +1727,17 @@ def U13(scene: Scene) -> FacetResult:
                 )
             contribution = _parallel_route_integral(left_points, right_points, scene.intrinsic_unit)
             contributions.append(contribution)
-            pair_records.append((left.edge_index, right.edge_index, contribution))
+            pair_records.append((left.edge_index, right.edge_index, _raw(contribution)))
     degrees = [0] * scene.node_count
     for source, target in scene.graph.edges:
         degrees[source] += 1
         degrees[target] += 1
     opportunity = int(scene.edge_count + sum(degree * (degree - 1) / 2.0 for degree in degrees))
-    raw_sum = sum(contributions)
-    values: Dict[str, float] = {
+    raw_sum = p_sum(contributions)
+    values: Dict[str, Scalar] = {
         "U13.i": _raw_u13_blend(contributions, opportunity),
     }
-    bundle_defects: List[float] = []
+    bundle_defects: List[Scalar] = []
     if scene.graph.edge_bundles is not None:
         grouped: DefaultDict[str, List[Route]] = defaultdict(list)
         for route, bundle in zip(routes, bundles):
@@ -1530,11 +1749,14 @@ def U13(scene: Scene) -> FacetResult:
                     _point_at_arc_fraction(route.points, end_fraction) for route in members
                 ]
                 minimum = min(
-                    float(torch.linalg.vector_norm(left - right))
-                    for left_index, left in enumerate(departure_points)
-                    for right in departure_points[left_index + 1 :]
+                    [
+                        keep(torch.linalg.vector_norm(left - right))
+                        for left_index, left in enumerate(departure_points)
+                        for right in departure_points[left_index + 1 :]
+                    ],
+                    key=as_float,
                 )
-                bundle_defects.append(max(0.0, 1.0 - minimum / (0.5 * scene.intrinsic_unit)) ** 2)
+                bundle_defects.append(p_max(0.0, 1.0 - minimum / (0.5 * scene.intrinsic_unit)) ** 2)
         if bundle_defects:
             values["U13.ii"] = blend_with_weights(
                 bundle_defects,
@@ -1546,19 +1768,19 @@ def U13(scene: Scene) -> FacetResult:
         values,
         {
             "opportunity": opportunity,
-            "sum_C_ef": raw_sum,
+            "sum_C_ef": _raw(raw_sum),
             "pair_contributions": tuple(pair_records),
-            "bundle_end_defects": tuple(bundle_defects),
+            "bundle_end_defects": tuple(_raw(defect) for defect in bundle_defects),
         },
     )
 
 
-def _raw_u13_blend(values: List[float], opportunity: int) -> float:
+def _raw_u13_blend(values: List[Scalar], opportunity: int) -> Scalar:
     """Aggregate U13 pair integrals through its mean/tail/smoothmax blend.
 
     Parameters
     ----------
-    values : list[float]
+    values : list[float or torch.Tensor]
         Nonnegative admitted pair integrals.
     opportunity : int
         Frozen input-only normalizer for the mean component. Tail components use
@@ -1566,19 +1788,19 @@ def _raw_u13_blend(values: List[float], opportunity: int) -> float:
 
     Returns
     -------
-    float
-        Contract-blended ambiguity defect.
+    float or torch.Tensor
+        Contract-blended ambiguity defect; a live tensor inside a trace.
     """
 
     if opportunity <= 0:
         return 0.0
     if not values:
         return 0.0
-    population = sorted(values)
-    mean = sum(population) / opportunity
+    population = sorted(values, key=as_float)
+    mean = p_sum(population) / opportunity
     tail_mass = 0.10 * len(population)
     remaining = tail_mass
-    tail_sum = 0.0
+    tail_sum: Scalar = 0.0
     for value in reversed(population):
         selected = min(1.0, remaining)
         tail_sum += selected * value
@@ -1587,37 +1809,37 @@ def _raw_u13_blend(values: List[float], opportunity: int) -> float:
             break
     cvar = tail_sum / tail_mass
     maximum = population[-1]
-    smooth_maximum = maximum + 0.05 * math.log(
-        sum(math.exp((value - maximum) / 0.05) for value in population) / len(population)
+    smooth_maximum = maximum + 0.05 * p_log(
+        p_sum([p_exp((value - maximum) / 0.05) for value in population]) / len(population)
     )
 
-    def saturate(value: float) -> float:
+    def saturate(value: Scalar) -> Scalar:
         """Apply U13's common ``x/(x+0.05)`` saturation.
 
         Parameters
         ----------
-        value : float
+        value : float or torch.Tensor
             Nonnegative raw aggregate.
 
         Returns
         -------
-        float
+        float or torch.Tensor
             Bounded component burden.
         """
 
-        return value / (value + 0.05) if value > 0.0 else 0.0
+        return value / (value + 0.05) if as_float(value) > 0.0 else 0.0
 
     return 0.65 * saturate(mean) + 0.25 * saturate(cvar) + 0.10 * saturate(smooth_maximum)
 
 
-def _trim_polyline(points: torch.Tensor, start_trim: float, end_trim: float) -> torch.Tensor:
+def _trim_polyline(points: torch.Tensor, start_trim: Scalar, end_trim: Scalar) -> torch.Tensor:
     """Trim fixed arc-length windows from a flattened polyline's ends.
 
     Parameters
     ----------
     points : torch.Tensor
         Polyline vertices with shape ``[P, 2]``.
-    start_trim, end_trim : float
+    start_trim, end_trim : float or torch.Tensor
         Nonnegative arc lengths removed from the source and target ends.
 
     Returns
@@ -1627,18 +1849,18 @@ def _trim_polyline(points: torch.Tensor, start_trim: float, end_trim: float) -> 
     """
 
     lengths = torch.linalg.vector_norm(points[1:] - points[:-1], dim=1)
-    total = float(torch.sum(lengths))
-    if start_trim + end_trim >= total:
+    total = keep(torch.sum(lengths))
+    if as_float(start_trim + end_trim) >= as_float(total):
         midpoint = _point_at_arc_fraction(points, 0.5)
         return torch.stack((midpoint, midpoint))
     cumulative = torch.cat((torch.zeros(1, dtype=torch.float64), torch.cumsum(lengths, dim=0)))
 
-    def at_distance(distance: float) -> torch.Tensor:
+    def at_distance(distance: Scalar) -> torch.Tensor:
         """Interpolate one point at an absolute arc distance.
 
         Parameters
         ----------
-        distance : float
+        distance : float or torch.Tensor
             Distance from the source terminal.
 
         Returns
@@ -1649,10 +1871,10 @@ def _trim_polyline(points: torch.Tensor, start_trim: float, end_trim: float) -> 
 
         segment = int(
             torch.searchsorted(
-                cumulative[1:], torch.tensor(distance, dtype=torch.float64), right=False
+                cumulative[1:], torch.tensor(as_float(distance), dtype=torch.float64), right=False
             )
         )
-        local = (distance - float(cumulative[segment])) / max(float(lengths[segment]), 1e-300)
+        local = (distance - keep(cumulative[segment])) / p_max(keep(lengths[segment]), 1e-300)
         return points[segment] + local * (points[segment + 1] - points[segment])
 
     start_distance = start_trim
@@ -1661,7 +1883,7 @@ def _trim_polyline(points: torch.Tensor, start_trim: float, end_trim: float) -> 
     retained.extend(
         points[index]
         for index in range(1, points.shape[0] - 1)
-        if start_distance < float(cumulative[index]) < end_distance
+        if as_float(start_distance) < float(cumulative[index]) < as_float(end_distance)
     )
     retained.append(at_distance(end_distance))
     return torch.stack(retained)
@@ -1669,7 +1891,7 @@ def _trim_polyline(points: torch.Tensor, start_trim: float, end_trim: float) -> 
 
 def _parallel_route_integral(
     left: torch.Tensor, right: torch.Tensor, intrinsic_unit: float
-) -> float:
+) -> Scalar:
     """Integrate U13's kernel against the nearest point on the other route.
 
     Parameters
@@ -1681,16 +1903,19 @@ def _parallel_route_integral(
 
     Returns
     -------
-    float
-        Dimensionless exact piecewise-polynomial route-pair integral.
+    float or torch.Tensor
+        Dimensionless exact piecewise-polynomial route-pair integral. The
+        breakpoint partition and nearest-branch selection are decided on
+        detached values; the piecewise integrand is continuous across every
+        internal breakpoint, so the detached-partition gradient is a.e. exact.
     """
 
-    total = 0.0
+    total: Scalar = 0.0
     radius = 3.0 * intrinsic_unit
     for start_left, end_left in zip(left[:-1], left[1:]):
         vector_left = end_left - start_left
-        length_left = float(torch.linalg.vector_norm(vector_left))
-        if length_left == 0.0:
+        length_left = keep(torch.linalg.vector_norm(vector_left))
+        if as_float(length_left) == 0.0:
             continue
         unit_left = vector_left / length_left
         right_segments = [
@@ -1713,7 +1938,7 @@ def _parallel_route_integral(
             if upper <= lower:
                 continue
             midpoint = (lower + upper) / 2.0
-            candidates: List[Tuple[float, float, float, float]] = []
+            candidates: List[Tuple[Scalar, Scalar, Scalar, Scalar]] = []
             for start_right, end_right, vector_right in right_segments:
                 coefficients = _segment_distance_polynomial(
                     start_left,
@@ -1724,7 +1949,7 @@ def _parallel_route_integral(
                     midpoint,
                 )
                 unit_right = vector_right / torch.linalg.vector_norm(vector_right)
-                cosine = abs(float(torch.dot(unit_left, unit_right)))
+                cosine = p_abs(keep(torch.dot(unit_left, unit_right)))
                 candidates.append((*coefficients, cosine**4))
             envelope_breaks = [lower, upper]
             for left_index, left_candidate in enumerate(candidates):
@@ -1754,12 +1979,14 @@ def _parallel_route_integral(
                 sample = (interval_left + interval_right) / 2.0
                 candidate = min(
                     candidates,
-                    key=lambda item: item[0] * sample * sample + item[1] * sample + item[2],
+                    key=lambda item: as_float(
+                        item[0] * sample * sample + item[1] * sample + item[2]
+                    ),
                 )
                 squared_distance = (
                     candidate[0] * sample * sample + candidate[1] * sample + candidate[2]
                 )
-                if squared_distance >= radius * radius:
+                if as_float(squared_distance) >= radius * radius:
                     continue
                 total += (
                     candidate[3]
@@ -1784,7 +2011,7 @@ def _segment_distance_polynomial(
     segment_end: torch.Tensor,
     segment_vector: torch.Tensor,
     sample_parameter: float,
-) -> Tuple[float, float, float]:
+) -> Tuple[Scalar, Scalar, Scalar]:
     """Return one point-to-segment squared-distance polynomial branch.
 
     Parameters
@@ -1798,52 +2025,52 @@ def _segment_distance_polynomial(
 
     Returns
     -------
-    tuple[float, float, float]
+    tuple[float or torch.Tensor, ...]
         Coefficients ``(a, b, c)`` of squared distance ``a*t^2+b*t+c``.
     """
 
-    denominator = float(torch.dot(segment_vector, segment_vector))
+    denominator = keep(torch.dot(segment_vector, segment_vector))
     offset = query_start - segment_start
     projection = (
-        float(torch.dot(offset, segment_vector))
-        + sample_parameter * float(torch.dot(query_vector, segment_vector))
+        keep(torch.dot(offset, segment_vector))
+        + sample_parameter * keep(torch.dot(query_vector, segment_vector))
     ) / denominator
-    if projection <= 0.0:
+    if as_float(projection) <= 0.0:
         difference = query_start - segment_start
         return (
-            float(torch.dot(query_vector, query_vector)),
-            2.0 * float(torch.dot(difference, query_vector)),
-            float(torch.dot(difference, difference)),
+            keep(torch.dot(query_vector, query_vector)),
+            2.0 * keep(torch.dot(difference, query_vector)),
+            keep(torch.dot(difference, difference)),
         )
-    if projection >= 1.0:
+    if as_float(projection) >= 1.0:
         difference = query_start - segment_end
         return (
-            float(torch.dot(query_vector, query_vector)),
-            2.0 * float(torch.dot(difference, query_vector)),
-            float(torch.dot(difference, difference)),
+            keep(torch.dot(query_vector, query_vector)),
+            2.0 * keep(torch.dot(difference, query_vector)),
+            keep(torch.dot(difference, difference)),
         )
-    offset_projection = float(torch.dot(offset, segment_vector))
-    vector_projection = float(torch.dot(query_vector, segment_vector))
+    offset_projection = keep(torch.dot(offset, segment_vector))
+    vector_projection = keep(torch.dot(query_vector, segment_vector))
     return (
-        float(torch.dot(query_vector, query_vector)) - vector_projection**2 / denominator,
+        keep(torch.dot(query_vector, query_vector)) - vector_projection**2 / denominator,
         2.0
         * (
-            float(torch.dot(offset, query_vector))
+            keep(torch.dot(offset, query_vector))
             - offset_projection * vector_projection / denominator
         ),
-        float(torch.dot(offset, offset)) - offset_projection**2 / denominator,
+        keep(torch.dot(offset, offset)) - offset_projection**2 / denominator,
     )
 
 
 def _quadratic_roots_in_interval(
-    a: float, b: float, c: float, lower: float, upper: float
+    a: Scalar, b: Scalar, c: Scalar, lower: float, upper: float
 ) -> List[float]:
     """Return real roots strictly inside one parameter interval.
 
     Parameters
     ----------
-    a, b, c : float
-        Quadratic coefficients.
+    a, b, c : float or torch.Tensor
+        Quadratic coefficients; breakpoints are decided on detached values.
     lower, upper : float
         Open interval bounds.
 
@@ -1853,6 +2080,9 @@ def _quadratic_roots_in_interval(
         Sorted unique roots inside ``(lower, upper)``.
     """
 
+    a = as_float(a)
+    b = as_float(b)
+    c = as_float(c)
     if a == 0.0:
         if b == 0.0:
             return []
@@ -1867,18 +2097,18 @@ def _quadratic_roots_in_interval(
 
 
 def _quartic_distance_kernel_integral(
-    a: float,
-    b: float,
-    c: float,
+    a: Scalar,
+    b: Scalar,
+    c: Scalar,
     radius: float,
     lower: float,
     upper: float,
-) -> float:
+) -> Scalar:
     """Integrate ``(1-(a*t^2+b*t+c)/radius^2)^2`` exactly.
 
     Parameters
     ----------
-    a, b, c : float
+    a, b, c : float or torch.Tensor
         Squared-distance polynomial coefficients.
     radius : float
         Positive compact-support distance.
@@ -1887,8 +2117,8 @@ def _quartic_distance_kernel_integral(
 
     Returns
     -------
-    float
-        Exact nonnegative kernel integral.
+    float or torch.Tensor
+        Exact nonnegative kernel integral; a live tensor inside a trace.
     """
 
     radius_squared = radius * radius
@@ -1901,7 +2131,7 @@ def _quartic_distance_kernel_integral(
         a * a / radius_fourth,
     )
 
-    def primitive(value: float) -> float:
+    def primitive(value: float) -> Scalar:
         """Evaluate the quartic antiderivative.
 
         Parameters
@@ -1911,16 +2141,18 @@ def _quartic_distance_kernel_integral(
 
         Returns
         -------
-        float
+        float or torch.Tensor
             Antiderivative value.
         """
 
-        return sum(
-            coefficient * value ** (degree + 1) / (degree + 1)
-            for degree, coefficient in enumerate(coefficients)
+        return p_sum(
+            [
+                coefficient * value ** (degree + 1) / (degree + 1)
+                for degree, coefficient in enumerate(coefficients)
+            ]
         )
 
-    return max(0.0, primitive(upper) - primitive(lower))
+    return p_max(0.0, primitive(upper) - primitive(lower))
 
 
 def U15(scene: Scene) -> FacetResult:
@@ -1934,7 +2166,7 @@ def U15(scene: Scene) -> FacetResult:
     if not parallel_groups and not loops:
         return na_result("no_multiedges_or_selfloops")
     route_by_edge = {route.edge_index: route for route in resolved_routes(scene)}
-    class_defects: List[float] = []
+    class_defects: List[Scalar] = []
     class_pair_defects: Dict[Tuple[int, int], Tuple[float, ...]] = {}
     for edge in parallel_groups:
         indices = [
@@ -1942,22 +2174,22 @@ def U15(scene: Scene) -> FacetResult:
             for index, candidate in enumerate(scene.graph.edges)
             if tuple(sorted(candidate)) == edge
         ]
-        pair_defects: List[float] = []
+        pair_defects: List[Scalar] = []
         for left_position, left_index in enumerate(indices):
             for right_index in indices[left_position + 1 :]:
                 left = route_by_edge.get(left_index)
                 right = route_by_edge.get(right_index)
                 if left is None or right is None:
                     continue
-                left_length = float(
+                left_length = keep(
                     torch.sum(torch.linalg.vector_norm(left.points[1:] - left.points[:-1], dim=1))
                 )
-                right_length = float(
+                right_length = keep(
                     torch.sum(torch.linalg.vector_norm(right.points[1:] - right.points[:-1], dim=1))
                 )
-                maximum_length = max(left_length, right_length)
-                shared_length = min(left_length, right_length)
-                if maximum_length == 0.0:
+                maximum_length = p_max(left_length, right_length)
+                shared_length = p_min(left_length, right_length)
+                if as_float(maximum_length) == 0.0:
                     pair_defects.append(0.0)
                     continue
                 left_measured = _trim_polyline(
@@ -1967,32 +2199,25 @@ def U15(scene: Scene) -> FacetResult:
                     right.points, 0.1 * shared_length, 0.1 * shared_length
                 )
                 separation = min(
-                    _segment_segment_distance(left_start, left_end, right_start, right_end)
-                    for left_start, left_end in zip(left_measured[:-1], left_measured[1:])
-                    for right_start, right_end in zip(right_measured[:-1], right_measured[1:])
+                    [
+                        _segment_segment_distance(left_start, left_end, right_start, right_end)
+                        for left_start, left_end in zip(left_measured[:-1], left_measured[1:])
+                        for right_start, right_end in zip(right_measured[:-1], right_measured[1:])
+                    ],
+                    key=as_float,
                 )
-                relative = separation / shared_length if shared_length > 0.0 else 0.0
-                defect = max(0.0, 1.0 - relative / 0.05) ** 2
-                fade_shared = float(
-                    smoothstep(
-                        torch.tensor(shared_length / (0.1 * maximum_length), dtype=torch.float64)
-                    )
-                )
-                fade_absolute = float(
-                    smoothstep(
-                        torch.tensor(
-                            maximum_length / (0.1 * scene.intrinsic_unit), dtype=torch.float64
-                        )
-                    )
-                )
+                relative = separation / shared_length if as_float(shared_length) > 0.0 else 0.0
+                defect = p_max(0.0, 1.0 - relative / 0.05) ** 2
+                fade_shared = _smooth_fade(shared_length / (0.1 * maximum_length))
+                fade_absolute = _smooth_fade(maximum_length / (0.1 * scene.intrinsic_unit))
                 pair_defects.append(fade_shared * fade_absolute * defect)
         if pair_defects:
             class_defects.append(global_blend(pair_defects))
-            class_pair_defects[edge] = tuple(pair_defects)
-    values: Dict[str, float] = {}
+            class_pair_defects[edge] = tuple(_raw(defect) for defect in pair_defects)
+    values: Dict[str, Scalar] = {}
     if class_defects:
         values["U15.i"] = global_blend(class_defects)
-    loop_defects: List[float] = []
+    loop_defects: List[Scalar] = []
     for loop_index in loops:
         route = route_by_edge.get(loop_index)
         if route is None:
@@ -2006,7 +2231,7 @@ def U15(scene: Scene) -> FacetResult:
             if scene.style.edge_stroke_widths
             else scene.style.route_stroke_width * scene.style.coordinate_scale
         )
-        integral = 0.0
+        integral: Scalar = 0.0
         for obstacle in obstacles:
             for start, end in zip(route.points[:-1], route.points[1:]):
                 contribution, _ = _segment_box_deficit_integral(
@@ -2017,7 +2242,7 @@ def U15(scene: Scene) -> FacetResult:
                     scene.intrinsic_unit,
                 )
                 integral += contribution
-        loop_defects.append(integral / (integral + 0.05) if integral > 0.0 else 0.0)
+        loop_defects.append(integral / (integral + 0.05) if as_float(integral) > 0.0 else 0.0)
     if loop_defects:
         values["U15.ii"] = global_blend(loop_defects)
     return mean_result(
@@ -2025,7 +2250,7 @@ def U15(scene: Scene) -> FacetResult:
         values,
         {
             "parallel_classes": class_pair_defects,
-            "loop_defects": tuple(loop_defects),
+            "loop_defects": tuple(_raw(defect) for defect in loop_defects),
         },
     )
 
@@ -2035,7 +2260,7 @@ def _segment_segment_distance(
     end_left: torch.Tensor,
     start_right: torch.Tensor,
     end_right: torch.Tensor,
-) -> float:
+) -> Scalar:
     """Return the exact minimum distance between two planar line segments.
 
     Parameters
@@ -2045,21 +2270,24 @@ def _segment_segment_distance(
 
     Returns
     -------
-    float
-        Nonnegative Euclidean distance.
+    float or torch.Tensor
+        Nonnegative Euclidean distance; a live tensor inside a trace.
     """
 
     if proper_intersection(start_left, end_left, start_right, end_right):
         return 0.0
     return min(
-        _point_segment_distance(start_left, start_right, end_right),
-        _point_segment_distance(end_left, start_right, end_right),
-        _point_segment_distance(start_right, start_left, end_left),
-        _point_segment_distance(end_right, start_left, end_left),
+        [
+            _point_segment_distance(start_left, start_right, end_right),
+            _point_segment_distance(end_left, start_right, end_right),
+            _point_segment_distance(start_right, start_left, end_left),
+            _point_segment_distance(end_right, start_left, end_left),
+        ],
+        key=as_float,
     )
 
 
-def _point_segment_distance(point: torch.Tensor, start: torch.Tensor, end: torch.Tensor) -> float:
+def _point_segment_distance(point: torch.Tensor, start: torch.Tensor, end: torch.Tensor) -> Scalar:
     """Return exact Euclidean distance from a point to a line segment.
 
     Parameters
@@ -2069,16 +2297,16 @@ def _point_segment_distance(point: torch.Tensor, start: torch.Tensor, end: torch
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Nonnegative distance.
     """
 
     direction = end - start
-    denominator = float(torch.dot(direction, direction))
-    if denominator == 0.0:
-        return float(torch.linalg.vector_norm(point - start))
-    parameter = min(1.0, max(0.0, float(torch.dot(point - start, direction)) / denominator))
-    return float(torch.linalg.vector_norm(point - (start + parameter * direction)))
+    denominator = keep(torch.dot(direction, direction))
+    if as_float(denominator) == 0.0:
+        return _norm_or_zero(point - start)
+    parameter = p_min(1.0, p_max(0.0, keep(torch.dot(point - start, direction)) / denominator))
+    return _norm_or_zero(point - (start + parameter * direction))
 
 
 def _sample_polyline(points: torch.Tensor, count: int) -> torch.Tensor:
@@ -2114,23 +2342,23 @@ def U16(scene: Scene) -> FacetResult:
 
     if not scene.edge_label_boxes:
         return na_result("no_declared_edge_labels")
-    overlap_defects: List[float] = []
-    ownership_defects: List[float] = []
-    overlap_sums: List[float] = []
-    ambiguity_values: List[float] = []
-    anchoring_values: List[float] = []
+    overlap_defects: List[Scalar] = []
+    ownership_defects: List[Scalar] = []
+    overlap_sums: List[Scalar] = []
+    ambiguity_values: List[Scalar] = []
+    anchoring_values: List[Scalar] = []
     route_by_edge = {route.edge_index: route for route in resolved_routes(scene)}
     obstacle_boxes = (
         list(scene.edge_label_boxes) + list(scene.node_label_boxes) + list(scene.node_boxes)
     )
     for label in scene.edge_label_boxes:
         label_area = float(4.0 * torch.prod(label.half_extents))
-        overlap_sum = 0.0
+        overlap_sum: Scalar = 0.0
         for obstacle in obstacle_boxes:
             if obstacle is label:
                 continue
             _, overlap_fraction = aabb_pair(label, obstacle)
-            obstacle_area = float(4.0 * torch.prod(obstacle.half_extents))
+            obstacle_area = float(4.0 * torch.prod(obstacle.half_extents.detach()))
             overlap_area = overlap_fraction * min(label_area, obstacle_area)
             overlap_sum += overlap_area / min(label_area, obstacle_area)
         for edge_index, route in route_by_edge.items():
@@ -2156,29 +2384,29 @@ def U16(scene: Scene) -> FacetResult:
 
         own_route = route_by_edge[label.owner]
         own_distance = _point_polyline_distance(label.center, own_route.points)
-        foreign_distance = min(
-            (
-                _point_polyline_distance(label.center, route.points)
-                for edge_index, route in route_by_edge.items()
-                if edge_index != label.owner
-            ),
-            default=math.inf,
+        foreign_candidates = [
+            _point_polyline_distance(label.center, route.points)
+            for edge_index, route in route_by_edge.items()
+            if edge_index != label.owner
+        ]
+        foreign_distance: Scalar = (
+            min(foreign_candidates, key=as_float) if foreign_candidates else math.inf
         )
         regularizer = 0.25 * scene.intrinsic_unit
         ratio = (
             (own_distance + regularizer) / (foreign_distance + regularizer)
-            if math.isfinite(foreign_distance)
+            if math.isfinite(as_float(foreign_distance))
             else 0.0
         )
         ambiguity = ratio * ratio / (1.0 + ratio * ratio)
         label_height = 2.0 * float(label.half_extents[1])
-        anchoring_ratio = max(0.0, own_distance - label_height) / (2.0 * scene.intrinsic_unit)
+        anchoring_ratio = p_max(0.0, own_distance - label_height) / (2.0 * scene.intrinsic_unit)
         anchoring = anchoring_ratio * anchoring_ratio / (1.0 + anchoring_ratio * anchoring_ratio)
         ownership = 1.0 - (1.0 - ambiguity) * (1.0 - anchoring)
         ambiguity_values.append(ambiguity)
         anchoring_values.append(anchoring)
         ownership_defects.append(ownership)
-    values = {
+    values: Dict[str, Scalar] = {
         "U16.i": global_blend(overlap_defects),
         "U16.ii": global_blend(ownership_defects),
     }
@@ -2187,14 +2415,14 @@ def U16(scene: Scene) -> FacetResult:
         values,
         {
             "label_count": len(scene.edge_label_boxes),
-            "overlap_sums": tuple(overlap_sums),
-            "ambiguity": tuple(ambiguity_values),
-            "anchoring": tuple(anchoring_values),
+            "overlap_sums": tuple(_raw(value) for value in overlap_sums),
+            "ambiguity": tuple(_raw(value) for value in ambiguity_values),
+            "anchoring": tuple(_raw(value) for value in anchoring_values),
         },
     )
 
 
-def _point_polyline_distance(point: torch.Tensor, points: torch.Tensor) -> float:
+def _point_polyline_distance(point: torch.Tensor, points: torch.Tensor) -> Scalar:
     """Return exact point-to-flattened-polyline distance.
 
     Parameters
@@ -2206,8 +2434,8 @@ def _point_polyline_distance(point: torch.Tensor, points: torch.Tensor) -> float
 
     Returns
     -------
-    float
-        Minimum Euclidean distance.
+    float or torch.Tensor
+        Minimum Euclidean distance; a live tensor inside a trace.
     """
 
     distance, _ = _point_polyline_projection(point, points)
@@ -2216,7 +2444,7 @@ def _point_polyline_distance(point: torch.Tensor, points: torch.Tensor) -> float
 
 def _point_polyline_projection(
     point: torch.Tensor, points: torch.Tensor
-) -> Tuple[float, torch.Tensor]:
+) -> Tuple[Scalar, torch.Tensor]:
     """Return distance and nearest point on a flattened polyline.
 
     Parameters
@@ -2228,24 +2456,24 @@ def _point_polyline_projection(
 
     Returns
     -------
-    tuple[float, torch.Tensor]
+    tuple[float or torch.Tensor, torch.Tensor]
         Minimum distance and its canonical first nearest projection.
     """
 
-    candidates: List[Tuple[float, torch.Tensor]] = []
+    candidates: List[Tuple[Scalar, torch.Tensor]] = []
     for start, end in zip(points[:-1], points[1:]):
         direction = end - start
-        denominator = float(torch.dot(direction, direction))
-        if denominator == 0.0:
-            candidates.append((float(torch.linalg.vector_norm(point - start)), start))
+        denominator = keep(torch.dot(direction, direction))
+        if as_float(denominator) == 0.0:
+            candidates.append((_norm_or_zero(point - start), start))
             continue
-        parameter = min(
+        parameter = p_min(
             1.0,
-            max(0.0, float(torch.dot(point - start, direction)) / denominator),
+            p_max(0.0, keep(torch.dot(point - start, direction)) / denominator),
         )
         projection = start + parameter * direction
-        candidates.append((float(torch.linalg.vector_norm(point - projection)), projection))
-    return min(candidates, key=lambda item: item[0])
+        candidates.append((_norm_or_zero(point - projection), projection))
+    return min(candidates, key=lambda item: as_float(item[0]))
 
 
 def _route_box_ink_area(
@@ -2255,7 +2483,7 @@ def _route_box_ink_area(
     *,
     excluded_center: Optional[torch.Tensor] = None,
     excluded_radius: float = 0.0,
-) -> float:
+) -> Scalar:
     """Return flattened route-ribbon area whose centerline lies inside a box.
 
     Parameters
@@ -2273,20 +2501,22 @@ def _route_box_ink_area(
 
     Returns
     -------
-    float
-        Centerline coverage times width, capped by the obstacle area.
+    float or torch.Tensor
+        Centerline coverage times width, capped by the obstacle area. The
+        clip window parameters flow live (they carry real boundary gradient);
+        only degeneracy/emptiness branches read detached values.
     """
 
     lower = box.center - box.half_extents
     upper = box.center + box.half_extents
-    length = 0.0
+    length: Scalar = 0.0
     for start, end in zip(points[:-1], points[1:]):
         direction = end - start
-        entry = 0.0
-        exit_ = 1.0
+        entry: Scalar = 0.0
+        exit_: Scalar = 1.0
         for axis in range(2):
-            delta = float(direction[axis])
-            if delta == 0.0:
+            delta = keep(direction[axis])
+            if as_float(delta) == 0.0:
                 if float(start[axis]) < float(lower[axis]) or float(start[axis]) > float(
                     upper[axis]
                 ):
@@ -2294,27 +2524,27 @@ def _route_box_ink_area(
                     exit_ = 0.0
                     break
                 continue
-            first = (float(lower[axis]) - float(start[axis])) / delta
-            second = (float(upper[axis]) - float(start[axis])) / delta
-            entry = max(entry, min(first, second))
-            exit_ = min(exit_, max(first, second))
-            if entry > exit_:
+            first = (keep(lower[axis]) - keep(start[axis])) / delta
+            second = (keep(upper[axis]) - keep(start[axis])) / delta
+            entry = p_max(entry, p_min(first, second))
+            exit_ = p_min(exit_, p_max(first, second))
+            if as_float(entry) > as_float(exit_):
                 break
-        if entry <= exit_:
+        if as_float(entry) <= as_float(exit_):
             admitted = exit_ - entry
             if excluded_center is not None and excluded_radius > 0.0:
                 offset = start - excluded_center
-                quadratic_a = float(torch.dot(direction, direction))
-                quadratic_b = 2.0 * float(torch.dot(offset, direction))
-                quadratic_c = float(torch.dot(offset, offset)) - excluded_radius**2
+                quadratic_a = keep(torch.dot(direction, direction))
+                quadratic_b = 2.0 * keep(torch.dot(offset, direction))
+                quadratic_c = keep(torch.dot(offset, offset)) - excluded_radius**2
                 discriminant = quadratic_b**2 - 4.0 * quadratic_a * quadratic_c
-                if quadratic_a > 0.0 and discriminant >= 0.0:
-                    root = math.sqrt(discriminant)
+                if as_float(quadratic_a) > 0.0 and as_float(discriminant) >= 0.0:
+                    root = 0.0 if as_float(discriminant) == 0.0 else p_sqrt(discriminant)
                     circle_entry = (-quadratic_b - root) / (2.0 * quadratic_a)
                     circle_exit = (-quadratic_b + root) / (2.0 * quadratic_a)
-                    admitted -= max(
+                    admitted -= p_max(
                         0.0,
-                        min(exit_, circle_exit) - max(entry, circle_entry),
+                        p_min(exit_, circle_exit) - p_max(entry, circle_entry),
                     )
-            length += max(0.0, admitted) * float(torch.linalg.vector_norm(direction))
-    return min(length * width, float(4.0 * torch.prod(box.half_extents)))
+            length += p_max(0.0, admitted) * keep(torch.linalg.vector_norm(direction))
+    return p_min(length * width, float(4.0 * torch.prod(box.half_extents.detach())))
