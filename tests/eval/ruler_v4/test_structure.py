@@ -275,6 +275,22 @@ def test_u22_declared_path_target_is_reciprocal_kappa_in_signed_frame() -> None:
         )
 
 
+def test_u22_declared_path_long_strip_scores_exact_zero_inside_plateau() -> None:
+    """U22 section 15 golden 6: a declared path strip scores 0, undeclared > 0."""
+
+    # 2.0u spacing keeps the strip's aspect inside the frozen kappa_class *
+    # kappa_ar = 8 x 3 = 24 plateau, so the exemption's zero is exact
+    # (P4REVERIFY6 MINOR-1; the 3.0u fixture above sits past the plateau and
+    # pins the nonzero regression signature instead).
+    strip = torch.tensor([[0.0, 2.0 * index] for index in range(10)], dtype=torch.float64)
+    declared = U22(_scene(strip, (), {"flow_axis": (0.0, 1.0), "declared_graph_class": "path"}))
+    undeclared = U22(_scene(strip, (), {"flow_axis": (0.0, 1.0)}))
+    assert declared.value == pytest.approx(0.0, abs=0.0)
+    assert declared.raw["exemption"] == "class:path"
+    assert undeclared.value is not None and undeclared.value > 0.5
+    assert undeclared.raw["exemption"] == "unit"
+
+
 def test_u22_declared_tree_breadth_fold_passes_through_signed_frame() -> None:
     """tree max(1, b/d) is already breadth-over-depth: wide is expected."""
 
