@@ -114,4 +114,4 @@ def test_cc1_strict_win_requires_margin_greater_than_bound() -> None:
     )
 
     assert equal_margin.verdict is ComparisonVerdict.EVENT_MARGIN_LIMITED
-    assert strict_margin.verdict is ComparisonVerdict.FIRST_WINS
+    assert strict_margin.verdict is ComparisonVerdict.MARGIN_RULE_FIRST_WINS
