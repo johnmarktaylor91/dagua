@@ -95,6 +95,33 @@ def _segment_angle(first: torch.Tensor, second: torch.Tensor) -> float:
     return math.acos(cosine)
 
 
+def _oriented_angle(first: torch.Tensor, second: torch.Tensor) -> float:
+    """Return the oriented angle between two direction vectors.
+
+    Unlike :func:`_segment_angle`, no absolute value is taken, so
+    anti-parallel vectors read ``pi`` rather than ``0``. U11 sec 5 (v)
+    compares terminal tangents that point away from their shared node:
+    coincident tangents (angle 0) are the merge-identity limit while
+    opposite tangents (angle pi) are maximally distinguishable.
+
+    Parameters
+    ----------
+    first, second : torch.Tensor
+        Two-dimensional vectors.
+
+    Returns
+    -------
+    float
+        Angle in radians in ``[0, pi]``.
+    """
+
+    denominator = torch.linalg.vector_norm(first) * torch.linalg.vector_norm(second)
+    if float(denominator) == 0.0:
+        return 0.0
+    cosine = min(1.0, max(-1.0, float(torch.dot(first, second) / denominator)))
+    return math.acos(cosine)
+
+
 def _segment_event_point(
     start_a: torch.Tensor,
     end_a: torch.Tensor,
@@ -937,7 +964,9 @@ def U11(scene: Scene) -> FacetResult:
                         continue
                     confusability.append(
                         gap_factor
-                        * math.exp(-((_segment_angle(left[1], right[1]) / math.radians(15.0)) ** 2))
+                        * math.exp(
+                            -((_oriented_angle(left[1], right[1]) / math.radians(15.0)) ** 2)
+                        )
                     )
             node_defects.append(sum(confusability) / len(confusability))
             node_weights.append(float(len(records)))
