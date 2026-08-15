@@ -12,6 +12,12 @@ from dagua.eval.ruler_v4.events import EventRegistry, evaluate_jump_bound
 from dagua.eval.ruler_v4.scene import FacetResult, ResultState
 from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
 
+# CC-13 seam: an UNOBSERVED-class absence (budget/tier, not input-side
+# inapplicability) must enter as its full feasible interval, never as
+# renormalized-away mass. The point scorer has no interval tier, so it
+# refuses, forcing escalation instead of fabricating precision.
+UNOBSERVED_REASON_PREFIX = "UNOBSERVED"
+
 
 class CompositionFamily(str, Enum):
     """Supported r4 loss-space composition families."""
@@ -343,6 +349,13 @@ def compose(
     the group partition through its explicit allowances; that partition is a
     P5/freeze input (DISCREPANCIES entry 33).
 
+    NA renormalization is the INAPPLICABLE branch only (3.6): every phase-1
+    NA source is input-side, so a dropped row never hands the drawing its
+    own denominator (CC-2). An ``UNOBSERVED``-class absence (budget/tier,
+    CC-13) refuses composition outright -- the honest point-value handling
+    of a full-feasible-interval row is escalation, not renormalization
+    (DISCREPANCIES entry 35).
+
     Parameters
     ----------
     facet_results : mapping[str, FacetResult]
@@ -370,6 +383,13 @@ def compose(
         result = facet_results[entry.facet_id]
         if result.state is ResultState.INVALID:
             raise ValueError(f"invalid facet result for {entry.facet_id}: {result.reason}")
+        absence_reason = _dropped_subterm_reason(result, entry.subterm_id)
+        if absence_reason is not None and absence_reason.startswith(UNOBSERVED_REASON_PREFIX):
+            raise ValueError(
+                f"{entry.facet_id}/{entry.subterm_id} is unobserved ({absence_reason}): "
+                "CC-13 requires full-feasible-interval handling at an interval tier; "
+                "the point composition refuses to renormalize unobserved mass away"
+            )
         if (
             result.state is ResultState.VALUE
             and entry.subterm_id in result.subterms
