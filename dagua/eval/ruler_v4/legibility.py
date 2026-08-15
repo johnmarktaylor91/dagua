@@ -6,10 +6,20 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
 
+from dagua.eval.ruler_v4._tracing import (
+    Scalar,
+    as_float,
+    keep,
+    p_exp,
+    p_log,
+    p_log1p,
+    p_max,
+    p_min,
+)
 from dagua.eval.ruler_v4._util import (
     ALPHA_GRID,
     aabb_pair,
@@ -33,6 +43,73 @@ from dagua.eval.ruler_v4.frames import (
     robust_frame,
 )
 from dagua.eval.ruler_v4.scene import BoxGeometry, FacetResult, Scene, na_result, value_result
+
+
+def _smooth_fraction(ratio: Scalar) -> Scalar:
+    """Evaluate the quintic smoothstep on one scalar clearance fraction.
+
+    Parameters
+    ----------
+    ratio : float or torch.Tensor
+        Clearance-to-budget fraction.
+
+    Returns
+    -------
+    float or torch.Tensor
+        ``smoothstep(ratio)``; the float branch executes the historical
+        ``float(smoothstep(torch.tensor(ratio)))`` cast byte-for-byte, the
+        tensor branch keeps the live autograd graph.
+    """
+
+    if isinstance(ratio, torch.Tensor):
+        return smoothstep(ratio)
+    return float(smoothstep(torch.tensor(ratio, dtype=torch.float64)))
+
+
+def _minimum(values: Iterable[Scalar]) -> Scalar:
+    """Reduce scalars with the two-argument polymorphic minimum.
+
+    Parameters
+    ----------
+    values : iterable[float or torch.Tensor]
+        Nonempty candidate population.
+
+    Returns
+    -------
+    float or torch.Tensor
+        Minimum value; identical to builtin ``min`` on the float path.
+    """
+
+    items = list(values)
+    if not items:
+        raise ValueError("minimum requires a nonempty population")
+    result = items[0]
+    for item in items[1:]:
+        result = p_min(result, item)
+    return result
+
+
+def _survival_factor(base: Scalar, exponent: float) -> Scalar:
+    """Return ``base ** exponent`` with the saturated-row constant at zero.
+
+    Parameters
+    ----------
+    base : float or torch.Tensor
+        Survival base in ``[0, 1]``.
+    exponent : float
+        Positive frozen exponent.
+
+    Returns
+    -------
+    float or torch.Tensor
+        ``base ** exponent``. A saturated traced row (base at 0) returns the
+        constant zero, mirroring ``mean_result``: the value is identical and
+        ``0 ** w``'s infinite backward at the boundary is avoided.
+    """
+
+    if isinstance(base, torch.Tensor) and float(base.detach().item()) <= 0.0:
+        return torch.zeros((), dtype=torch.float64)
+    return base**exponent
 
 
 def U17(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
@@ -75,13 +152,13 @@ def U17(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             raw_budget = 1.5 * diagonals[node] / 2.0
         budgets.append(max(raw_budget, 0.125 * scene.intrinsic_unit))
     grid = tuple((alpha_clear, alpha_high) for _, alpha_clear, alpha_high in ALPHA_GRID)
-    per_grid_nodes: List[List[float]] = [[0.0] * scene.node_count for _ in grid]
-    survival: List[List[float]] = [[1.0] * scene.node_count for _ in grid]
+    per_grid_nodes: List[List[Scalar]] = [[0.0] * scene.node_count for _ in grid]
+    survival: List[List[Scalar]] = [[1.0] * scene.node_count for _ in grid]
     overlap_count = 0
     for left in range(scene.node_count):
         for right in range(left + 1, scene.node_count):
             signed, overlap = aabb_pair(scene.node_boxes[left], scene.node_boxes[right])
-            overlap_count += int(overlap > 0.0)
+            overlap_count += int(as_float(overlap) > 0.0)
             pair_budget = min(budgets[left], budgets[right])
             floor = 0.25 * scene.intrinsic_unit
             logistic_argument = (pair_budget - floor) / (0.5 * floor)
@@ -90,21 +167,21 @@ def U17(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 float(4.0 * torch.prod(scene.node_boxes[left].half_extents).item()),
                 float(4.0 * torch.prod(scene.node_boxes[right].half_extents).item()),
             )
-            absolute = 1.0 - math.exp(
+            absolute = 1.0 - p_exp(
                 -overlap_area / (0.05 * scene.intrinsic_unit * scene.intrinsic_unit)
             )
-            if signed <= 0.0:
-                excess = 1.0
+            if as_float(signed) <= 0.0:
+                excess: Scalar = 1.0
             else:
-                excess = 1.0 - float(
-                    smoothstep(torch.tensor(signed / pair_budget, dtype=torch.float64))
-                )
+                excess = 1.0 - _smooth_fraction(signed / pair_budget)
             for grid_index, (alpha_clear, alpha_high) in enumerate(grid):
                 alpha = alpha_clear * (1.0 - floor_blend) + (alpha_clear * floor_blend * alpha_high)
                 pair_defect = snap_unit(alpha * absolute + (1.0 - alpha) * excess)
-                if overlap_area > 0.0:
+                if as_float(overlap_area) > 0.0:
                     left_area = float(4.0 * torch.prod(scene.node_boxes[left].half_extents))
-                    left_effective = pair_defect * (0.5 + 0.5 * min(1.0, overlap_area / left_area))
+                    left_effective = pair_defect * (
+                        0.5 + 0.5 * p_min(1.0, overlap_area / left_area)
+                    )
                     # Frozen default order is ascending canonical index: the
                     # higher-index node overdraws its lower-index partner.
                     right_effective = pair_defect * 0.5
@@ -113,16 +190,17 @@ def U17(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                     right_effective = pair_defect
                 survival[grid_index][left] *= 1.0 - left_effective
                 survival[grid_index][right] *= 1.0 - right_effective
-    envelope_values = []
+    envelope_values: List[Scalar] = []
     for grid_index in range(len(grid)):
         for node in range(scene.node_count):
             per_grid_nodes[grid_index][node] = 1.0 - survival[grid_index][node]
         envelope_values.append(global_blend(per_grid_nodes[grid_index], node_masses))
-    lower = min(envelope_values)
-    upper = max(envelope_values)
+    envelope_floats = [as_float(value) for value in envelope_values]
+    lower = min(envelope_floats)
+    upper = max(envelope_floats)
     raw = {
         "grid_envelope": (lower, upper),
-        "grid_values": tuple(envelope_values),
+        "grid_values": tuple(envelope_floats),
         "pair_count": scene.node_count * (scene.node_count - 1) // 2,
         "overlap_count": overlap_count,
         "upper_subterms": {"U17.1": upper},
@@ -181,16 +259,16 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
         budgets.append(max(raw_budget, 0.125 * scene.intrinsic_unit))
     grid = tuple((alpha_clear, alpha_high) for _, alpha_clear, alpha_high in ALPHA_GRID)
     owner_to_index = {label.owner: index for index, label in enumerate(labels)}
-    survival = [[[1.0, 1.0, 1.0] for _ in labels] for _ in grid]
+    survival: List[List[List[Scalar]]] = [[[1.0, 1.0, 1.0] for _ in labels] for _ in grid]
     pair_counts = [0, 0, 0]
 
     def add_pair(
         label_index: int,
         class_index: int,
-        signed_clearance: float,
-        overlap_area: float,
+        signed_clearance: Scalar,
+        overlap_area: Scalar,
         pair_budget: float,
-        occluded_fraction: Optional[float] = None,
+        occluded_fraction: Optional[Scalar] = None,
     ) -> None:
         """Accumulate one pair debt into every shared alpha-grid row.
 
@@ -214,14 +292,11 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
         floor = 0.25 * scene.intrinsic_unit
         argument = (pair_budget - floor) / (0.5 * floor)
         floor_blend = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, argument))))
-        absolute = 1.0 - math.exp(
-            -overlap_area / (0.05 * scene.intrinsic_unit * scene.intrinsic_unit)
-        )
+        absolute = 1.0 - p_exp(-overlap_area / (0.05 * scene.intrinsic_unit * scene.intrinsic_unit))
         excess = (
             1.0
-            if signed_clearance <= 0.0
-            else 1.0
-            - float(smoothstep(torch.tensor(signed_clearance / pair_budget, dtype=torch.float64)))
+            if as_float(signed_clearance) <= 0.0
+            else 1.0 - _smooth_fraction(signed_clearance / pair_budget)
         )
         for grid_index, (alpha_clear, alpha_high) in enumerate(grid):
             alpha = alpha_clear * (1.0 - floor_blend) + (alpha_clear * floor_blend * alpha_high)
@@ -240,14 +315,14 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 float(4.0 * torch.prod(right.half_extents)),
             )
             budget = min(budgets[left_index], budgets[right_index])
-            left_fraction = min(1.0, overlap_area / float(4.0 * torch.prod(left.half_extents)))
+            left_fraction = p_min(1.0, overlap_area / float(4.0 * torch.prod(left.half_extents)))
             add_pair(
                 left_index,
                 0,
                 signed,
                 overlap_area,
                 budget,
-                left_fraction if overlap_area > 0.0 else None,
+                left_fraction if as_float(overlap_area) > 0.0 else None,
             )
             add_pair(
                 right_index,
@@ -255,7 +330,7 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 signed,
                 overlap_area,
                 budget,
-                0.0 if overlap_area > 0.0 else None,
+                0.0 if as_float(overlap_area) > 0.0 else None,
             )
         for node in scene.node_boxes:
             if node.owner == left.owner:
@@ -271,12 +346,12 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 signed,
                 overlap_area,
                 budgets[left_index],
-                0.0 if overlap_area > 0.0 else None,
+                0.0 if as_float(overlap_area) > 0.0 else None,
             )
         for route in resolved_routes(scene):
             if left.owner in scene.graph.edges[route.edge_index]:
                 continue
-            centerline_clearance = min(
+            centerline_clearance = _minimum(
                 _box_segment_clearance(left, start, end)
                 for start, end in zip(route.points[:-1], route.points[1:])
             )
@@ -294,21 +369,21 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
                 signed,
                 overlap_area,
                 edge_budget,
-                0.0 if overlap_area > 0.0 else None,
+                0.0 if as_float(overlap_area) > 0.0 else None,
             )
     label_masses = (
         [float(scene.graph.node_masses[label.owner]) for label in labels]
         if scene.graph.node_masses is not None
         else [1.0] * len(labels)
     )
-    envelope_values: List[float] = []
-    subterms_by_grid: List[dict[str, float]] = []
+    envelope_values: List[Scalar] = []
+    subterms_by_grid: List[Dict[str, Scalar]] = []
     for row in survival:
         class_node_defects = [
             [1.0 - row[label_index][class_index] for label_index in range(len(labels))]
             for class_index in range(3)
         ]
-        values: dict[str, float] = {}
+        values: Dict[str, Scalar] = {}
         for class_index, key in enumerate(("U18.ll", "U18.ln", "U18.le")):
             if pair_counts[class_index] > 0:
                 values[key] = global_blend(class_node_defects[class_index], label_masses)
@@ -318,18 +393,21 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
             for index, weight in enumerate((0.40, 0.40, 0.20))
         ]
         for label_index in range(len(labels)):
-            label_survival = 1.0
+            label_survival: Scalar = 1.0
             for class_index, weight in enumerate(active_weights):
                 if weight > 0.0:
-                    label_survival *= row[label_index][class_index] ** weight
+                    label_survival *= _survival_factor(row[label_index][class_index], weight)
             label_defects.append(1.0 - label_survival)
         envelope_values.append(global_blend(label_defects, label_masses))
         subterms_by_grid.append(values)
-    upper_index = max(range(len(envelope_values)), key=envelope_values.__getitem__)
+    envelope_floats = [as_float(value) for value in envelope_values]
+    upper_index = max(range(len(envelope_floats)), key=envelope_floats.__getitem__)
     raw = {
-        "grid_envelope": (min(envelope_values), max(envelope_values)),
-        "grid_values": tuple(envelope_values),
-        "upper_subterms": subterms_by_grid[upper_index],
+        "grid_envelope": (min(envelope_floats), max(envelope_floats)),
+        "grid_values": tuple(envelope_floats),
+        "upper_subterms": {
+            key: as_float(item) for key, item in subterms_by_grid[upper_index].items()
+        },
         "label_count": len(labels),
         "pair_counts": tuple(pair_counts),
     }
@@ -344,7 +422,7 @@ def U18(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
     return value_result(envelope_values[selected_offset], subterms_by_grid[selected_offset], raw)
 
 
-def _route_box_overlap_area(points: torch.Tensor, box: BoxGeometry, stroke_width: float) -> float:
+def _route_box_overlap_area(points: torch.Tensor, box: BoxGeometry, stroke_width: float) -> Scalar:
     """Return ribbon-centerline coverage area inside an axis-aligned box.
 
     Parameters
@@ -358,37 +436,37 @@ def _route_box_overlap_area(points: torch.Tensor, box: BoxGeometry, stroke_width
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Covered centerline length times width, capped by box area.
     """
 
     lower = box.center - box.half_extents
     upper = box.center + box.half_extents
-    inside_length = 0.0
+    inside_length: Scalar = 0.0
     for start, end in zip(points[:-1], points[1:]):
         direction = end - start
-        entry = 0.0
-        exit_ = 1.0
+        entry: Scalar = 0.0
+        exit_: Scalar = 1.0
         intersects = True
         for axis in range(2):
-            delta = float(direction[axis])
-            if delta == 0.0:
-                if float(start[axis]) < float(lower[axis]) or float(start[axis]) > float(
-                    upper[axis]
-                ):
+            delta = keep(direction[axis])
+            if as_float(delta) == 0.0:
+                if as_float(start[axis]) < as_float(lower[axis]) or as_float(
+                    start[axis]
+                ) > as_float(upper[axis]):
                     intersects = False
                     break
                 continue
-            first = (float(lower[axis]) - float(start[axis])) / delta
-            second = (float(upper[axis]) - float(start[axis])) / delta
-            entry = max(entry, min(first, second))
-            exit_ = min(exit_, max(first, second))
-            if entry > exit_:
+            first = (keep(lower[axis]) - keep(start[axis])) / delta
+            second = (keep(upper[axis]) - keep(start[axis])) / delta
+            entry = p_max(entry, p_min(first, second))
+            exit_ = p_min(exit_, p_max(first, second))
+            if as_float(entry) > as_float(exit_):
                 intersects = False
                 break
         if intersects:
-            inside_length += (exit_ - entry) * float(torch.linalg.vector_norm(direction))
-    return min(
+            inside_length += (exit_ - entry) * keep(torch.linalg.vector_norm(direction))
+    return p_min(
         inside_length * stroke_width,
         float(4.0 * torch.prod(box.half_extents)),
     )
@@ -410,7 +488,7 @@ def U19(scene: Scene) -> FacetResult:
         physical["output_height"] / content_height,
     )
     ratio = physical["h_font"] * physical_scale / physical["h_floor"]
-    label_defect = 1.0 - float(smoothstep(torch.tensor(ratio, dtype=torch.float64)))
+    label_defect = 1.0 - _smooth_fraction(ratio)
     defects = [label_defect] * (len(scene.node_label_boxes) + len(scene.edge_label_boxes))
     defect = global_blend(defects)
     return value_result(
@@ -436,16 +514,16 @@ def U20a(scene: Scene) -> FacetResult:
         else [1.0] * scene.node_count
     )
     feature_floor = scene.style.minimum_feature_separation * scene.intrinsic_unit
-    coincidence_survival = [1.0] * scene.node_count
+    coincidence_survival: List[Scalar] = [1.0] * scene.node_count
     node_opportunities = scene.node_count * (scene.node_count - 1) // 2
-    node_feature_survival = {("node", node): 1.0 for node in range(scene.node_count)}
+    node_feature_survival: Dict[Tuple[str, int], Scalar] = {
+        ("node", node): 1.0 for node in range(scene.node_count)
+    }
     for left in range(scene.node_count):
         for right in range(left + 1, scene.node_count):
             signed, _ = aabb_pair(scene.node_boxes[left], scene.node_boxes[right])
-            clearance = max(0.0, signed)
-            loss = 1.0 - float(
-                smoothstep(torch.tensor(clearance / feature_floor, dtype=torch.float64))
-            )
+            clearance = p_max(0.0, signed)
+            loss = 1.0 - _smooth_fraction(clearance / feature_floor)
             coincidence_survival[left] *= 1.0 - loss
             coincidence_survival[right] *= 1.0 - loss
             _accumulate_object_loss(
@@ -459,7 +537,7 @@ def U20a(scene: Scene) -> FacetResult:
     core_mask = robust_core_mask(scene.positions)
     core = scene.positions[core_mask]
     if core.shape[0] < 2:
-        rank_collapse = 1.0
+        rank_collapse: Scalar = 1.0
     else:
         # A zero raw cloud is total collapse: the degenerate limit of exact
         # collinearity, which section 6 maps to the catastrophic end (q = 0).
@@ -473,11 +551,11 @@ def U20a(scene: Scene) -> FacetResult:
             # variance; a fully coincident core stays catastrophic (golden 2).
             residual, explained_spread = _rank_residual_core(scene, core, core_mask)
             exempt = 1.0 if explained_spread > 0.0 else 0.0
-            ratio = max(ratio, _isotropy_quotient(residual, degenerate=exempt))
-        rank_collapse = 1.0 - float(smoothstep(torch.tensor(ratio / 0.05, dtype=torch.float64)))
+            ratio = p_max(ratio, _isotropy_quotient(residual, degenerate=exempt))
+        rank_collapse = 1.0 - _smooth_fraction(ratio / 0.05)
     routes = resolved_routes(scene)
     node_route_opportunities = scene.node_count * scene.edge_count
-    node_route_survival = {
+    node_route_survival: Dict[Tuple[str, int], Scalar] = {
         **{("node", node): 1.0 for node in range(scene.node_count)},
         **{("route", edge): 1.0 for edge in range(scene.edge_count)},
     }
@@ -485,7 +563,7 @@ def U20a(scene: Scene) -> FacetResult:
         for route in routes:
             if box.owner in scene.graph.edges[route.edge_index]:
                 continue
-            clearance = min(
+            clearance = _minimum(
                 _box_segment_clearance(box, start, end)
                 for start, end in zip(route.points[:-1], route.points[1:])
             )
@@ -494,10 +572,8 @@ def U20a(scene: Scene) -> FacetResult:
                 if scene.style.edge_stroke_widths
                 else scene.style.route_stroke_width * scene.style.coordinate_scale
             )
-            clearance = max(0.0, clearance - width / 2.0)
-            loss = 1.0 - float(
-                smoothstep(torch.tensor(clearance / feature_floor, dtype=torch.float64))
-            )
+            clearance = p_max(0.0, clearance - width / 2.0)
+            loss = 1.0 - _smooth_fraction(clearance / feature_floor)
             _accumulate_object_loss(
                 node_route_survival,
                 (("node", box.owner), ("route", route.edge_index)),
@@ -505,7 +581,9 @@ def U20a(scene: Scene) -> FacetResult:
                 node_route_opportunities,
             )
     route_route_opportunities = scene.edge_count * (scene.edge_count - 1) // 2
-    route_route_survival = {("route", edge): 1.0 for edge in range(scene.edge_count)}
+    route_route_survival: Dict[Tuple[str, int], Scalar] = {
+        ("route", edge): 1.0 for edge in range(scene.edge_count)
+    }
     for left, route_left in enumerate(routes):
         for route_right in routes[left + 1 :]:
             clearances = [
@@ -528,7 +606,7 @@ def U20a(scene: Scene) -> FacetResult:
             ]
             if not clearances:
                 continue
-            clearance = min(clearances)
+            clearance = _minimum(clearances)
             left_width = (
                 scene.style.edge_stroke_widths[route_left.edge_index]
                 if scene.style.edge_stroke_widths
@@ -539,10 +617,8 @@ def U20a(scene: Scene) -> FacetResult:
                 if scene.style.edge_stroke_widths
                 else scene.style.route_stroke_width * scene.style.coordinate_scale
             )
-            clearance = max(0.0, clearance - (left_width + right_width) / 2.0)
-            loss = 1.0 - float(
-                smoothstep(torch.tensor(clearance / feature_floor, dtype=torch.float64))
-            )
+            clearance = p_max(0.0, clearance - (left_width + right_width) / 2.0)
+            loss = 1.0 - _smooth_fraction(clearance / feature_floor)
             _accumulate_object_loss(
                 route_route_survival,
                 (("route", route_left.edge_index), ("route", route_right.edge_index)),
@@ -554,9 +630,9 @@ def U20a(scene: Scene) -> FacetResult:
         _object_feature_blend(node_route_survival, node_masses),
         _object_feature_blend(route_route_survival, node_masses),
     ]
-    feature_survival = 1.0
+    feature_survival: Scalar = 1.0
     for class_defect, exponent in zip(class_defects, (0.5, 0.3, 0.2)):
-        feature_survival *= (1.0 - class_defect) ** exponent
+        feature_survival *= _survival_factor(1.0 - class_defect, exponent)
     feature_separation = 1.0 - feature_survival
     values = {
         "U20a.i": coincidence,
@@ -566,7 +642,7 @@ def U20a(scene: Scene) -> FacetResult:
     return mean_result("U20a", values)
 
 
-def _isotropy_quotient(centered: torch.Tensor, degenerate: float) -> float:
+def _isotropy_quotient(centered: torch.Tensor, degenerate: float) -> Scalar:
     """Singular-value quotient of one centered retained-position cloud.
 
     Parameters
@@ -580,14 +656,14 @@ def _isotropy_quotient(centered: torch.Tensor, degenerate: float) -> float:
 
     Returns
     -------
-    float
+    float or torch.Tensor
         ``sigma_2 / sigma_1`` in ``[0, 1]``, or ``degenerate`` for a zero cloud.
     """
 
     singular = torch.linalg.svdvals(centered)
-    if float(singular[0]) <= 0.0:
+    if as_float(singular[0]) <= 0.0:
         return degenerate
-    return float(singular[1] / singular[0])
+    return keep(singular[1] / singular[0])
 
 
 def _rank_residual_core(
@@ -625,25 +701,25 @@ def _rank_residual_core(
     residual_axis = axis_projection - explained
     cross_projection = core @ cross
     residual = residual_axis[:, None] * axis + cross_projection[:, None] * cross
-    explained_spread = float(torch.linalg.vector_norm(explained - torch.mean(explained)))
+    explained_spread = as_float(torch.linalg.vector_norm(explained - torch.mean(explained)))
     return residual - torch.mean(residual, dim=0), explained_spread
 
 
 def _accumulate_object_loss(
-    survival: Dict[Tuple[str, int], float],
+    survival: Dict[Tuple[str, int], Scalar],
     owners: Tuple[Tuple[str, int], Tuple[str, int]],
-    loss: float,
+    loss: Scalar,
     opportunity_count: int,
 ) -> None:
     """Accumulate one analytic-opportunity feature loss onto its owners.
 
     Parameters
     ----------
-    survival : dict[tuple[str, int], float]
+    survival : dict[tuple[str, int], float or torch.Tensor]
         Mutable per-feature-owner survival products.
     owners : tuple[tuple[str, int], tuple[str, int]]
         Two node/route owners of the admitted feature pair.
-    loss : float
+    loss : float or torch.Tensor
         Pair loss in ``[0, 1]``.
     opportunity_count : int
         Input-only analytic class opportunity count.
@@ -651,26 +727,32 @@ def _accumulate_object_loss(
 
     if opportunity_count <= 0:
         return
-    factor = 0.0 if loss >= 1.0 else math.exp(math.log1p(-loss) / opportunity_count)
+    if as_float(loss) >= 1.0:
+        # Saturated pair: the factor is the constant zero on both paths
+        # (log1p(-1) is -inf); the traced value matches the float branch and
+        # the a.e. gradient of an interior-saturated region is exactly 0.
+        factor: Scalar = 0.0
+    else:
+        factor = p_exp(p_log1p(-loss) / opportunity_count)
     for owner in owners:
         survival[owner] *= factor
 
 
 def _object_feature_blend(
-    survival: Dict[Tuple[str, int], float], node_masses: List[float]
-) -> float:
+    survival: Dict[Tuple[str, int], Scalar], node_masses: List[float]
+) -> Scalar:
     """Blend class losses after collapsing pairs onto feature-owning objects.
 
     Parameters
     ----------
-    survival : dict[tuple[str, int], float]
+    survival : dict[tuple[str, int], float or torch.Tensor]
         Per-node and per-route survival products.
     node_masses : list[float]
         Input-owned node masses; routes have unit mass.
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Global 3.7 blend over feature-owning objects.
     """
 
@@ -724,7 +806,7 @@ def _segments_are_adjacent_at_declared_endpoint(
     return False
 
 
-def _point_segment_distance(point: torch.Tensor, start: torch.Tensor, end: torch.Tensor) -> float:
+def _point_segment_distance(point: torch.Tensor, start: torch.Tensor, end: torch.Tensor) -> Scalar:
     """Return exact Euclidean distance from a point to a line segment.
 
     Parameters
@@ -734,17 +816,17 @@ def _point_segment_distance(point: torch.Tensor, start: torch.Tensor, end: torch
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Nonnegative point-to-segment distance.
     """
 
     direction = end - start
-    denominator = float(torch.dot(direction, direction).item())
-    if denominator == 0.0:
-        return float(torch.linalg.vector_norm(point - start).item())
-    parameter = float(torch.dot(point - start, direction).item()) / denominator
-    parameter = min(1.0, max(0.0, parameter))
-    return float(torch.linalg.vector_norm(point - (start + parameter * direction)).item())
+    denominator = keep(torch.dot(direction, direction))
+    if as_float(denominator) == 0.0:
+        return keep(torch.linalg.vector_norm(point - start))
+    parameter = keep(torch.dot(point - start, direction)) / denominator
+    parameter = p_min(1.0, p_max(0.0, parameter))
+    return keep(torch.linalg.vector_norm(point - (start + parameter * direction)))
 
 
 def _segment_segment_distance(
@@ -752,7 +834,7 @@ def _segment_segment_distance(
     end_a: torch.Tensor,
     start_b: torch.Tensor,
     end_b: torch.Tensor,
-) -> float:
+) -> Scalar:
     """Return the Euclidean distance between two closed line segments.
 
     Parameters
@@ -762,21 +844,23 @@ def _segment_segment_distance(
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Zero for intersecting segments, otherwise the nearest endpoint distance.
     """
 
     if proper_intersection(start_a, end_a, start_b, end_b):
         return 0.0
-    return min(
-        _point_segment_distance(start_a, start_b, end_b),
-        _point_segment_distance(end_a, start_b, end_b),
-        _point_segment_distance(start_b, start_a, end_a),
-        _point_segment_distance(end_b, start_a, end_a),
+    return _minimum(
+        (
+            _point_segment_distance(start_a, start_b, end_b),
+            _point_segment_distance(end_a, start_b, end_b),
+            _point_segment_distance(start_b, start_a, end_a),
+            _point_segment_distance(end_b, start_a, end_a),
+        )
     )
 
 
-def _box_segment_clearance(box: BoxGeometry, start: torch.Tensor, end: torch.Tensor) -> float:
+def _box_segment_clearance(box: BoxGeometry, start: torch.Tensor, end: torch.Tensor) -> Scalar:
     """Return centerline clearance between an axis-aligned box and segment.
 
     Parameters
@@ -788,7 +872,7 @@ def _box_segment_clearance(box: BoxGeometry, start: torch.Tensor, end: torch.Ten
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Zero for contact/intersection, otherwise Euclidean clearance.
     """
 
@@ -798,10 +882,10 @@ def _box_segment_clearance(box: BoxGeometry, start: torch.Tensor, end: torch.Ten
     lower = 0.0
     upper = 1.0
     for axis in range(2):
-        low = float(center[axis] - half_extents[axis])
-        high = float(center[axis] + half_extents[axis])
-        delta = float(direction[axis])
-        origin = float(start[axis])
+        low = as_float(center[axis] - half_extents[axis])
+        high = as_float(center[axis] + half_extents[axis])
+        delta = as_float(direction[axis])
+        origin = as_float(start[axis])
         if delta == 0.0:
             if origin < low or origin > high:
                 break
@@ -823,12 +907,12 @@ def _box_segment_clearance(box: BoxGeometry, start: torch.Tensor, end: torch.Ten
     endpoint_clearances = []
     for point in (start, end):
         excess = torch.abs(point - center) - half_extents
-        endpoint_clearances.append(
-            float(torch.linalg.vector_norm(torch.clamp(excess, min=0.0)).item())
+        endpoint_clearances.append(keep(torch.linalg.vector_norm(torch.clamp(excess, min=0.0))))
+    return _minimum(
+        (
+            *endpoint_clearances,
+            *(_point_segment_distance(corner, start, end) for corner in corners),
         )
-    return min(
-        *endpoint_clearances,
-        *(_point_segment_distance(corner, start, end) for corner in corners),
     )
 
 
@@ -844,17 +928,22 @@ def U20b(scene: Scene) -> FacetResult:
         scene.positions[edges[:, 0]] - scene.positions[edges[:, 1]], dim=1
     )
     normalized = lengths / scene.intrinsic_unit
-    median_length = float(torch.median(normalized).item())
-    if median_length == 0.0:
-        defect = 1.0
+    median_length = keep(torch.median(normalized))
+    median_float = as_float(median_length)
+    if median_float == 0.0:
+        defect: Scalar = 1.0
     else:
-        coordinate = math.log2(median_length)
+        coordinate = (
+            torch.log2(median_length)
+            if isinstance(median_length, torch.Tensor)
+            else math.log2(median_length)
+        )
         short_argument = (math.log2(1.5) - coordinate) / 0.35
         long_argument = (coordinate - math.log2(8.0)) / 0.35
-        short = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, short_argument))))
-        long = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, long_argument))))
+        short = 1.0 / (1.0 + p_exp(-p_max(-60.0, p_min(60.0, short_argument))))
+        long = 1.0 / (1.0 + p_exp(-p_max(-60.0, p_min(60.0, long_argument))))
         defect = short + long
-    return value_result(defect, {"U20b.headline": defect}, {"median_edge_length_u": median_length})
+    return value_result(defect, {"U20b.headline": defect}, {"median_edge_length_u": median_float})
 
 
 def U21(scene: Scene) -> FacetResult:
@@ -866,7 +955,7 @@ def U21(scene: Scene) -> FacetResult:
     primitive_area = sum(float(4.0 * torch.prod(box.half_extents)) for box in scene.node_boxes)
     component_count = len(components(scene))
     area_reference = primitive_area / 0.10 * (1.0 + 0.5 * (component_count - 1))
-    sparse_raw = soft_pos(math.log(frame.area / (4.0 * area_reference)))
+    sparse_raw = soft_pos(p_log(frame.area / (4.0 * area_reference)))
     sparse = sparse_raw / (1.0 + sparse_raw)
     mass_out, anchor, overflow = overflow_defect(scene, frame)
     content_area = declared_content_area(scene)
