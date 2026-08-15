@@ -223,3 +223,14 @@ the production port; none of the entries below overrides a contract.
     2295-cell batteries). Like entry 23 it is an unfrozen score-path constant pending
     contract-owner adoption; the two constants should be adopted or replaced
     together.
+32. V4_SPEC_r4 R3-DR makes the one-parameter loss-space p-mean the v4.0 default and
+    names the optional nesting family only by `(q, beta, allowances, lambda)`, while the
+    phase-2 implementation brief explicitly requests mean-plus-bottleneck machinery and
+    the only published closed form (IDEAS_SOL section 3.3) uses a nondifferentiable
+    `max(0, L_tail)`. Production exposes both R3-DR families and replaces that bare hinge
+    only in the optional bottleneck family with the ecosystem's C1 positive-onset form
+    `x^2/(x+tau)` for `x > 0`, zero otherwise; the normalized log-sum-exp tail and all
+    parameters remain explicit. This preserves the requested non-compensation and CC-1
+    smooth-onset properties without claiming the optional family has passed R3-DR. The
+    exact nesting formula and shipped-family selection remain P5/freeze inputs rather
+    than phase-2 weight values.
