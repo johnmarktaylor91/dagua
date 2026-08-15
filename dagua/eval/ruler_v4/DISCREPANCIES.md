@@ -128,7 +128,10 @@ the production port; none of the entries below overrides a contract.
     the object-level reading; because each pair's loss lands on both owners, the pair
     survival contributes `(1 - m)^(2/n_c)` across the object population rather than the
     flat `(1 - m)^(1/n_c)`. Score-visible on multi-pair scenes; reconciling section 6's
-    flat product with the section 4/7 collapse is a contract-owner item.
+    flat product with the section 4/7 collapse is a contract-owner item. Interim row
+    status: U20a (iii) carries corpus rows under the adopted object-level reading --
+    every candidate drawing of a fixture is scored under the same exponent, so rows
+    stay comparable while the wording conflict is open.
 25. U11 section 6 (v)'s confusability closed form factors into a gap term and a tangent
     angle term. A zero-arc route has no initial tangent, so the angle factor is
     undefined; production charges its supremum (1.0) and keeps the well-defined gap
@@ -173,7 +176,13 @@ the production port; none of the entries below overrides a contract.
     `max(q_raw, q_residual)` construction, which cannot re-open the E3 collapse channel,
     and escalates the knife edge rather than freezing an uncontracted tolerance. (The
     composite is shielded at full collapse because sub-terms (i) and (iii) saturate;
-    the jump is score-visible in the published, manifest-weighted sub-term.)
+    the jump is score-visible in the published, manifest-weighted sub-term.) Interim
+    row status: U20a (ii) carries corpus rows -- the jump is confined to the
+    measure-zero exact-collapse manifold, every off-manifold fixture scores the
+    continuous raw quotient, and a fixture landing exactly on the manifold scores the
+    golden-3 exemption side; the contract-owner threshold decision is needed before
+    within-rank near-collapse ladders (golden 2's regime) can be certified, not
+    before ordinary rows ingest.
 30. U22 section 6's class-exemption table states its kappa_class constants in the
     direction-free elongation convention (`A_obs = h_max/h_min >= 1`: a path is a tree
     with `b = 1, d = n`, so `path -> 8` and `tree -> max(1, b/d) = 1` cannot share a
