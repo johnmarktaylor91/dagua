@@ -1364,6 +1364,22 @@ def U22(scene: Scene) -> FacetResult:
             target = 1.0
         measurement = "frozen_direction_set"
     declared_class = scene.graph.declared_graph_class
+    if declared_class is not None and declared_class not in {
+        "path",
+        "chain",
+        "tree",
+        "lattice",
+        "grid",
+        "cycle",
+        "ring",
+    }:
+        # Section 13 case (c): a class outside the frozen exemption table's
+        # domain is typed INVALID, conditioned on the class string alone --
+        # no rank exception. A silent kappa_class = 1 fallback (or a
+        # ranks-declaring graph silently keeping the layer-profile target)
+        # would be the undocumented score-visible branch the contract
+        # pre-bans.
+        return invalid_result("unknown_declared_class")
     if declared_class is not None and ranks is None:
         if declared_class in {"path", "chain"}:
             target *= 8.0
@@ -1380,11 +1396,6 @@ def U22(scene: Scene) -> FacetResult:
                 return invalid_result("unknown_declared_class")
             width, height = scene.graph.lattice_dimensions
             target *= width / height
-        elif declared_class not in {"cycle", "ring"}:
-            # Section 13 case (c): a class outside the frozen exemption table's
-            # domain is typed INVALID; a silent kappa_class = 1 fallback would
-            # be the undocumented score-visible branch the contract pre-bans.
-            return invalid_result("unknown_declared_class")
     excess = soft_pos(abs(math.log(observed / target)) - math.log(3.0))
     defect = excess / (1.0 + excess)
     return value_result(
