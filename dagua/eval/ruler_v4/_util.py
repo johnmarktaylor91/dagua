@@ -805,6 +805,11 @@ def isotonic_stress(order: torch.Tensor, layout: torch.Tensor) -> float:
     if as_float(denominator) == 0.0:
         return 1.0 if levels.numel() > 1 else 0.0
     residual = keep(torch.sum((layout - fitted) ** 2))
+    if isinstance(residual, torch.Tensor) and as_float(residual) == 0.0:
+        # sqrt backward at an exactly-perfect fit is 0 * inf = NaN; the
+        # residual itself is the value-identical zero whose gradient is the
+        # honest subgradient (exactly 0), matching the float branch's 0.0.
+        return residual / denominator
     return p_min(1.0, p_sqrt(residual / denominator))
 
 
