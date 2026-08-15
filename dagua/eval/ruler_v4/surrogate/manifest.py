@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Mapping, Tuple
+from typing import Mapping, Optional, Tuple
 
 from dagua.eval.ruler_v4.contracts import CONTRACTS, ContractMetadata
 
@@ -33,14 +33,18 @@ class SurrogateTermTrace:
     compilation_rule : CompilationRule
         Analytic rule applied to the exact defect coordinate.
     smoothing : str or None
-        Spec-named smoothing. ``None`` means no relaxation was authorized.
+        Contract-named smoothing class carried by the facet's frozen closed
+        form (for example ``"softplus"``, ``"softmin_lse"``, ``"sigmoid"``,
+        ``"lse_smoothed_max"``; DISCREPANCIES entry 38 holds the citations).
+        ``None`` means the row's closed form names no position-level
+        smoothing class; it does NOT mean the row is non-differentiable.
     """
 
     facet_id: str
     subterm_id: str
     contract_sha256: str
     compilation_rule: CompilationRule
-    smoothing: None = None
+    smoothing: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -93,10 +97,17 @@ def compile_surrogate_manifest(
 ) -> CompiledSurrogateManifest:
     """Compile every manifest subterm without a parallel hand-written inventory.
 
-    The r4 spec names no position-level smoothing for any facet. Consequently
-    the compiler admits only the analytic identity map over an exact defect
-    coordinate. Callers may bind differentiable tensors produced by future
-    contract-authorized geometry rules, but this compiler never invents one.
+    The frozen facet contracts declare their position-level smoothing classes
+    with pinned temperatures inside the scored closed forms themselves
+    (softplus, softmin/LSE, sigmoid credit, LSE smoothed max; DISCREPANCIES
+    entry 38 carries the citations). The compiled rule is therefore the
+    analytic identity over an exact defect coordinate: differentiability with
+    respect to positions is carried by evaluating the SAME closed forms on
+    tensors through the traced execution path (``surrogate.traced``), not by
+    inventing a relaxation here. ``MANIFEST.json`` does not yet publish a
+    machine-readable smoothing-class field (entry 38 dockets that gap with
+    its owner), so ``smoothing`` stays ``None`` until the A18 generator
+    emits the contract-named class.
 
     Parameters
     ----------

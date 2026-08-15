@@ -334,19 +334,39 @@ the production port; none of the entries below overrides a contract.
     (so the composite must still worsen against the relief) is the missing
     metamorph, docketed for the property family rather than shipped as a
     misleadingly-named test (P2 round-2 finding 6).
-38. V4_SPEC_r4 6.5 requires an analytic `score_v4_soft` and bans invented
-    relaxations, but neither the generated `MANIFEST.json` nor any facet
-    contract, A18 insert, or the current preregistration amendment chain names
-    a position-level smoothing or a machine-readable surrogate formula. The
-    manifest contains contract identity, scored subterms, constants, frame
-    class, and event metadata only. Production therefore compiles all 91
-    scored rows with an `exact_defect_identity` rule: it is differentiable
-    with respect to explicitly bound defect tensors and traceable to the exact
-    contract hash, but it does NOT claim that the closed float-valued facet
-    implementation is differentiable with respect to scene positions. A future
-    position-level rule must be contract-named and manifest-generated before it
-    can be admitted; silently finite-differencing, straight-through-estimating,
-    or choosing a soft threshold here would violate the no-invented-relaxation
-    requirement. Rank fidelity is consequently certified for the compiled
-    defect/composition surrogate, while position-gradient claims are limited to
-    caller-supplied traced tensors.
+38. [REWRITTEN after P3REVIEW OPUS5 BLOCKER-2 / FABLE B1; the original entry's
+    facet-contract claim was FALSE.] V4_SPEC_r4 6.5's deliverable is the
+    analytic soft relaxation itself: `score_v4_soft` evaluated for gradient
+    alignment against the exact facets, with positions as the differentiation
+    variable. The frozen facet contracts DO declare position-level smoothing
+    classes with pinned temperatures, inside the scored closed forms
+    themselves: U34.md:31 (the scored smooth replacement
+    `sp_tau(x) = tau*log1p(exp(x/tau))` with `tau = 0.01*mean_segment_length`);
+    U11.md:315-326 (capped baseline through `softmin_{t_soft}`, an LSE with
+    `t_soft = 0.1*chord_e` per U11.md:204) and U11.md:179-181 (`hz_tau` hinge,
+    exactly zero below 0 and the softplus asymptote above, `tau = 0.05`);
+    U03.md:76-77 (sigmoid credit, `tau = 0.25` PREREG-PRIOR); U06.md:109
+    (smoothed max = LSE at the global temperature); U02.md:146 (frozen
+    dimensionless temperature `tau_r`, log-domain); and the ONE GLOBAL 3.7
+    blend's smoothed-max component (U26.md:240, U30.md:227), whose temperature
+    3.6 budgets as a fitted constant (V4_SPEC_r4:872-873). CC-1 already
+    requires every facet to be continuous in positions off declared event
+    manifolds, so 6.5 needs no separate smoothing catalogue: the surrogate is
+    the frozen closed forms evaluated differentiably. Production therefore
+    ships a traced execution path (`surrogate.traced`) in which position
+    tensors flow through the SAME facet implementations to `l_total`;
+    the contract-named smoothing classes above are part of those closed
+    forms; and constructs that remain a.e.-flat in positions with NO
+    contract-named smoothing (hard counts, isotonic/order fits, trims, event
+    indicators) carry documented zero-gradient exemptions citing their
+    contracts, never an invented softener (finite-differencing,
+    straight-through estimation, and ad-hoc soft thresholds remain banned).
+    The genuine residual gap is machine-readability: the generated
+    `MANIFEST.json` carries contract identity, scored subterms, constants,
+    frame class, and event metadata, but NO machine-readable smoothing-class
+    field -- the declared classes live in contract prose. OWNER: the A18
+    manifest/freeze-allowlist generator (P5 freeze tooling) must emit a
+    generated `smoothing_class` field per scored subterm before any smoothing
+    rule beyond the contract-named set can be admitted.
+    `SurrogateTermTrace.smoothing` is typed `Optional[str]` so the
+    contract-named class is recordable today.
