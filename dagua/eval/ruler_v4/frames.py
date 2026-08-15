@@ -8,7 +8,7 @@ from typing import List, Tuple
 
 import torch
 
-from dagua.eval.ruler_v4._tracing import tracing_active
+from dagua.eval.ruler_v4._tracing import Scalar, as_float, keep, tracing_active
 from dagua.eval.ruler_v4._util import resolved_routes
 from dagua.eval.ruler_v4.scene import Scene
 
@@ -47,16 +47,17 @@ class RobustFrame:
     floor_bound: Tuple[bool, bool]
 
     @property
-    def area(self) -> float:
+    def area(self) -> Scalar:
         """Return full frame area.
 
         Returns
         -------
-        float
-            ``4 * half_width * half_height``.
+        float or torch.Tensor
+            ``4 * half_width * half_height``; the historical float off a
+            trace (bit-identical), the live scalar tensor inside one.
         """
 
-        return float(4.0 * torch.prod(self.half_extents).item())
+        return keep(4.0 * torch.prod(self.half_extents))
 
 
 @dataclass(frozen=True)
@@ -394,7 +395,9 @@ def overflow_defect(scene: Scene, frame: RobustFrame) -> Tuple[float, float, flo
             segment_length = float(torch.linalg.vector_norm(end - start).item())
             inside_length = _segment_length_inside_frame(start, end, frame)
             escaped_area += max(0.0, segment_length - inside_length) * stroke_width
-    mass_out = escaped_area / frame.area
+    # This defect pipeline is float-valued this seam version (escaped areas
+    # accumulate as floats), so the frame area is a detached read here.
+    mass_out = escaped_area / as_float(frame.area)
     anchor = overflow_anchor(scene, frame)
     excess = max(0.0, mass_out - anchor)
     smooth = 0.0 if excess <= 0.0 else excess**2 / (excess + 0.05)

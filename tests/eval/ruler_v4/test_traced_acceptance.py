@@ -52,23 +52,30 @@ _SUBTERM_FACET: Mapping[str, str] = {
     for subterm_id in contract.scored_subterms
 }
 
-# Battery entries: (subterm_id, noise_sigma) -- sigma scales the seeded
-# perturbation so each target has a nonzero exact defect AND room to
-# improve. The five mandated load-bearing facets (U01, U07, U11, U17,
-# U21) are all represented; the rest add breadth across modules.
-BATTERY: Tuple[Tuple[str, float], ...] = (
-    ("U01.headline", 0.35),
-    ("U7.base", 0.65),
-    ("U11.v", 0.35),
-    ("U17.1", 0.35),
-    ("U18.le", 0.8),
-    ("U03.r_1", 0.35),
-    ("U09.headline", 0.35),
-    ("U12.headline", 0.35),
-    ("U31.headline", 0.35),
-    ("U32.L_iso", 0.35),
-    ("U34.L_mono", 0.35),
-    ("U35.headline", 0.35),
+# Battery entries: (subterm_id, noise_sigma, homothety_scale) -- sigma
+# scales the seeded perturbation so each target has a nonzero exact
+# defect AND room to improve; scale sprawls the whole construction
+# (scale * (layout + noise)), which is what puts U21's anti-sprawl row
+# off its zero plateau. The five mandated load-bearing facets (U01, U07,
+# U11, U17, U21) are all represented; the rest add breadth across every
+# traced module, including the clusters family.
+BATTERY: Tuple[Tuple[str, float, float], ...] = (
+    ("U01.headline", 0.35, 1.0),
+    ("U7.base", 0.65, 1.0),
+    ("U11.v", 0.35, 1.0),
+    ("U17.1", 0.35, 1.0),
+    ("U18.le", 0.8, 1.0),
+    ("U21.d_sparse_n", 0.35, 4.0),
+    ("U03.r_1", 0.35, 1.0),
+    ("U09.headline", 0.35, 1.0),
+    ("U12.headline", 0.35, 1.0),
+    ("U26.i", 0.35, 1.0),
+    ("U27.i", 0.35, 1.0),
+    ("U28.iii", 0.35, 1.0),
+    ("U31.headline", 0.35, 1.0),
+    ("U32.L_iso", 0.35, 1.0),
+    ("U34.L_mono", 0.35, 1.0),
+    ("U35.headline", 0.35, 1.0),
 )
 
 _STEP_LADDER = (0.001, 0.005, 0.02, 0.08)
@@ -192,13 +199,13 @@ def _ingest_positions(graph: GraphSemantics, positions: torch.Tensor) -> Optiona
     return result.scene
 
 
-def _perturbed_scene(sigma: float, seed: int = 20260815) -> Scene:
-    """Ingest the semantic fixture under seeded position noise."""
+def _perturbed_scene(sigma: float, scale: float = 1.0, seed: int = 20260815) -> Scene:
+    """Ingest the semantic fixture under seeded noise and optional sprawl."""
 
     graph, constructed = _semantic_graph()
     generator = torch.Generator().manual_seed(seed)
     noise = torch.randn(constructed.shape, generator=generator, dtype=torch.float64)
-    scene = _ingest_positions(graph, constructed + 2.0 * sigma * noise)
+    scene = _ingest_positions(graph, scale * (constructed + 2.0 * sigma * noise))
     assert scene is not None, "perturbed acceptance fixture failed ingestion"
     return scene
 
@@ -228,12 +235,12 @@ def test_l_total_backward_end_to_end() -> None:
     assert float(torch.linalg.vector_norm(traced.positions.grad)) > 0.0
 
 
-@pytest.mark.parametrize("subterm_id,sigma", BATTERY)
-def test_descent_improves_exact_facet(subterm_id: str, sigma: float) -> None:
+@pytest.mark.parametrize("subterm_id,sigma,scale", BATTERY)
+def test_descent_improves_exact_facet(subterm_id: str, sigma: float, scale: float) -> None:
     """Spec 6.5 gradient sanity: -grad of the soft subterm improves the exact one."""
 
     profiles = _profiles()
-    scene = _perturbed_scene(sigma)
+    scene = _perturbed_scene(sigma, scale)
     traced = score_scene_soft(scene, _table(), profiles)
     assert subterm_id in traced.traced_subterms, f"{subterm_id} not traced"
     tensor = traced.traced_subterms[subterm_id]

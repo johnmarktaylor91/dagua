@@ -966,7 +966,7 @@ def U21(scene: Scene) -> FacetResult:
         defect,
         {"U21.d_sparse_n": sparse, "U21.d_overflow": overflow},
         {
-            "frame_area": frame.area,
+            "frame_area": as_float(frame.area),
             "frame_regime": frame.regime,
             "trim_count": frame.trim_count,
             "Fr": (
@@ -980,8 +980,8 @@ def U21(scene: Scene) -> FacetResult:
             "A_hull_full": hull_full,
             "iso": 1.0 - hull_trim / hull_full if hull_full > 0.0 else 0.0,
             "A_content": content_area,
-            "phi_ink": content_area / frame.area,
-            "R": frame.area / content_area if content_area > 0.0 else float("inf"),
+            "phi_ink": content_area / as_float(frame.area),
+            "R": as_float(frame.area) / content_area if content_area > 0.0 else float("inf"),
             "A_ref": area_reference,
             "mass_out": mass_out,
             "o_min": anchor,

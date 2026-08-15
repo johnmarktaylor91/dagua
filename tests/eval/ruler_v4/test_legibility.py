@@ -550,15 +550,17 @@ def test_traced_u18_edge_row_is_live_when_a_route_crowds_a_foreign_label() -> No
     assert float(tensor.detach()) == pytest.approx(exact, rel=1e-12, abs=1e-15)
 
 
-def test_traced_frame_facet_rows_publish_as_exact_value_constants(
+def test_traced_frame_facet_rows_split_by_seam_liveness(
     semantic_traced: Tuple[Scene, TracedSoftScore],
 ) -> None:
-    """U21's rows stay constant-channel: the frame seam detaches positions.
+    """U21's sparse row rides the live frame seam; overflow stays constant.
 
-    U21 reads positions only through ``frames.robust_frame`` and
-    ``frames.overflow_defect``, which this seam version carries detached
-    (``frames.py`` casts to float inside), so both sub-terms are bound as
-    exact-value constants — published honestly, never silently zero-graded.
+    ``RobustFrame.area`` keeps the position graph inside a trace, so
+    ``U21.d_sparse_n`` traces (flat at the exact-zero plateau on this
+    compact fixture; live on sprawled drawings, pinned by the acceptance
+    battery). ``frames.overflow_defect`` remains a float pipeline this
+    seam version, so ``U21.d_overflow`` is bound as an exact-value
+    constant — published honestly, never silently zero-graded.
 
     Parameters
     ----------
@@ -569,9 +571,13 @@ def test_traced_frame_facet_rows_publish_as_exact_value_constants(
     scene, traced = semantic_traced
     exact = U21(scene)
     assert exact.state is ResultState.VALUE
-    for subterm_id in ("U21.d_sparse_n", "U21.d_overflow"):
-        assert subterm_id in traced.constant_subterms
-        assert subterm_id not in traced.traced_subterms
+    assert "U21.d_sparse_n" in traced.traced_subterms
+    tensor = traced.traced_subterms["U21.d_sparse_n"]
+    assert float(tensor.detach()) == pytest.approx(
+        exact.subterms["U21.d_sparse_n"], rel=1e-12, abs=1e-15
+    )
+    assert "U21.d_overflow" in traced.constant_subterms
+    assert "U21.d_overflow" not in traced.traced_subterms
 
 
 def test_traced_diagnostic_legibility_rows_report_their_gradient_reality(
