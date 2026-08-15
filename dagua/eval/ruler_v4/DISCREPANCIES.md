@@ -189,3 +189,15 @@ the production port; none of the entries below overrides a contract.
     frozen: for a deep tree (`b < d`) the table's `max(1, .)` fold pins the target at
     square in both frames, so the signed frame cannot express "should draw deep";
     granting a depth-side tree exemption is a contract-owner item.
+31. `_UNIT_DUST = 1e-12` (`_util.py: snap_unit`) clamps accumulated float rounding off
+    producers whose closed form is analytically in `[0, 1]` -- signed log sums
+    (Jensen-Shannon divergences), renormalized convex combinations, log-sum-exp and
+    sigmoid means -- at the producer call sites feeding the `[0, 1]` guards. The
+    constant appears in no contract; entry 23's reasoning covers it verbatim: it sits
+    inside the ecosystem's 5.8 numerical envelope, is one-sided into range, can only
+    ever move a value by <= 1e-12, and excess beyond the envelope passes through
+    unchanged so `value_result` and the blend domain checks still raise on any real
+    range violation (measured value-inert on the round-4 540-cell and round-5
+    2295-cell batteries). Like entry 23 it is an unfrozen score-path constant pending
+    contract-owner adoption; the two constants should be adopted or replaced
+    together.
