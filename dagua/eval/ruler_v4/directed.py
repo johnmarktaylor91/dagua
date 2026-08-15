@@ -260,11 +260,17 @@ def U33(scene: Scene) -> FacetResult:
     parents = scene.graph.tree_parents
     depths = scene.graph.tree_depths
     mode = scene.graph.tree_layout
-    if parents is None or depths is None or mode is None:
+    declared = tuple(field is not None for field in (parents, depths, mode))
+    if not any(declared):
         # Contract: "Absence is NA:TREE_SEMANTICS_ABSENT; malformed
         # parent/depth/order data are invalid" (U33.md sec "Input schema
         # and applicability"). DISCREPANCIES entry 41.
         return na_result("TREE_SEMANTICS_ABSENT")
+    if not all(declared):
+        # A partially declared tree is not absence: "Missing required tree
+        # fields is invalid, not NA per drawing" (U33.md sec "Failure and
+        # envelope"). DISCREPANCIES entry 41.
+        return invalid_result("missing_required_tree_fields")
     if mode not in {"layered", "radial"}:
         return invalid_result("invalid_tree_layout")
     if len(parents) != scene.node_count or len(depths) != scene.node_count:
