@@ -987,7 +987,9 @@ def _density_grid_defect(scene: Scene, cell_size: float, angle: float) -> Tuple[
         if demand_probability > 0.0:
             right_divergence += demand_probability * math.log(demand_probability / mixture)
     normalized = (left_divergence + right_divergence) / (2.0 * math.log(2.0))
-    return min(1.0, max(0.0, normalized)), outside_ink / total_ink
+    # JSD over 2 log 2 is analytically in [0, 1]; only float dust is shed
+    # (snap_unit), so a real range violation still reaches the guards.
+    return snap_unit(normalized), outside_ink / total_ink
 
 
 def _crowding_grid_defect(scene: Scene, cell_size: float, angle: float) -> float:
