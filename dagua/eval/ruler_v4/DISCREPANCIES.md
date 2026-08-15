@@ -1,7 +1,8 @@
 # V4 facet-port discrepancies
 
-The frozen Markdown contracts and `MANIFEST.json` are authoritative. The production
-port follows them in every case below.
+The frozen Markdown contracts and `MANIFEST.json` are authoritative. This file records
+both frozen-artifact inconsistencies and deliberate certification-tier limitations in
+the production port; none of the entries below overrides a contract.
 
 1. The dispatch claim in the phase brief says the executable spike runs all 45
    contracts. Its `CORE_FACETS` and `FACET_FUNCTIONS` contain 23 ids: U01, U03, U07,
@@ -32,4 +33,33 @@ port follows them in every case below.
    Frozen ingestion makes component structure and declared-axis applicability
    GraphSemantics-owned. Production derives component count from topology and admits
    an axis only from declared direction/rank semantics.
-
+8. `BoxGeometry` currently stores axis-aligned half extents and no primitive
+   orientation. U17/U18 and cluster-region consumers therefore evaluate exact AABB
+   separation/intersection rather than the contracts' general OBB polygon geometry.
+   Ingestion-derived v4.0 rows are axis-aligned; promotion to oriented primitives
+   requires a schema-owner extension.
+9. U16 route/label overlap and U21 escaped-content mass use exact clipped centerline
+   length times declared stroke width. They do not yet include round-cap area or form
+   an exact union of overlapping escaped primitives. U21 does apply declared node
+   masses, edge masses, and per-edge stroke widths, so the remaining difference is
+   union/capsule certification rather than missing input weights.
+10. U27 penetration uses the minimum signed distance to the member-offset pieces. This
+    is exact outside the union but is a conservative lower magnitude inside overlapping
+    pieces; exact distance to the complement of the full union remains a geometry-owner
+    certification item. U28's adaptive analytic region integration likewise lacks the
+    separate arrangement-proof certificate requested by its contract.
+11. The frozen U13 contract fixes a 0.60 smooth-maximum share for sub-term (ii) but does
+    not divide the remaining 0.40 between mean and CVaR. Production preserves the
+    global 0.65:0.25 ratio for that remainder. U15 does not freeze which shared length
+    defines `L_sh` or the tangent-window obstacle construction; production uses the
+    shorter route and records those choices as scheduler-owner docket items.
+12. The stored-row total order is frozen by `SCENE_RECONSTRUCTION_CONTRACT.md` section
+    8d (routes below nodes below labels, then canonical order). It does not assign a
+    relative canonical-id grammar between node labels and cluster labels, nor does the
+    scene schema expose a container-boundary primitive. U30 isolates a bounded interim
+    for those pairs: an overdrawn subject pays exactly one half, never more than the
+    contract's stated severity interval. The scheduler owner must freeze the missing
+    primitive-id grammar before those branches can be certified.
+13. U17's declared-containment exemption has no corresponding immutable containment
+    relation in `GraphSemantics`. No v4.0 frozen corpus row declares one, so current
+    scores are unaffected; schema-owner work is required before such rows are admitted.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Tuple
 
 import pytest
@@ -140,7 +141,11 @@ def test_u19_physical_label_fixture_pins_exact_legibility_loss() -> None:
     assert isinstance(result, ValidScene)
     facet = U19(result.scene)
     assert facet.state is ResultState.VALUE
-    assert facet.value == pytest.approx(0.6533805941358025, abs=1e-15)
+    ratio = facet.raw["r_l"]
+    expected = 1.0 - ratio**3 * (ratio * (6.0 * ratio - 15.0) + 10.0)
+    assert 0.0 < facet.value < 1.0
+    # U19 contract golden 3: "a label at half the floor scores in (0,1)."
+    assert facet.value == pytest.approx(expected, abs=1e-15)
 
 
 def test_u20a_total_collapse_is_worse_than_two_dimensional_spread() -> None:
@@ -157,13 +162,28 @@ def test_u20a_total_collapse_is_worse_than_two_dimensional_spread() -> None:
     assert collapsed_result.value > spread_result.value
 
 
+def test_u20a_exempts_incident_route_features() -> None:
+    """Do not make every routed graph maximally degenerate at its terminals."""
+
+    positions = torch.tensor([[0.0, 0.0], [8.0, 0.0], [8.0, 8.0], [0.0, 8.0]])
+    result = U20a(_scene(positions, ((0, 1), (1, 2), (2, 3), (3, 0))))
+    assert result.state is ResultState.VALUE
+    assert result.subterms["U20a.iii"] < 1.0
+    assert result.value < 1.0
+
+
 def test_u20b_midscale_edges_lie_on_low_defect_plateau() -> None:
     """U20b's midscale edge fixture lies between short- and long-edge burdens."""
 
     positions = torch.tensor([[0.0, 0.0], [7.0, 0.0], [14.0, 0.0]])
     result = U20b(_scene(positions, ((0, 1), (1, 2))))
     assert result.state is ResultState.VALUE
-    assert result.value == pytest.approx(0.07306493805930278, abs=1e-15)
+    coordinate = math.log2(result.raw["median_edge_length_u"])
+    expected = 1.0 / (1.0 + math.exp(-(math.log2(1.5) - coordinate) / 0.35))
+    expected += 1.0 / (1.0 + math.exp(-(coordinate - math.log2(8.0)) / 0.35))
+    # U20b contract golden 2: "monotone shoulders, flat plateau" under the
+    # section-6 formula with anchors 1.5u and 8u and shoulder width 0.35.
+    assert result.value == pytest.approx(expected, abs=1e-15)
 
 
 def test_u21_compact_symmetric_scene_has_no_sparse_or_overflow_debt() -> None:

@@ -216,6 +216,37 @@ def robust_frame(positions: torch.Tensor, unit: float) -> RobustFrame:
     )
 
 
+def robust_core_positions(positions: torch.Tensor) -> torch.Tensor:
+    """Return the actual point set retained by the robust-frame trim rule.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Finite node centers with shape ``[N, 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Retained centers. The small-population MAD regimes retain every point;
+        the order-statistic regime discards points outside either trimmed axis.
+    """
+
+    points = positions.detach().to(device="cpu", dtype=torch.float64)
+    if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] == 0:
+        raise ValueError("positions must have shape [N, 2] with N >= 1")
+    if not bool(torch.isfinite(points).all()):
+        raise ValueError("positions must be finite")
+    count = points.shape[0]
+    if count < N_SMALL:
+        return points.clone()
+    trim = trim_count(count)
+    ordered, _ = torch.sort(points, dim=0)
+    lower = ordered[trim]
+    upper = ordered[count - trim - 1]
+    retained = points[torch.all((points >= lower) & (points <= upper), dim=1)]
+    return retained.clone()
+
+
 def robust_projection(projections: torch.Tensor, unit: float) -> RobustProjection:
     """Apply the U21 frame rule in one fixed input-owned direction.
 
@@ -347,15 +378,26 @@ def overflow_defect(scene: Scene, frame: RobustFrame) -> Tuple[float, float, flo
         Raw escaped mass per frame area, anchor, and bounded defect.
     """
 
+    node_masses = scene.graph.node_masses or tuple(1.0 for _ in range(scene.node_count))
     escaped_area = sum(
-        box_outside_area(box.center, box.half_extents, frame) for box in scene.node_boxes
+        float(node_masses[box.owner]) * box_outside_area(box.center, box.half_extents, frame)
+        for box in scene.node_boxes
     )
-    stroke_width = scene.style.route_stroke_width * scene.style.coordinate_scale
+    edge_masses = scene.graph.edge_weights or tuple(1.0 for _ in range(scene.edge_count))
     for route in resolved_routes(scene):
+        stroke_width = (
+            scene.style.edge_stroke_widths[route.edge_index]
+            if scene.style.edge_stroke_widths
+            else scene.style.route_stroke_width * scene.style.coordinate_scale
+        )
         for start, end in zip(route.points[:-1], route.points[1:]):
             segment_length = float(torch.linalg.vector_norm(end - start).item())
             inside_length = _segment_length_inside_frame(start, end, frame)
-            escaped_area += max(0.0, segment_length - inside_length) * stroke_width
+            escaped_area += (
+                float(edge_masses[route.edge_index])
+                * max(0.0, segment_length - inside_length)
+                * stroke_width
+            )
     mass_out = escaped_area / frame.area
     anchor = overflow_anchor(scene, frame)
     excess = max(0.0, mass_out - anchor)
