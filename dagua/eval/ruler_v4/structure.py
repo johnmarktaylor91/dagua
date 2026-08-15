@@ -1414,6 +1414,15 @@ def U22(scene: Scene) -> FacetResult:
             # (the DISCREPANCIES.md entry 26 fold); the signed frame
             # takes it as declared.
             target *= aspect if axis is not None else max(aspect, 1.0 / aspect)
+    # Section 7 publishes which exemption branch fired. Ranks win over a
+    # declared class (the class multiplier above is gated on absent ranks);
+    # see DISCREPANCIES.md entry 30 for both dispositions.
+    if ranks is not None:
+        exemption = "layer_profile"
+    elif declared_class is not None:
+        exemption = f"class:{declared_class}"
+    else:
+        exemption = "unit"
     excess = soft_pos(abs(math.log(observed / target)) - math.log(3.0))
     defect = excess / (1.0 + excess)
     return value_result(
@@ -1423,6 +1432,7 @@ def U22(scene: Scene) -> FacetResult:
             "aspect_ratio": observed,
             "target": target,
             "measurement": measurement,
+            "exemption": exemption,
             "degenerate_extent_floor": floor_bound,
         },
     )
