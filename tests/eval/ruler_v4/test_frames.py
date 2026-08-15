@@ -68,3 +68,32 @@ def test_direction_resolved_frame_uses_same_small_n_contract() -> None:
     assert projection.center == 1.5
     assert projection.half_extent == 3.0
     assert not projection.floor_bound
+
+
+def test_robust_frame_keeps_the_graph_only_inside_a_trace() -> None:
+    """The traced frame rides positions; the exact path stays detached.
+
+    Values are bit-identical either way (detach never changes them); the
+    trimmed order-statistic frame is piecewise-linear in positions, so its
+    a.e. position gradient is live inside a ``trace_subterms`` context.
+    """
+
+    from dagua.eval.ruler_v4._tracing import trace_subterms
+
+    torch.manual_seed(7)
+    base = torch.rand(60, 2, dtype=torch.float64) * 10.0
+    leaf = base.clone().requires_grad_(True)
+    exact = robust_frame(leaf, 1.0)
+    assert not exact.half_extents.requires_grad
+    with trace_subterms():
+        traced = robust_frame(leaf, 1.0)
+    assert traced.half_extents.requires_grad
+    assert torch.equal(traced.half_extents, exact.half_extents)
+    assert torch.equal(traced.center, exact.center)
+    assert traced.trim_count == exact.trim_count
+    assert traced.regime == exact.regime
+    (gradient,) = torch.autograd.grad(
+        4.0 * torch.prod(traced.half_extents), leaf, allow_unused=True
+    )
+    assert gradient is not None
+    assert float(torch.linalg.vector_norm(gradient)) > 0.0
