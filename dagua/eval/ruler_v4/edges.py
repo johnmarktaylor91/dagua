@@ -918,21 +918,25 @@ def U11(scene: Scene) -> FacetResult:
             confusability = []
             for left_index, left in enumerate(records):
                 for right in records[left_index + 1 :]:
+                    gap_factor = math.exp(
+                        -(
+                            (
+                                float(torch.linalg.vector_norm(left[0] - right[0]))
+                                / (scene.intrinsic_unit / 4.0)
+                            )
+                            ** 2
+                        )
+                    )
                     if left[1] is None or right[1] is None:
-                        # A tangent-less terminal is the coincidence limit, not a
-                        # perfectly distinguishable pair.
-                        confusability.append(1.0)
+                        # The gap factor of the closed form stays well defined
+                        # when a zero-arc route has no initial tangent; only the
+                        # angle factor is undefined and takes its supremum, so a
+                        # coincident tangent-less pair is the coincidence limit
+                        # while a distant one still earns its separation.
+                        confusability.append(gap_factor)
                         continue
                     confusability.append(
-                        math.exp(
-                            -(
-                                (
-                                    float(torch.linalg.vector_norm(left[0] - right[0]))
-                                    / (scene.intrinsic_unit / 4.0)
-                                )
-                                ** 2
-                            )
-                        )
+                        gap_factor
                         * math.exp(-((_segment_angle(left[1], right[1]) / math.radians(15.0)) ** 2))
                     )
             node_defects.append(sum(confusability) / len(confusability))

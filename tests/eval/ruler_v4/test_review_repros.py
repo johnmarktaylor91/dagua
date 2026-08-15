@@ -189,3 +189,100 @@ def test_u11_scores_plain_declared_rank_dag() -> None:
     result = U11(scene)
     assert result.state is ResultState.VALUE
     assert result.subterms
+
+
+# --- P4REVERIFY3_OPUS blocker 3: the quintic smoothstep overshoots 1.0 by ---
+# one ULP just below its upper knot, driving 1 - smoothstep(...) defect terms
+# negative and crashing the blend on derived-placement cluster scenes.
+
+
+def test_smoothstep_never_exceeds_one() -> None:
+    """The helper's promised [0, 1] range holds at the overshoot input."""
+
+    from dagua.eval.ruler_v4._util import smoothstep
+
+    overshoot_input = torch.nextafter(
+        torch.tensor(1.0, dtype=torch.float64), torch.tensor(0.0, dtype=torch.float64)
+    )
+    assert float(smoothstep(overshoot_input)) <= 1.0
+    assert float(smoothstep(torch.tensor(1.0, dtype=torch.float64))) == 1.0
+
+
+def test_u30_derived_placement_scores_on_every_alpha_row() -> None:
+    """Labels landing exactly on pad_target must score, not crash the blend."""
+
+    from dagua.eval.ruler_v4 import evaluate_facet
+
+    generator = torch.Generator().manual_seed(2)
+    lumps = []
+    for cluster in range(3):
+        base = torch.tensor([25.0 * cluster, 0.0], dtype=torch.float64)
+        lumps.append(base + 4.0 * torch.rand((6, 2), generator=generator, dtype=torch.float64))
+    positions = torch.cat(lumps)
+    graph = GraphSemantics(
+        tuple(f"n{index}" for index in range(18)),
+        (),
+        clusters={
+            f"c{cluster}": tuple(range(6 * cluster, 6 * cluster + 6)) for cluster in range(3)
+        },
+    )
+    result = ingest(
+        graph,
+        DrawingScene(positions),
+        StyleContract(),
+        ObservationProfile(visible_channels=frozenset({"nodes", "routes", "cluster_labels"})),
+    )
+    assert isinstance(result, ValidScene)
+    for row in range(1, 13):
+        facet = evaluate_facet("U30", result.scene, alpha_grid_index=row)
+        assert facet.state is ResultState.VALUE
+    # Coverage restored for the pre-selection envelope branch.
+    unselected = evaluate_facet("U30", result.scene)
+    assert unselected.state is ResultState.NA
+    assert unselected.reason == "alpha_grid_unselected"
+
+
+# --- P4REVERIFY3_OPUS blocker 4: a fully coincident retained core is total ---
+# collapse (q = 0 -> D^ii = 1, golden 2), and declaring ranks cannot excuse it.
+
+
+def test_u20a_coincident_core_is_catastrophic_even_with_ranks() -> None:
+    """The degenerate zero-cloud fallback reads collapse, not isotropy."""
+
+    coincident = torch.zeros((6, 2), dtype=torch.float64)
+    plain = U20a(_node_scene(coincident))
+    declared = U20a(_node_scene(coincident, ranks=tuple(range(6)), flow_axis=(0.0, 1.0)))
+    assert plain.subterms["U20a.ii"] == pytest.approx(1.0, abs=0.0)
+    # Golden 3's mutation clause: the rank block cannot improve the composite.
+    assert declared.subterms["U20a.ii"] == pytest.approx(1.0, abs=0.0)
+    assert plain.value == declared.value == pytest.approx(1.0, abs=0.0)
+
+
+# --- P4REVERIFY3_OPUS major 1: a ranks-only graph keeps its input-only ---
+# layer-profile target even though no direction exists to orient the frame.
+
+
+def test_u22_ranks_only_graph_keeps_layer_profile_target() -> None:
+    """U22's target comes from declared ranks alone; the frame stays honest."""
+
+    from dagua.eval.ruler_v4.structure import U22
+
+    positions = torch.tensor(
+        [
+            [0.0, 0.0],
+            [-3.0, 4.0],
+            [3.0, 4.0],
+            [-3.0, 8.0],
+            [3.0, 8.0],
+            [-3.0, 12.0],
+            [3.0, 12.0],
+            [0.0, 16.0],
+        ],
+        dtype=torch.float64,
+    )
+    facet = U22(_node_scene(positions, ranks=(0, 1, 1, 2, 2, 3, 3, 4)))
+    assert facet.state is ResultState.VALUE
+    # max_layer_width / n_layers = 2/5, folded to the >= 1 side of the
+    # direction-free rotation frame.
+    assert facet.raw["target"] == pytest.approx(2.5, abs=0.0)
+    assert facet.raw["measurement"] == "frozen_direction_set"

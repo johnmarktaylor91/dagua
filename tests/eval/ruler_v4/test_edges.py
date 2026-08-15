@@ -179,8 +179,25 @@ def test_u11_tangentless_terminal_pair_is_not_best_case() -> None:
         for index, (source, target) in enumerate(edges)
     )
     result = U11(_scene(positions, edges, routes))
-    # U11 section 5(v): approaching coincidence raises terminal confusability.
-    assert result.subterms["U11.v"] > 0.0
+    # U11 section 5(v): at coincidence both tangent-less pairs read the full
+    # gap factor (1.0 each) and the tangent pair is ~0, so d5 = 2/3 by hand.
+    assert result.subterms["U11.v"] == pytest.approx(2.0 / 3.0, abs=1e-9)
+
+
+def test_u11_distant_tangentless_terminal_pair_earns_its_separation() -> None:
+    """The closed form's gap factor stays live when a tangent is undefined."""
+
+    positions = torch.tensor([[0.0, 0.0], [0.2, 0.0], [8.0, 0.0], [0.0, 8.0]])
+    edges = ((0, 1), (0, 2), (0, 3))
+    routes = (
+        Route(0, torch.tensor([[0.6, 0.0], [0.6, 0.0]])),
+        Route(1, torch.tensor([[0.0, 0.0], [8.0, 0.0]])),
+        Route(2, torch.tensor([[0.0, 0.0], [0.0, 8.0]])),
+    )
+    result = U11(_scene(positions, edges, routes))
+    # U11 golden G10's falling branch: separated anchors decay; a flat 1.0 for
+    # tangent-less pairs would score this 2/3 like the coincident fixture.
+    assert result.subterms["U11.v"] < 0.15
 
 
 def test_u12_collinear_subdivided_path_has_zero_continuity_defect() -> None:

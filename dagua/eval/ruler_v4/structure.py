@@ -259,11 +259,6 @@ def U03(scene: Scene) -> FacetResult:
     degree_stratum_defects: Dict[str, Tuple[float, ...]] = {}
     center_panels: Dict[str, Tuple[int, ...]] = {}
     graph_adjacency = adjacency(scene)
-    node_masses = (
-        list(scene.graph.node_masses)
-        if scene.graph.node_masses is not None
-        else [1.0] * scene.node_count
-    )
     for radius in (1, 2, 4):
         component_values: List[float] = []
         component_weights: List[float] = []
@@ -352,9 +347,10 @@ def U03(scene: Scene) -> FacetResult:
             degree_stratum_defects[statistic_key] = tuple(tercile_values)
             if tercile_values:
                 component_values.append(sum(tercile_values) / len(tercile_values))
-                # Section 7: terciles combine with equal input mass, components
-                # by node mass (identical on unit-mass graphs).
-                component_weights.append(float(sum(node_masses[node] for node in members)))
+                # Section 4 weights block: "Components pooled by node-count
+                # input mass". Section 7's "components by node mass" summary
+                # conflicts; the dedicated weights block governs (docketed).
+                component_weights.append(float(len(members)))
         eligibility[f"r_{radius}"] = radius_eligible
         if component_values:
             values[f"U03.r_{radius}"] = sum(
@@ -1346,7 +1342,20 @@ def U22(scene: Scene) -> FacetResult:
             extents.append(extent.half_extent)
             floor_bound = floor_bound or extent.floor_bound
         observed = max(extents) / min(extents)
-        target = 1.0
+        if ranks is not None:
+            # Section 6's layer-profile target is computed from declared ranks
+            # alone; no direction is needed for the TARGET even though the
+            # frame stays direction-free. The rotation-scan aspect is >= 1 by
+            # construction, so the orientation-less target is folded onto the
+            # same side of unity.
+            rank_tensor = torch.tensor(ranks, dtype=torch.long)
+            counts = torch.stack(
+                [(rank_tensor == rank).sum() for rank in torch.unique(rank_tensor)]
+            )
+            profile = float(torch.max(counts)) / counts.numel()
+            target = max(profile, 1.0 / profile)
+        else:
+            target = 1.0
         measurement = "frozen_direction_set"
     declared_class = scene.graph.declared_graph_class
     if declared_class is not None and ranks is None:

@@ -113,8 +113,39 @@ the production port; none of the entries below overrides a contract.
     quotient. E2-uncomputable-without-axis is a contract gap; the scheduler owner may
     prefer a typed sub-term drop over the raw score.
 23. U08's golden-exactness envelope `_ANGULAR_ZERO_ENVELOPE = 1e-12` snaps a pair defect
-    at or below 1e-12 to exactly 0.0 in production so the contract's exact-zero golden is
-    reachable. The constant appears nowhere in U08.md; it sits inside the ecosystem's
-    5.8 numerical envelope (U08 itself tolerates 1e-9 there) and can only ever lower a
-    defect by <= 1e-12, but it is an unfrozen score-path constant pending contract-owner
-    adoption.
+    at or below 1e-12 to exactly 0.0 in production so the contract's exact-zero golden
+    (U08 section 14 golden 1: "defect 0 (exact)") is reachable. The constant appears
+    nowhere in U08.md; it sits inside the ecosystem's 5.8 numerical envelope (U08 itself
+    tolerates 1e-9 there) and can only ever lower a defect by <= 1e-12, but it is an
+    unfrozen score-path constant pending contract-owner adoption.
+24. U20a section 6 (iii) reads `D^iii_c = 1 - prod_pairs (1 - m_kl)^(1/n_c)` flat over
+    pairs, while sections 4 and 7 collapse feature pairs "onto their owning node/route
+    object" and run the global blend over feature-owning objects. Production implements
+    the object-level reading; because each pair's loss lands on both owners, the pair
+    survival contributes `(1 - m)^(2/n_c)` across the object population rather than the
+    flat `(1 - m)^(1/n_c)`. Score-visible on multi-pair scenes; reconciling section 6's
+    flat product with the section 4/7 collapse is a contract-owner item.
+25. U11 section 6 (v)'s confusability closed form factors into a gap term and a tangent
+    angle term. A zero-arc route has no initial tangent, so the angle factor is
+    undefined; production charges its supremum (1.0) and keeps the well-defined gap
+    factor, so a coincident tangent-less pair is the coincidence limit (golden G10's
+    rising branch) while a distant one still earns its separation (G10's falling
+    branch). The zero-tangent case itself is uncontracted.
+26. Declared ranks without a declared flow axis reach three different branches: U20a's
+    E2 residual frame is not applied (entry 22), U22 computes the section 6
+    layer-profile target from the ranks but measures in the direction-free frozen
+    rotation frame (the orientation-less target is folded to its >= 1 side since the
+    rotation-scan aspect is >= 1 by construction), and U23 stays rotation-averaged.
+    No direction is ever fabricated from ranks; whether a rank declaration constitutes
+    a declared axis needs one contract-owner answer across the package.
+27. U03's section 4 weights block pools components "by node-count input mass" while the
+    section 7 composition summary says "components by node mass". The clauses conflict
+    on mass-declaring graphs. Production follows the dedicated weights block: components
+    pool by node count; declared node masses still weight the within-tercile blend per
+    section 7.
+28. U30 sub-term (iii) saturates by contract arithmetic on ordinary labelled cluster
+    scenes: `a_c` from U27's closed form admits every primitive within ~2.5 node
+    diagonals of the label, and the flat unnormalized noisy-or over the admitted
+    population pins at 1 (no per-opportunity exponent like U20a's class product). The
+    port matches both formulas exactly, so the row is non-discriminative as frozen;
+    a scheduler-owner ruling is required before U30 (iii) can carry corpus rows.

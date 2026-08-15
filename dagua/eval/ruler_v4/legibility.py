@@ -460,14 +460,19 @@ def U20a(scene: Scene) -> FacetResult:
     if core.shape[0] < 2:
         rank_collapse = 1.0
     else:
-        ratio = _isotropy_quotient(core - frame.center)
+        # A zero raw cloud is total collapse: the degenerate limit of exact
+        # collinearity, which section 6 maps to the catastrophic end (q = 0).
+        ratio = _isotropy_quotient(core - frame.center, degenerate=0.0)
         if scene.graph.ranks is not None and scene.graph.flow_axis is not None:
             # E2 is exemption-only: the residual frame may excuse collinearity
             # that the declared rank axis explains, but never lowers the raw
             # quotient of a healthy drawing -- otherwise declaring ranks would
-            # exempt cross-axis line collapse, the E3-banned channel.
-            residual = _rank_residual_core(scene, core, core_mask)
-            ratio = max(ratio, _isotropy_quotient(residual))
+            # exempt cross-axis line collapse, the E3-banned channel. A zero
+            # RESIDUAL is exempt only when the ranks explain nonzero axis
+            # variance; a fully coincident core stays catastrophic (golden 2).
+            residual, explained_spread = _rank_residual_core(scene, core, core_mask)
+            exempt = 1.0 if explained_spread > 0.0 else 0.0
+            ratio = max(ratio, _isotropy_quotient(residual, degenerate=exempt))
         rank_collapse = 1.0 - float(smoothstep(torch.tensor(ratio / 0.05, dtype=torch.float64)))
     routes = resolved_routes(scene)
     node_route_opportunities = scene.node_count * scene.edge_count
@@ -560,24 +565,27 @@ def U20a(scene: Scene) -> FacetResult:
     return mean_result("U20a", values)
 
 
-def _isotropy_quotient(centered: torch.Tensor) -> float:
+def _isotropy_quotient(centered: torch.Tensor, degenerate: float) -> float:
     """Singular-value quotient of one centered retained-position cloud.
 
     Parameters
     ----------
     centered : torch.Tensor
         Centered positions with shape ``[K, 2]``.
+    degenerate : float
+        Quotient assigned to a zero cloud, whose ratio is undefined: the
+        collapse reading (``0.0``) for the raw frame, the fully-explained
+        exemption (``1.0``) for a rank residual with explained variance.
 
     Returns
     -------
     float
-        ``sigma_2 / sigma_1`` in ``[0, 1]``; ``1.0`` for a zero cloud, whose
-        every direction is equally (vacuously) occupied.
+        ``sigma_2 / sigma_1`` in ``[0, 1]``, or ``degenerate`` for a zero cloud.
     """
 
     singular = torch.linalg.svdvals(centered)
     if float(singular[0]) <= 0.0:
-        return 1.0
+        return degenerate
     return float(singular[1] / singular[0])
 
 
@@ -585,7 +593,7 @@ def _rank_residual_core(
     scene: Scene,
     core: torch.Tensor,
     core_mask: torch.Tensor,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, float]:
     """Remove rank-explained declared-axis variance from retained positions.
 
     Parameters
@@ -599,8 +607,10 @@ def _rank_residual_core(
 
     Returns
     -------
-    torch.Tensor
-        Centered rank-residual positions with shape ``[K, 2]``.
+    tuple[torch.Tensor, float]
+        Centered rank-residual positions with shape ``[K, 2]`` and the
+        centered spread of the rank-explained axis component (zero exactly
+        when the declared ranks explain no axis variance at all).
     """
 
     axis = torch.tensor(scene.graph.flow_axis, dtype=torch.float64)
@@ -614,7 +624,8 @@ def _rank_residual_core(
     residual_axis = axis_projection - explained
     cross_projection = core @ cross
     residual = residual_axis[:, None] * axis + cross_projection[:, None] * cross
-    return residual - torch.mean(residual, dim=0)
+    explained_spread = float(torch.linalg.vector_norm(explained - torch.mean(explained)))
+    return residual - torch.mean(residual, dim=0), explained_spread
 
 
 def _accumulate_object_loss(
@@ -868,12 +879,21 @@ def U21(scene: Scene) -> FacetResult:
             "frame_area": frame.area,
             "frame_regime": frame.regime,
             "trim_count": frame.trim_count,
+            "Fr": (
+                float(frame.center[0]),
+                float(frame.center[1]),
+                float(2.0 * frame.half_extents[0]),
+                float(2.0 * frame.half_extents[1]),
+            ),
+            "D_core": float(torch.linalg.vector_norm(2.0 * frame.half_extents)),
             "A_hull_trim": hull_trim,
             "A_hull_full": hull_full,
             "iso": 1.0 - hull_trim / hull_full if hull_full > 0.0 else 0.0,
             "A_content": content_area,
             "phi_ink": content_area / frame.area,
+            "R": frame.area / content_area if content_area > 0.0 else float("inf"),
             "mass_out": mass_out,
+            "o_min": anchor,
             "overflow_anchor": anchor,
             "degenerate_frame_coincident": all(frame.floor_bound),
         },
