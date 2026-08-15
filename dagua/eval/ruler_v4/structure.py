@@ -1359,7 +1359,10 @@ def U22(scene: Scene) -> FacetResult:
             width, height = scene.graph.lattice_dimensions
             target *= width / height
         elif declared_class not in {"cycle", "ring"}:
-            target *= 1.0
+            # Section 13 case (c): a class outside the frozen exemption table's
+            # domain is typed INVALID; a silent kappa_class = 1 fallback would
+            # be the undocumented score-visible branch the contract pre-bans.
+            return invalid_result("unknown_declared_class")
     excess = soft_pos(abs(math.log(observed / target)) - math.log(3.0))
     defect = excess / (1.0 + excess)
     return value_result(

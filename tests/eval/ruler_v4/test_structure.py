@@ -223,14 +223,14 @@ def test_u22_wide_plateau_has_zero_cost(semantic_scene: Scene) -> None:
     assert result.raw["measurement"] == "frozen_direction_set"
 
 
-def test_u22_unknown_declared_class_uses_other_class_target() -> None:
-    """U22 routes unlisted declared classes to the table's unit target."""
+def test_u22_unknown_declared_class_is_typed_invalid() -> None:
+    """U22 section 13 case (c): an unlisted class string never scores."""
 
     positions = torch.tensor([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
     result = U22(_scene(positions, (), {"declared_graph_class": "novel"}))
-    # U22 section 6 sends all other declared classes to target one.
-    assert result.state is ResultState.VALUE
-    assert result.raw["target"] == pytest.approx(1.0, abs=0.0)
+    # A silent kappa_class = 1 fallback is the branch section 13 pre-bans.
+    assert result.state is ResultState.INVALID
+    assert result.reason == "unknown_declared_class"
 
 
 def test_u23_symmetric_fixture_is_balanced(semantic_scene: Scene) -> None:
