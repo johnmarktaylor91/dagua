@@ -860,3 +860,90 @@ def test_idless_event_occurrences_sum_into_the_cc1_margin() -> None:
         registry,
     )
     assert shared_with_id.event_margin == pytest.approx(0.03)
+
+
+# --- P2REVIEW_OPUS major (composition.py:491-500) / P2REVIEW_FABLE finding ---
+# 2: the event budget was the only gate and FIRST_WINS read as a certified
+# strict win 12+ orders of magnitude below any JND. Verdicts are now scoped
+# MARGIN_RULE_* and the CC-1 SE_pair arm is evaluable through the API.
+
+
+def test_se_pair_arm_blocks_a_margin_verdict_when_supplied() -> None:
+    """CC-1 second arm: SE_pair must sit below half the smallest bound."""
+
+    from dataclasses import replace
+
+    from dagua.eval.ruler_v4.composition import (
+        ComparisonVerdict,
+        CompositionFamily,
+        CompositionProfile,
+        compare_with_event_margin,
+        compose,
+    )
+    from dagua.eval.ruler_v4.events import load_event_registry
+    from dagua.eval.ruler_v4.scene import value_result
+    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+
+    table = WeightTable(entries=(SubtermWeight("A.1", "A", "g", 1.0),), d_power=0)
+    base = compose(
+        {"A": value_result(0.2, {"A.1": 0.2})},
+        table,
+        CompositionProfile(CompositionFamily.P_MEAN, power=1.0),
+    )
+    registry = load_event_registry()
+    better = replace(base, l_total=base.l_total + 0.2)
+
+    gated = compare_with_event_margin(
+        base, better, (), (), registry, se_pair=0.02, smallest_visible_jump_bound=0.03
+    )
+    assert gated.se_gate_passed is False
+    assert gated.verdict is ComparisonVerdict.EVENT_MARGIN_LIMITED
+
+    passing = compare_with_event_margin(
+        base, better, (), (), registry, se_pair=0.01, smallest_visible_jump_bound=0.03
+    )
+    assert passing.se_gate_passed is True
+    assert passing.verdict is ComparisonVerdict.MARGIN_RULE_FIRST_WINS
+
+    with pytest.raises(ValueError, match="ship together"):
+        compare_with_event_margin(base, better, (), (), registry, se_pair=0.01)
+
+
+def test_margin_rule_verdicts_are_scoped_names_not_certified_wins() -> None:
+    """The Opus 1e-15 probe now returns a margin-scoped verdict name."""
+
+    from dataclasses import replace
+
+    from dagua.eval.ruler_v4.composition import (
+        ComparisonVerdict,
+        CompositionFamily,
+        CompositionProfile,
+        compare_with_event_margin,
+        compose,
+    )
+    from dagua.eval.ruler_v4.events import load_event_registry
+    from dagua.eval.ruler_v4.scene import value_result
+    from dagua.eval.ruler_v4.weights import SubtermWeight, WeightTable
+
+    table = WeightTable(entries=(SubtermWeight("A.1", "A", "g", 1.0),), d_power=0)
+    base = compose(
+        {"A": value_result(0.2, {"A.1": 0.2})},
+        table,
+        CompositionProfile(CompositionFamily.P_MEAN, power=1.0),
+    )
+    sub_jnd = compare_with_event_margin(
+        base,
+        replace(base, l_total=base.l_total + 1e-15),
+        (),
+        (),
+        load_event_registry(),
+    )
+    # No unscoped WIN verdict exists on this API at all.
+    assert {verdict.name for verdict in ComparisonVerdict} == {
+        "MARGIN_RULE_FIRST_WINS",
+        "MARGIN_RULE_SECOND_WINS",
+        "TIE",
+        "EVENT_MARGIN_LIMITED",
+    }
+    assert sub_jnd.verdict is ComparisonVerdict.MARGIN_RULE_FIRST_WINS
+    assert sub_jnd.se_gate_passed is None
