@@ -197,7 +197,20 @@ the production port; none of the entries below overrides a contract.
     for the class table only ever moves a sub-unit grid aspect). Residue kept as
     frozen: for a deep tree (`b < d`) the table's `max(1, .)` fold pins the target at
     square in both frames, so the signed frame cannot express "should draw deep";
-    granting a depth-side tree exemption is a contract-owner item.
+    granting a depth-side tree exemption is a contract-owner item. Two further silent
+    section 6 gaps live in this seam. First, the three `A_target` cases carry no
+    stated precedence, and production prefers the layer profile when a graph declares
+    both ranks and a known class (the class multiplier is gated on absent ranks) --
+    score-visible on `path`/`chain` (a 40-node declared path drawn along its axis
+    scores 0.522154 class-only vs 0.0 with ranks added), adopted as the more specific
+    input-only statistic per entry 20's section 13 / CC-4 tie-break; the published
+    `exemption` key records which branch fired. Second, a path graph is also the
+    `1 x N` lattice, so two truthful declarations of one graph exist and disagree
+    outside the `8 x 3 = 24` plateau (0.010723 as `path` vs 0.0 as `grid (1, N)` on a
+    3.0u strip) -- a `V4_SPEC` 5.3 #17 exposure confined to beyond-plateau strips,
+    reachable only by a coordinated `class` + `dims` mutation (no single-field
+    mutation improves), and contract-internal (section 6 mixes a coarse constant
+    with an exact declared aspect over overlapping families); kept as frozen.
 31. `_UNIT_DUST = 1e-12` (`_util.py: snap_unit`) clamps accumulated float rounding off
     producers whose closed form is analytically in `[0, 1]` -- signed log sums
     (Jensen-Shannon divergences), renormalized convex combinations, log-sum-exp and
