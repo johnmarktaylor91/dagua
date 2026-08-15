@@ -89,8 +89,11 @@ the production port; none of the entries below overrides a contract.
     misses the region entirely (a cluster drawn as separated lumps with the core center
     in the gap). Production evaluates the boundary at the nearest covered x, falling back
     to the region-bounds top; both fallbacks are input-only functions of the derived
-    region, so scattered clusters ingest and are scored (and punished by U29/U30) rather
-    than aborting the scene.
+    region, so scattered clusters ingest and are scored rather than aborting the scene.
+    Measured (P4REVERIFY4): the fallback does NOT punish scattering -- an 8-node cluster
+    scores U30 = 0.903 drawn tight, 9.07e-4 as two lumps 100u apart, and exactly 0.0 as
+    three lumps (the label lands in empty space, so sub-term (iii) sees no occluder).
+    The fallback is docketed for determinism and input-only provenance, not deterrence.
 20. U22 section 6 sends "all other declared classes and undeclared graphs" to
     `kappa_class = 1`, while section 13 case (c) types a declared class outside the
     frozen exemption table's domain as `unknown_declared_class` INVALID and pre-bans the
@@ -102,9 +105,10 @@ the production port; none of the entries below overrides a contract.
 21. U03 section 4 weights centers equally within each degree tercile, while section 7
     runs the tercile blend "over the fade-transformed per-center defects ... at
     INPUT-ONLY node-mass weights". The two clauses conflict on mass-declaring graphs.
-    Production follows section 4 (centers equal-weighted within tercile); terciles
-    combine at equal mass and components by node mass per section 7. Reconciling the
-    section 7 center-weight wording is a contract-owner item.
+    Production follows section 4 on both counts: centers are equal-weighted within each
+    tercile, terciles combine at equal mass, and components pool by node-count input
+    mass (the section 4 / section 7 component-pooling conflict is entry 27). Reconciling
+    the section 7 center-weight wording is a contract-owner item.
 22. U20a's E2 residual frame requires the declared flow axis for its construction, but
     the exemption's trigger clause is "when GraphSemantics declares ranks/layers" with
     no axis condition. For a ranks-declared, axis-undeclared graph production keeps the
@@ -130,7 +134,10 @@ the production port; none of the entries below overrides a contract.
     undefined; production charges its supremum (1.0) and keeps the well-defined gap
     factor, so a coincident tangent-less pair is the coincidence limit (golden G10's
     rising branch) while a distant one still earns its separation (G10's falling
-    branch). The zero-tangent case itself is uncontracted.
+    branch). The zero-tangent case itself is uncontracted. (Since r4 BLOCKER-1, pairs
+    with PRESENT tangents use the oriented angle -- anti-parallel departures read as
+    `pi`, maximal separation -- so the supremum charge here applies only to genuinely
+    missing tangents.)
 26. Declared ranks without a declared flow axis reach three different branches: U20a's
     E2 residual frame is not applied (entry 22), U22 computes the section 6
     layer-profile target from the ranks but measures in the direction-free frozen
@@ -141,11 +148,29 @@ the production port; none of the entries below overrides a contract.
 27. U03's section 4 weights block pools components "by node-count input mass" while the
     section 7 composition summary says "components by node mass". The clauses conflict
     on mass-declaring graphs. Production follows the dedicated weights block: components
-    pool by node count; declared node masses still weight the within-tercile blend per
-    section 7.
+    pool by node count. Centers stay equal-weighted within each tercile (entry 21);
+    section 7's node-mass wording is the unadopted side of both conflicts.
 28. U30 sub-term (iii) saturates by contract arithmetic on ordinary labelled cluster
     scenes: `a_c` from U27's closed form admits every primitive within ~2.5 node
     diagonals of the label, and the flat unnormalized noisy-or over the admitted
     population pins at 1 (no per-opportunity exponent like U20a's class product). The
     port matches both formulas exactly, so the row is non-discriminative as frozen;
     a scheduler-owner ruling is required before U30 (iii) can carry corpus rows.
+29. U20a's E2 exemption is reachable only on an exactly zero residual:
+    `_isotropy_quotient` returns the degenerate reading (`1.0`, exempt) iff the residual
+    cloud's leading singular value is exactly 0, and any nonzero residual along the
+    declared axis is a 1-D cloud whose quotient is 0, so `max(q_raw, q_residual)` grants
+    nothing. The exemption set is measure-zero, and `U20a.ii` jumps by its full range
+    across it: a declared-layer column with within-rank jitter `eps = 1e-9` scores
+    `ii = 1.0` while `eps = 0` scores `0.0` (verified at every `eps` up to 4.0, and at
+    the `75959e8d` baseline with `eps = 2.0` -- residue, not regression). Read along
+    U20a golden 2's collapse ladder the sub-term therefore improves `1.0 -> 0.0` at the
+    instant within-rank pairs become coincident, against the ladder's "no cliff" clause;
+    golden 3's "declared ranks whose axis explains the collinearity -> D^ii = 0" is
+    satisfied only at the exact fixture. A graded exemption needs a contract-owner
+    definition of when the declared axis "explains" a nearly-rank-collapsed cloud (a
+    residual-scale threshold or a C^1 blend); production keeps the exemption-only
+    `max(q_raw, q_residual)` construction, which cannot re-open the E3 collapse channel,
+    and escalates the knife edge rather than freezing an uncontracted tolerance. (The
+    composite is shielded at full collapse because sub-terms (i) and (iii) saturate;
+    the jump is score-visible in the published, manifest-weighted sub-term.)

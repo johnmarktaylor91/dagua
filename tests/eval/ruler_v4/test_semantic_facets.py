@@ -355,6 +355,12 @@ def test_u41_certified_triangle_has_zero_face_proxy_debt() -> None:
     assert result.raw["F0"] == 1
     assert result.raw["arrangement_face_count"] == 1
     assert result.raw["faces"][0]["convexity_defect"] == pytest.approx(0.0, abs=0.0)
+    # The facet value carries U41's frozen 0.60/0.40 sub-term mass exactly,
+    # and the certified convex face leaves only sigmoid tails in L_conv.
+    assert result.subterms["U41.L_conv"] == pytest.approx(0.0, abs=1e-12)
+    assert result.value == pytest.approx(
+        0.60 * result.subterms["U41.L_conv"] + 0.40 * result.subterms["U41.L_area"], abs=0.0
+    )
 
 
 def test_u42_default_v4_style_has_typed_channel_absence() -> None:
