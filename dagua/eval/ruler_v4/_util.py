@@ -8,6 +8,16 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import torch
 
+from dagua.eval.ruler_v4._tracing import (
+    Scalar,
+    as_float,
+    keep,
+    p_max,
+    p_min,
+    p_sqrt,
+    p_sum,
+    tracing_active,
+)
 from dagua.eval.ruler_v4.scene import (
     BoxGeometry,
     FacetResult,
@@ -129,49 +139,52 @@ def smoothstep(value: torch.Tensor) -> torch.Tensor:
     return torch.clamp(clipped**3 * (clipped * (6.0 * clipped - 15.0) + 10.0), 0.0, 1.0)
 
 
-def soft_pos(value: float, constant: float = 0.5) -> float:
+def soft_pos(value: Scalar, constant: float = 0.5) -> Scalar:
     """Evaluate the contracts' C1 one-sided positive map.
 
     Parameters
     ----------
-    value : float
+    value : float or torch.Tensor
         Signed excess.
     constant : float
         Positive knee constant.
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Zero for nonpositive inputs and ``x^2/(x+c)`` otherwise.
     """
 
+    if isinstance(value, torch.Tensor):
+        positive = torch.clamp(value, min=0.0)
+        return positive * positive / (positive + constant)
     if value <= 0.0:
         return 0.0
     return value * value / (value + constant)
 
 
-def bounded(value: float) -> float:
+def bounded(value: Scalar) -> Scalar:
     """Map a nonnegative unbounded burden into ``[0, 1)``.
 
     Parameters
     ----------
-    value : float
+    value : float or torch.Tensor
         Nonnegative burden.
 
     Returns
     -------
-    float
+    float or torch.Tensor
         Saturating cap-free defect.
     """
 
-    nonnegative = max(0.0, value)
+    nonnegative = p_max(0.0, value)
     return nonnegative / (1.0 + nonnegative)
 
 
 _UNIT_DUST = 1e-12
 
 
-def snap_unit(value: float) -> float:
+def snap_unit(value: Scalar) -> Scalar:
     """Snap float dust off an analytically-``[0, 1]`` quantity.
 
     Producers whose closed form is bounded to the unit interval can still
@@ -193,6 +206,16 @@ def snap_unit(value: float) -> float:
         The value with sub-dust excess clamped into ``[0, 1]``.
     """
 
+    if isinstance(value, torch.Tensor):
+        # The tensor branch clamps instead of snapping to a constant, so the
+        # value lands exactly on the boundary while the (zero) boundary
+        # gradient matches the float branch's constant.
+        point = float(value.detach().item())
+        if -_UNIT_DUST <= point < 0.0:
+            return torch.clamp(value, min=0.0)
+        if 1.0 < point <= 1.0 + _UNIT_DUST:
+            return torch.clamp(value, max=1.0)
+        return value
     if -_UNIT_DUST <= value < 0.0:
         return 0.0
     if 1.0 < value <= 1.0 + _UNIT_DUST:
@@ -200,9 +223,28 @@ def snap_unit(value: float) -> float:
     return value
 
 
+def _as_tensor(value: Scalar) -> torch.Tensor:
+    """Promote one scalar to a float64 tensor, preserving any graph.
+
+    Parameters
+    ----------
+    value : float or torch.Tensor
+        Scalar to promote.
+
+    Returns
+    -------
+    torch.Tensor
+        Zero-dimensional float64 tensor.
+    """
+
+    if isinstance(value, torch.Tensor):
+        return value
+    return torch.tensor(float(value), dtype=torch.float64)
+
+
 def mean_result(
     facet_id: str,
-    values: Mapping[str, float],
+    values: Mapping[str, Scalar],
     raw: Optional[Mapping[str, object]] = None,
     *,
     renormalize_missing: bool = True,
@@ -245,15 +287,33 @@ def mean_result(
         if renormalize_missing
         else applicable
     )
+    any_tensor = any(isinstance(item, torch.Tensor) for item in values.values())
     if facet_id in _NOISY_OR_FACETS:
-        survival = 1.0
-        for key, weight in effective.items():
-            survival *= (1.0 - float(values[key])) ** weight
-        result = 1.0 - survival
+        if any_tensor:
+            survival: Scalar = torch.ones((), dtype=torch.float64)
+            for key, weight in effective.items():
+                base = 1.0 - _as_tensor(values[key])
+                if float(base.detach().item()) <= 0.0:
+                    # A saturated row zeroes survival; taking the constant
+                    # avoids 0 ** w's infinite backward at the boundary.
+                    survival = torch.zeros((), dtype=torch.float64)
+                    break
+                survival = survival * base**weight
+            result: Scalar = 1.0 - survival
+        else:
+            survival = 1.0
+            for key, weight in effective.items():
+                survival *= (1.0 - float(values[key])) ** weight
+            result = 1.0 - survival
     else:
         # The renormalized row weights are a convex combination only up to
         # rounding; on saturated rows the sum can carry one ULP of dust.
-        result = snap_unit(sum(effective[key] * float(values[key]) for key in effective))
+        if any_tensor:
+            result = snap_unit(
+                p_sum([effective[key] * _as_tensor(values[key]) for key in effective])
+            )
+        else:
+            result = snap_unit(sum(effective[key] * float(values[key]) for key in effective))
     return value_result(result, values, raw)
 
 
@@ -392,7 +452,14 @@ def blend_with_weights(
     )
     if invalid_weights or weights_do_not_sum_to_one:
         raise ValueError("blend component weights must be nonnegative and sum to one")
-    values = [float(value) for value in defects]
+    raw_defects = list(defects)
+    if any(isinstance(value, torch.Tensor) for value in raw_defects) or isinstance(
+        robust_mean, torch.Tensor
+    ):
+        return _blend_with_weights_traced(
+            raw_defects, population_weights, blend_weights, robust_mean
+        )
+    values = [float(value) for value in raw_defects]
     if not values:
         raise ValueError("global blend requires a nonempty object population")
     if any(not math.isfinite(value) or value < 0.0 or value > 1.0 for value in values):
@@ -438,6 +505,118 @@ def blend_with_weights(
     # The blend is a convex combination of in-[0, 1] components (the
     # smooth maximum is bounded by [weighted mean, max] via Jensen), so
     # only float dust is shed; real violations pass through to the guards.
+    return snap_unit(blend)
+
+
+def _interval_overlap_coefficients(
+    normalized: Sequence[float], lower: float, upper: float
+) -> List[float]:
+    """Return each sorted object's mass overlap with one cumulative interval.
+
+    Parameters
+    ----------
+    normalized : sequence[float]
+        Positive population weights in sorted-defect order, summing to one.
+    lower, upper : float
+        Half-open cumulative-mass interval in ``[0, 1]``.
+
+    Returns
+    -------
+    list[float]
+        Overlap coefficient per object; dividing by ``upper - lower`` and
+        dotting with the sorted defects reproduces ``_weighted_interval_mean``.
+    """
+
+    coefficients = []
+    cursor = 0.0
+    for weight in normalized:
+        next_cursor = cursor + weight
+        coefficients.append(max(0.0, min(next_cursor, upper) - max(cursor, lower)))
+        cursor = next_cursor
+    return coefficients
+
+
+def _blend_with_weights_traced(
+    defects: Sequence[Scalar],
+    population_weights: Optional[Iterable[float]],
+    blend_weights: Tuple[float, float, float],
+    robust_mean: Optional[Scalar],
+) -> torch.Tensor:
+    """Evaluate the global blend on live tensors for the traced path.
+
+    Same closed form as the float branch: trimmed mean and CVaR are exact
+    fractional-boundary interval means over the mass-sorted population, and
+    the smoothed max is the frozen-temperature LSE. Sorting and interval
+    boundaries are decided on detached values (piecewise-constant in a
+    neighborhood, so the a.e. gradient is exact); population masses are
+    input-owned constants and are read as floats.
+
+    Parameters
+    ----------
+    defects : sequence[float or torch.Tensor]
+        Per-object defects in ``[0, 1]``.
+    population_weights : iterable[float] or None
+        Positive input-owned object masses, or equal mass.
+    blend_weights : tuple[float, float, float]
+        Validated nonnegative component coefficients summing to one.
+    robust_mean : float or torch.Tensor or None
+        Contract-declared replacement for the trimmed-mean component.
+
+    Returns
+    -------
+    torch.Tensor
+        Bounded scalar blend with the autograd graph intact.
+    """
+
+    if not defects:
+        raise ValueError("global blend requires a nonempty object population")
+    values = torch.stack([_as_tensor(value) for value in defects])
+    detached = values.detach()
+    if (
+        not bool(torch.isfinite(detached).all())
+        or bool((detached < 0.0).any())
+        or bool((detached > 1.0).any())
+    ):
+        raise ValueError("global blend defects must be finite and lie in [0, 1]")
+    if population_weights is None:
+        masses = [1.0] * len(defects)
+    else:
+        masses = [as_float(weight) for weight in population_weights]
+    if len(masses) != len(defects):
+        raise ValueError("global blend weights must match the defect population")
+    if any(not math.isfinite(weight) or weight <= 0.0 for weight in masses):
+        raise ValueError("global blend weights must be finite and positive")
+    order = sorted(range(len(masses)), key=lambda index: float(detached[index]))
+    sorted_values = values[torch.tensor(order, dtype=torch.long)]
+    total_mass = sum(masses[index] for index in order)
+    normalized = [masses[index] / total_mass for index in order]
+    if robust_mean is None:
+        trim_coefficients = _interval_overlap_coefficients(
+            normalized, _TRIM_FRACTION, 1.0 - _TRIM_FRACTION
+        )
+        trimmed = torch.clamp(
+            (sorted_values * torch.tensor(trim_coefficients, dtype=torch.float64)).sum()
+            / (1.0 - 2.0 * _TRIM_FRACTION),
+            0.0,
+            1.0,
+        )
+    else:
+        trimmed = _as_tensor(robust_mean)
+        point = float(trimmed.detach().item())
+        if not math.isfinite(point) or not 0.0 <= point <= 1.0:
+            raise ValueError("robust-mean override must be finite and lie in [0, 1]")
+    cvar_coefficients = _interval_overlap_coefficients(normalized, 1.0 - _CVAR_TAIL_FRACTION, 1.0)
+    cvar = (
+        sorted_values * torch.tensor(cvar_coefficients, dtype=torch.float64)
+    ).sum() / _CVAR_TAIL_FRACTION
+    maximum = sorted_values[-1]
+    weights_tensor = torch.tensor(normalized, dtype=torch.float64)
+    exponential_mean = (
+        weights_tensor * torch.exp((sorted_values - maximum) / _SMOOTH_MAX_TEMPERATURE)
+    ).sum()
+    smooth_max = maximum + _SMOOTH_MAX_TEMPERATURE * torch.log(exponential_mean)
+    mean_weight, cvar_weight, maximum_weight = blend_weights
+    blend = mean_weight * trimmed + cvar_weight * cvar + maximum_weight * smooth_max
     return snap_unit(blend)
 
 
@@ -584,6 +763,18 @@ def pava(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
             masses[-2:] = [mass]
             ends[-2:] = [ends[-1]]
             starts.pop()
+    if values.requires_grad:
+        # Traced path: the merge schedule above is decided on the (detached)
+        # value lists exactly as the float path decided it; the fit is then
+        # rebuilt as live weighted block means, which is the exact PAVA
+        # solution for that block structure and carries the a.e. gradient
+        # (the block partition is locally constant off ties).
+        blocks = []
+        for start, end in zip(starts, ends):
+            block_mass = weights[start:end].detach()
+            block_mean = (values[start:end] * block_mass).sum() / block_mass.sum()
+            blocks.append(block_mean.expand(end - start))
+        return torch.cat(blocks)
     fitted = torch.empty_like(values)
     for mean, start, end in zip(means, starts, ends):
         fitted[start:end] = mean
@@ -610,10 +801,11 @@ def isotonic_stress(order: torch.Tensor, layout: torch.Tensor) -> float:
         return 0.0
     fitted = primary_isotonic_fit(order, layout)
     levels = torch.unique(order, sorted=True)
-    denominator = float(torch.sum(layout * layout).item())
-    if denominator == 0.0:
+    denominator = keep(torch.sum(layout * layout))
+    if as_float(denominator) == 0.0:
         return 1.0 if levels.numel() > 1 else 0.0
-    return min(1.0, math.sqrt(float(torch.sum((layout - fitted) ** 2).item()) / denominator))
+    residual = keep(torch.sum((layout - fitted) ** 2))
+    return p_min(1.0, p_sqrt(residual / denominator))
 
 
 def primary_isotonic_fit(order: torch.Tensor, layout: torch.Tensor) -> torch.Tensor:
@@ -643,7 +835,9 @@ def primary_isotonic_fit(order: torch.Tensor, layout: torch.Tensor) -> torch.Ten
         ordered_indices.extend(int(index) for index in local)
     permutation = torch.tensor(ordered_indices, dtype=torch.long, device=layout.device)
     ordered_layout = layout[permutation]
-    fitted_ordered = pava(ordered_layout, torch.ones_like(ordered_layout))
+    fitted_ordered = pava(ordered_layout, torch.ones_like(ordered_layout.detach()))
+    if layout.requires_grad:
+        return torch.zeros_like(layout).index_put((permutation,), fitted_ordered)
     fitted = torch.empty_like(layout)
     fitted[permutation] = fitted_ordered
     return fitted
@@ -694,12 +888,12 @@ def correlation_defect(left: torch.Tensor, right: torch.Tensor) -> float:
     denominator = torch.linalg.vector_norm(x) * torch.linalg.vector_norm(y)
     if float(denominator) == 0.0:
         return 0.0 if torch.allclose(left, right) else 1.0
-    correlation = float(torch.dot(x, y) / denominator)
-    if correlation >= 1.0 - 1e-15:
+    correlation = keep(torch.dot(x, y) / denominator)
+    if as_float(correlation) >= 1.0 - 1e-15:
         return 0.0
-    if correlation <= -1.0 + 1e-15:
+    if as_float(correlation) <= -1.0 + 1e-15:
         return 1.0
-    return min(1.0, max(0.0, (1.0 - correlation) / 2.0))
+    return p_min(1.0, p_max(0.0, (1.0 - correlation) / 2.0))
 
 
 def aabb_pair(box_a: BoxGeometry, box_b: BoxGeometry) -> Tuple[float, float]:
@@ -718,14 +912,14 @@ def aabb_pair(box_a: BoxGeometry, box_b: BoxGeometry) -> Tuple[float, float]:
 
     delta = torch.abs(box_a.center - box_b.center) - (box_a.half_extents + box_b.half_extents)
     outside = torch.linalg.vector_norm(torch.clamp(delta, min=0.0))
-    inside = min(max(float(delta[0]), float(delta[1])), 0.0)
-    signed = float(outside) + inside
+    inside = p_min(p_max(keep(delta[0]), keep(delta[1])), 0.0)
+    signed = keep(outside) + inside
     overlap_extent = torch.clamp(-delta, min=0.0)
-    intersection = float(torch.prod(overlap_extent).item())
-    area_a = float(4.0 * torch.prod(box_a.half_extents).item())
-    area_b = float(4.0 * torch.prod(box_b.half_extents).item())
+    intersection = keep(torch.prod(overlap_extent))
+    area_a = float(4.0 * torch.prod(box_a.half_extents.detach()).item())
+    area_b = float(4.0 * torch.prod(box_b.half_extents.detach()).item())
     fraction = intersection / min(area_a, area_b) if min(area_a, area_b) > 0.0 else 0.0
-    return signed, min(1.0, fraction)
+    return signed, p_min(1.0, fraction)
 
 
 def route_segments(scene: Scene) -> List[Tuple[int, int, torch.Tensor, torch.Tensor]]:
@@ -833,6 +1027,13 @@ def route_lengths(scene: Scene) -> torch.Tensor:
         Float64 route lengths.
     """
 
+    if tracing_active():
+        return torch.stack(
+            [
+                torch.sum(torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1))
+                for route in resolved_routes(scene)
+            ]
+        )
     return torch.tensor(
         [
             float(torch.sum(torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1)))

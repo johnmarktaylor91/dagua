@@ -8,6 +8,8 @@ from typing import Any, FrozenSet, Mapping, Optional, Tuple, Union
 
 import torch
 
+from dagua.eval.ruler_v4._tracing import Scalar, record_subterm
+
 
 class IngestionErrorCode(str, Enum):
     """Typed invalid-scene error codes."""
@@ -548,17 +550,24 @@ TemporalIngestionResult = Union[ValidTemporalScene, ValidAbsence, InvalidScene]
 
 
 def value_result(
-    value: float,
-    subterms: Optional[Mapping[str, float]] = None,
+    value: Scalar,
+    subterms: Optional[Mapping[str, Scalar]] = None,
     raw: Optional[Mapping[str, Any]] = None,
 ) -> FacetResult:
     """Build a finite, bounded facet value.
 
+    Tensor-valued inputs occur only on the traced surrogate path (they can
+    exist only inside a ``trace_subterms`` context, where the ``keep`` seam
+    stops casting): each tensor subterm is recorded into the active trace
+    buffer with its autograd graph intact, and the published ``FacetResult``
+    carries the detached float exactly as before, so the frozen result shape
+    and validation are unchanged.
+
     Parameters
     ----------
-    value : float
+    value : float or torch.Tensor
         Scalar defect expected in ``[0, 1]``.
-    subterms : mapping[str, float] or None
+    subterms : mapping[str, float or torch.Tensor] or None
         Optional scored sub-term mapping.
     raw : mapping[str, Any] or None
         Optional raw statistic mapping.
@@ -574,15 +583,22 @@ def value_result(
         If the value or a sub-term is non-finite or out of range.
     """
 
-    values = {key: float(item) for key, item in (subterms or {}).items()}
-    candidates = [float(value), *values.values()]
+    values = {}
+    for key, item in (subterms or {}).items():
+        if isinstance(item, torch.Tensor):
+            record_subterm(key, item)
+            values[key] = float(item.detach().item())
+        else:
+            values[key] = float(item)
+    headline = float(value.detach().item()) if isinstance(value, torch.Tensor) else float(value)
+    candidates = [headline, *values.values()]
     if any(
         not torch.isfinite(torch.tensor(item, dtype=torch.float64)).item() for item in candidates
     ):
         raise ValueError("facet values must be finite")
     if any(item < 0.0 or item > 1.0 for item in candidates):
         raise ValueError("facet values must lie in [0, 1]")
-    return FacetResult(ResultState.VALUE, float(value), None, values, dict(raw or {}))
+    return FacetResult(ResultState.VALUE, headline, None, values, dict(raw or {}))
 
 
 def na_result(reason: str, raw: Optional[Mapping[str, Any]] = None) -> FacetResult:
