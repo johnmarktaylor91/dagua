@@ -104,3 +104,106 @@ def test_weight_table_rejects_nonzero_diagnostic_mass() -> None:
             entries=(SubtermWeight("U02.headline", "U02", "test", 1.0, diagnostic=True),),
             d_power=0,
         )
+
+
+def test_dof_account_models_the_a18_allocation_buckets() -> None:
+    """Identities spend named A18 buckets; unassigned identities fail closed."""
+
+    from dagua.eval.ruler_v4.weights import DOF_ALLOCATION
+
+    assert sum(DOF_ALLOCATION.values()) == 20
+    table = WeightTable(
+        entries=(
+            SubtermWeight("A.1", "A", "test", 0.6, fitted_parameter="w_A"),
+            SubtermWeight("B.1", "B", "test", 0.4, fitted_parameter="w_B"),
+        ),
+        d_power=20,
+        other_fitted_parameters=("tail_blend",),
+        fitted_parameter_buckets={
+            "w_A": "universal",
+            "w_B": "universal",
+            "tail_blend": "aggregation",
+        },
+    )
+    account = table.dof_account
+    assert account.bucket_usage == {"universal": 2, "aggregation": 1}
+    assert account.within_buckets
+    assert account.unassigned_identities == ()
+
+    unassigned = WeightTable(
+        entries=(SubtermWeight("A.1", "A", "test", 1.0, fitted_parameter="w_A"),),
+        d_power=20,
+    )
+    assert unassigned.dof_account.unassigned_identities == ("w_A",)
+    assert not unassigned.dof_account.within_buckets
+
+
+def test_unspent_reserve_and_unknown_buckets_are_rejected() -> None:
+    """The A18 UNSPENT reserve is headroom, never an assignable bucket."""
+
+    for bucket in ("unspent", "made_up"):
+        with pytest.raises(ValueError, match="unknown or reserved A18 bucket"):
+            WeightTable(
+                entries=(SubtermWeight("A.1", "A", "test", 1.0, fitted_parameter="w_A"),),
+                d_power=20,
+                fitted_parameter_buckets={"w_A": bucket},
+            )
+
+
+def test_bucket_overspend_fails_the_contract_gate() -> None:
+    """A table spending more identities than a bucket's allocation is refused."""
+
+    from dagua.eval.ruler_v4.weights import DOF_ALLOCATION
+
+    width = DOF_ALLOCATION["semantic"] + 1
+    table = WeightTable(
+        entries=tuple(
+            SubtermWeight(f"A.{index}", "A", "test", 1.0, fitted_parameter=f"w_{index}")
+            for index in range(width)
+        ),
+        d_power=20,
+        fitted_parameter_buckets={f"w_{index}": "semantic" for index in range(width)},
+    )
+    assert not table.dof_account.within_buckets
+    assert table.dof_account.bucket_usage == {"semantic": width}
+
+
+def test_provenance_class_is_validated_and_bundle_consistent() -> None:
+    """Fitted provenance requires an identity and bundles cannot mix classes."""
+
+    with pytest.raises(ValueError, match="fitted provenance requires a fitted identity"):
+        WeightTable(
+            entries=(SubtermWeight("A.1", "A", "test", 1.0, provenance_class="fitted"),),
+            d_power=20,
+        )
+    with pytest.raises(ValueError, match="a fitted identity requires fitted provenance"):
+        WeightTable(
+            entries=(
+                SubtermWeight(
+                    "A.1",
+                    "A",
+                    "test",
+                    1.0,
+                    fitted_parameter="w_A",
+                    provenance_class="preregistered_prior",
+                ),
+            ),
+            d_power=20,
+        )
+    with pytest.raises(ValueError, match="bundles mix provenance classes"):
+        WeightTable(
+            entries=(
+                SubtermWeight(
+                    "A.1", "A", "test", 0.6, fitted_parameter="w_A", provenance_class="fitted"
+                ),
+                SubtermWeight(
+                    "A.2",
+                    "A",
+                    "test",
+                    0.4,
+                    fitted_parameter="w_A",
+                    provenance_class="controlled_stimulus",
+                ),
+            ),
+            d_power=20,
+        )
