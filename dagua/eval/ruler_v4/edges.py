@@ -1379,15 +1379,200 @@ def _segment_boundary_parameter(
     return None
 
 
-def _point_in_convex_polygon(point: torch.Tensor, polygon: torch.Tensor) -> bool:
+_FloatPoint = Tuple[float, float]
+_FloatSegment = Tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class _ObstacleSnapshot:
+    """Detached float geometry of one terminal-cleared U11 obstacle.
+
+    U11's visibility DECISIONS (which segments are blocked, which candidate
+    vertices survive) are pure control flow: the exact scorer always read
+    them through ``as_float``/``bool`` casts, so no gradient ever flowed
+    through them. Evaluating the predicates on plain Python floats performs
+    the same IEEE-754 double operations the per-element tensor arithmetic
+    performed (multiply, subtract, divide, and compare are each correctly
+    rounded in both), so every decision is bit-identical while avoiding a
+    per-operation tensor dispatch that made medium scenes take hours, and
+    avoiding autograd graph growth on the traced path. Score-visible VALUES
+    (chord, the chosen path's vertex coordinates) never come from here.
+
+    Parameters
+    ----------
+    center : tuple[float, float]
+        Box center.
+    half_extents : tuple[float, float]
+        Box half extents.
+    box_boundaries : tuple[tuple[float, float, float, float], ...]
+        Four counter-clockwise box boundary segments as (sx, sy, ex, ey).
+    polygons : tuple[tuple[tuple[float, float], ...], ...]
+        The two terminal-centered regular 16-gons removed from the obstacle.
+    """
+
+    center: _FloatPoint
+    half_extents: _FloatPoint
+    box_boundaries: Tuple[_FloatSegment, ...]
+    polygons: Tuple[Tuple[_FloatPoint, ...], ...]
+
+
+def _polygon_floats(
+    terminal_polygons: Sequence[torch.Tensor],
+) -> Tuple[Tuple[_FloatPoint, ...], ...]:
+    """Read terminal polygon vertices as detached floats.
+
+    Parameters
+    ----------
+    terminal_polygons : sequence[torch.Tensor]
+        Polygonized terminal disks with shape ``[P, 2]`` each.
+
+    Returns
+    -------
+    tuple[tuple[tuple[float, float], ...], ...]
+        Vertex coordinates per polygon.
+    """
+
+    return tuple(
+        tuple((float(vertex[0]), float(vertex[1])) for vertex in polygon)
+        for polygon in terminal_polygons
+    )
+
+
+def _polygon_boundary_floats(
+    polygons: Tuple[Tuple[_FloatPoint, ...], ...],
+) -> Tuple[_FloatSegment, ...]:
+    """Return consecutive float boundary segments of the terminal polygons.
+
+    Parameters
+    ----------
+    polygons : tuple[tuple[tuple[float, float], ...], ...]
+        Terminal polygon vertices shared by every obstacle of one route.
+
+    Returns
+    -------
+    tuple[tuple[float, float, float, float], ...]
+        Closed boundary segments as (sx, sy, ex, ey).
+    """
+
+    boundaries: List[_FloatSegment] = []
+    for polygon in polygons:
+        count = len(polygon)
+        boundaries.extend(polygon[index] + polygon[(index + 1) % count] for index in range(count))
+    return tuple(boundaries)
+
+
+def _obstacle_snapshot(
+    box: BoxGeometry, polygons: Tuple[Tuple[_FloatPoint, ...], ...]
+) -> _ObstacleSnapshot:
+    """Build the detached float decision geometry of one obstacle.
+
+    Parameters
+    ----------
+    box : BoxGeometry
+        Uninflated node obstacle.
+    polygons : tuple[tuple[tuple[float, float], ...], ...]
+        Detached terminal polygon vertices shared across the route.
+
+    Returns
+    -------
+    _ObstacleSnapshot
+        Float twin of the obstacle used for visibility decisions.
+    """
+
+    center_x, center_y = float(box.center[0]), float(box.center[1])
+    half_x, half_y = float(box.half_extents[0]), float(box.half_extents[1])
+    lower_x, lower_y = center_x - half_x, center_y - half_y
+    upper_x, upper_y = center_x + half_x, center_y + half_y
+    corners: Tuple[_FloatPoint, ...] = (
+        (lower_x, lower_y),
+        (upper_x, lower_y),
+        (upper_x, upper_y),
+        (lower_x, upper_y),
+    )
+    return _ObstacleSnapshot(
+        center=(center_x, center_y),
+        half_extents=(half_x, half_y),
+        box_boundaries=tuple(corners[index] + corners[(index + 1) % 4] for index in range(4)),
+        polygons=polygons,
+    )
+
+
+def _segment_parameter(
+    start: _FloatPoint, end: _FloatPoint, boundary: _FloatSegment
+) -> Optional[float]:
+    """Return one transversal query parameter on detached floats.
+
+    Float twin of :func:`_segment_boundary_parameter` for decisions only:
+    identical operations in identical order, so the returned parameter is
+    bit-identical to ``as_float`` of the tensor computation.
+
+    Parameters
+    ----------
+    start, end : tuple[float, float]
+        Query segment endpoints.
+    boundary : tuple[float, float, float, float]
+        Boundary segment endpoints as (sx, sy, ex, ey).
+
+    Returns
+    -------
+    float or None
+        Query parameter of the intersection, including endpoints.
+    """
+
+    boundary_start_x, boundary_start_y, boundary_end_x, boundary_end_y = boundary
+    query_x = end[0] - start[0]
+    query_y = end[1] - start[1]
+    boundary_x = boundary_end_x - boundary_start_x
+    boundary_y = boundary_end_y - boundary_start_y
+    denominator = query_x * boundary_y - query_y * boundary_x
+    if denominator == 0.0:
+        return None
+    offset_x = boundary_start_x - start[0]
+    offset_y = boundary_start_y - start[1]
+    query_parameter = (offset_x * boundary_y - offset_y * boundary_x) / denominator
+    boundary_parameter = (offset_x * query_y - offset_y * query_x) / denominator
+    if 0.0 <= query_parameter <= 1.0 and 0.0 <= boundary_parameter <= 1.0:
+        return query_parameter
+    return None
+
+
+def _segment_parameters(
+    start: _FloatPoint, end: _FloatPoint, boundaries: Sequence[_FloatSegment]
+) -> List[float]:
+    """Collect valid query parameters against a boundary collection.
+
+    Parameters
+    ----------
+    start, end : tuple[float, float]
+        Query segment endpoints.
+    boundaries : sequence[tuple[float, float, float, float]]
+        Boundary segments to intersect.
+
+    Returns
+    -------
+    list[float]
+        Valid query parameters in boundary order.
+    """
+
+    parameters = []
+    for boundary in boundaries:
+        parameter = _segment_parameter(start, end, boundary)
+        if parameter is not None:
+            parameters.append(parameter)
+    return parameters
+
+
+def _point_in_convex_polygon(
+    point_x: float, point_y: float, polygon: Tuple[_FloatPoint, ...]
+) -> bool:
     """Test closed membership in a counter-clockwise convex polygon.
 
     Parameters
     ----------
-    point : torch.Tensor
-        Query point with shape ``[2]``.
-    polygon : torch.Tensor
-        Counter-clockwise convex polygon with shape ``[P, 2]``.
+    point_x, point_y : float
+        Query point.
+    polygon : tuple[tuple[float, float], ...]
+        Counter-clockwise convex polygon vertices.
 
     Returns
     -------
@@ -1395,27 +1580,26 @@ def _point_in_convex_polygon(point: torch.Tensor, polygon: torch.Tensor) -> bool
         Whether the point lies inside or on the polygon.
     """
 
-    for start, end in _polygon_boundary_segments(polygon):
-        edge = end - start
-        offset = point - start
-        if float(edge[0] * offset[1] - edge[1] * offset[0]) < -1e-12:
+    count = len(polygon)
+    for index in range(count):
+        start_x, start_y = polygon[index]
+        end_x, end_y = polygon[(index + 1) % count]
+        if (end_x - start_x) * (point_y - start_y) - (end_y - start_y) * (
+            point_x - start_x
+        ) < -1e-12:
             return False
     return True
 
 
-def _cleared_obstacle_contains(
-    point: torch.Tensor, box: BoxGeometry, terminal_polygons: Sequence[torch.Tensor]
-) -> bool:
+def _cleared_obstacle_contains(point_x: float, point_y: float, obstacle: _ObstacleSnapshot) -> bool:
     """Test strict membership in a terminal-cleared U11 obstacle.
 
     Parameters
     ----------
-    point : torch.Tensor
-        Query point with shape ``[2]``.
-    box : BoxGeometry
-        Uninflated node obstacle.
-    terminal_polygons : sequence[torch.Tensor]
-        Two terminal-centered regular 16-gons removed from the obstacle.
+    point_x, point_y : float
+        Query point.
+    obstacle : _ObstacleSnapshot
+        Detached decision geometry of the obstacle.
 
     Returns
     -------
@@ -1423,27 +1607,33 @@ def _cleared_obstacle_contains(
         Whether the point lies in the residual obstacle interior.
     """
 
-    if not bool(torch.all(torch.abs(point - box.center) < box.half_extents)):
+    if not (
+        abs(point_x - obstacle.center[0]) < obstacle.half_extents[0]
+        and abs(point_y - obstacle.center[1]) < obstacle.half_extents[1]
+    ):
         return False
-    return not any(_point_in_convex_polygon(point, polygon) for polygon in terminal_polygons)
+    return not any(
+        _point_in_convex_polygon(point_x, point_y, polygon) for polygon in obstacle.polygons
+    )
 
 
 def _segment_cleared_obstacle_interior_intersection(
-    start: torch.Tensor,
-    end: torch.Tensor,
-    box: BoxGeometry,
-    terminal_polygons: Sequence[torch.Tensor],
+    start: _FloatPoint,
+    end: _FloatPoint,
+    obstacle: _ObstacleSnapshot,
+    polygon_parameters: Sequence[float],
 ) -> bool:
     """Test whether a segment crosses a terminal-cleared obstacle interior.
 
     Parameters
     ----------
-    start, end : torch.Tensor
-        Segment endpoints with shape ``[2]``.
-    box : BoxGeometry
-        Uninflated node obstacle.
-    terminal_polygons : sequence[torch.Tensor]
-        Polygonized terminal disks removed from the box.
+    start, end : tuple[float, float]
+        Segment endpoints as detached floats.
+    obstacle : _ObstacleSnapshot
+        Detached decision geometry of the obstacle.
+    polygon_parameters : sequence[float]
+        Precomputed valid query parameters of this segment against the two
+        terminal polygons, shared across every obstacle of the route.
 
     Returns
     -------
@@ -1452,30 +1642,33 @@ def _segment_cleared_obstacle_interior_intersection(
     """
 
     parameters = [0.0, 1.0]
-    boundaries = _box_boundary_segments(box)
-    for polygon in terminal_polygons:
-        boundaries.extend(_polygon_boundary_segments(polygon))
-    for boundary_start, boundary_end in boundaries:
-        intersection = _segment_boundary_parameter(start, end, boundary_start, boundary_end)
-        if intersection is not None:
-            parameters.append(as_float(intersection[0]))
+    parameters.extend(_segment_parameters(start, end, obstacle.box_boundaries))
+    parameters.extend(polygon_parameters)
     ordered = sorted(set(parameters))
-    direction = end - start
-    return any(
-        _cleared_obstacle_contains(
-            start + ((lower + upper) / 2.0) * direction,
-            box,
-            terminal_polygons,
-        )
-        for lower, upper in zip(ordered[:-1], ordered[1:])
-        if upper > lower
-    )
+    direction_x = end[0] - start[0]
+    direction_y = end[1] - start[1]
+    for lower, upper in zip(ordered[:-1], ordered[1:]):
+        if upper > lower:
+            midpoint = (lower + upper) / 2.0
+            if _cleared_obstacle_contains(
+                start[0] + midpoint * direction_x,
+                start[1] + midpoint * direction_y,
+                obstacle,
+            ):
+                return True
+    return False
 
 
 def _cleared_obstacle_vertices(
-    box: BoxGeometry, terminal_polygons: Sequence[torch.Tensor]
+    box: BoxGeometry,
+    terminal_polygons: Sequence[torch.Tensor],
+    snapshot: _ObstacleSnapshot,
 ) -> List[torch.Tensor]:
     """Return visibility vertices of a terminal-cleared box.
+
+    Membership decisions run on the detached float snapshot; the candidate
+    COORDINATES stay tensors (live inside a trace) because the chosen
+    visibility path's length is rebuilt from them.
 
     Parameters
     ----------
@@ -1483,6 +1676,8 @@ def _cleared_obstacle_vertices(
         Uninflated node obstacle.
     terminal_polygons : sequence[torch.Tensor]
         Polygonized terminal disks removed from the box.
+    snapshot : _ObstacleSnapshot
+        Detached decision geometry of the same obstacle.
 
     Returns
     -------
@@ -1492,9 +1687,12 @@ def _cleared_obstacle_vertices(
 
     box_segments = _box_boundary_segments(box)
     candidates = [start for start, _ in box_segments]
-    for polygon in terminal_polygons:
-        for point in polygon:
-            if bool(torch.all(torch.abs(point - box.center) <= box.half_extents)):
+    center_x, center_y = snapshot.center
+    half_x, half_y = snapshot.half_extents
+    for polygon_index, polygon in enumerate(terminal_polygons):
+        for point_index, point in enumerate(polygon):
+            point_x, point_y = snapshot.polygons[polygon_index][point_index]
+            if abs(point_x - center_x) <= half_x and abs(point_y - center_y) <= half_y:
                 candidates.append(point)
         for box_start, box_end in box_segments:
             for polygon_start, polygon_end in _polygon_boundary_segments(polygon):
@@ -1509,7 +1707,7 @@ def _cleared_obstacle_vertices(
     retained = [
         point
         for point in candidates
-        if not _cleared_obstacle_contains(point, box, terminal_polygons)
+        if not _cleared_obstacle_contains(float(point[0]), float(point[1]), snapshot)
     ]
     unique: Dict[Tuple[float, float], torch.Tensor] = {}
     for point in retained:
@@ -1530,10 +1728,12 @@ def _route_baseline(scene: Scene, route: Route) -> Tuple[Scalar, Scalar]:
     Returns
     -------
     tuple[float or torch.Tensor, float or torch.Tensor]
-        Capped baseline length and its total absolute turning. Inside a trace
-        the visibility-graph search still runs on detached floats (a shortest
-        PATH is a decision); the chosen path's length is then rebuilt live from
-        the vertex geometry, and the contract-named ``softmin`` with
+        Capped baseline length and its total absolute turning. ALL visibility
+        decisions -- blocked segments, retained vertices, and the shortest
+        PATH -- run on detached float geometry (each is a decision, and the
+        float predicates are bit-identical twins of the historical tensor
+        reads); the chosen path's length is then rebuilt live from the vertex
+        geometry inside a trace, and the contract-named ``softmin`` with
         ``t_soft = 0.1 * chord_e`` (U11.md sec 7 step 4) flows tensors.
     """
 
@@ -1557,35 +1757,45 @@ def _route_baseline(scene: Scene, route: Route) -> Tuple[Scalar, Scalar]:
         + float(torch.linalg.vector_norm(box.center - end))
         <= as_float(cap)
     ]
+    polygons_f = _polygon_floats(terminal_polygons)
+    polygon_boundaries = _polygon_boundary_floats(polygons_f)
+    snapshots = [_obstacle_snapshot(box, polygons_f) for box in obstacles]
+    start_f = (float(start[0]), float(start[1]))
+    end_f = (float(end[0]), float(end[1]))
+    chord_polygon_parameters = _segment_parameters(start_f, end_f, polygon_boundaries)
     if not any(
         _segment_cleared_obstacle_interior_intersection(
-            start,
-            end,
-            box,
-            terminal_polygons,
+            start_f,
+            end_f,
+            snapshot,
+            chord_polygon_parameters,
         )
-        for box in obstacles
+        for snapshot in snapshots
     ):
         return chord, 0.0
     obstacle_vertices: List[torch.Tensor] = []
-    for box in obstacles:
-        obstacle_vertices.extend(_cleared_obstacle_vertices(box, terminal_polygons))
+    for box, snapshot in zip(obstacles, snapshots):
+        obstacle_vertices.extend(_cleared_obstacle_vertices(box, terminal_polygons, snapshot))
     unique_vertices: Dict[Tuple[float, float], torch.Tensor] = {}
     for point in obstacle_vertices:
         unique_vertices[(float(point[0]), float(point[1]))] = point
     vertices = [start, end] + [unique_vertices[key] for key in sorted(unique_vertices)]
+    vertices_f: List[_FloatPoint] = [(float(point[0]), float(point[1])) for point in vertices]
     neighbors: List[List[Tuple[int, float]]] = [[] for _ in vertices]
     for left_index, left in enumerate(vertices):
+        left_f = vertices_f[left_index]
         for right_index in range(left_index + 1, len(vertices)):
             right = vertices[right_index]
+            right_f = vertices_f[right_index]
+            pair_polygon_parameters = _segment_parameters(left_f, right_f, polygon_boundaries)
             if any(
                 _segment_cleared_obstacle_interior_intersection(
-                    left,
-                    right,
-                    box,
-                    terminal_polygons,
+                    left_f,
+                    right_f,
+                    snapshot,
+                    pair_polygon_parameters,
                 )
-                for box in obstacles
+                for snapshot in snapshots
             ):
                 continue
             distance = float(torch.linalg.vector_norm(right - left))
