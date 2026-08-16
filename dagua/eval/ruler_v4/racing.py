@@ -291,6 +291,10 @@ def certify_paired_difference(
     ``2 * Lambda_f * level_radius`` charge. This is single-counted level
     oscillation, still strictly tighter than double-counted marginals; an
     exact cancellation claim would be valid only for a linear composition.
+    This is a knowing deviation from 6.2a's "so it cancels" sentence,
+    docketed with the derivation, the measured zero pruning-power gap it
+    produces at pilot scale, and the curvature-bound alternative in
+    DISCREPANCIES entry 43.
 
     Parameters
     ----------
