@@ -45,8 +45,7 @@ input-owned constants SILENTLY, and measured on the acceptance fixture
 that converts five now-live rows to constants (U11.v, U13.i,
 U31.headline, U34.L_back, U34.L_mono -- the two U34 rows carry entry
 38's flagship softplus citation). A bend-admitting profile must re-run
-the liveness sweep and re-derive this column before trusting it
-(P3REVIEW2 OPUS5 m5).
+the liveness sweep and re-derive this column before trusting it.
 
 | subterm | class | channel | citation / note |
 |---|---|---|---|
