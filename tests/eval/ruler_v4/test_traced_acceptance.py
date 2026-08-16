@@ -9,10 +9,21 @@ Three gates, all pinned by V4_SPEC_r4 6.5 and the P3 reviews:
 2. Per-facet gradient sanity: for every battery subterm (the load-bearing
    U01/U07/U11/U17/U21 plus breadth), moving positions along the NEGATIVE
    gradient of the SOFT subterm strictly improves the EXACT subterm after
-   re-ingestion, at some step on a small geometric ladder.
+   re-ingestion at the SMALLEST step, without annihilating it to zero,
+   AND moving along the POSITIVE gradient at the same step strictly
+   worsens it (the ascent control P3REVIEW2 OPUS5 MAJOR-5 ordered: it
+   separates gradient information from displacement-annihilation --
+   the old U7.base fixture sat on a knife edge where any displacement
+   zeroed the crossing events and the descent direction was irrelevant).
 3. A liveness summary: the fixture's active rows split into live / flat /
    constant, with a floor on the live fraction so a regression that kills
    gradient connectivity fails loudly.
+4. Bank descent: the same descent+ascent gate on a REAL pilot-bank scene
+   (chain/small scrambled) for all five mandated facets. The full n>=5
+   scenes-per-mandated-facet evidence, including medium/large scenes and
+   U7 random-direction controls, is banked by the offline probe
+   (p3fix5_bank_descent.py, GRIND_SUMMARY); this test keeps one bank
+   case permanently red-green.
 """
 
 from __future__ import annotations
@@ -52,33 +63,55 @@ _SUBTERM_FACET: Mapping[str, str] = {
     for subterm_id in contract.scored_subterms
 }
 
-# Battery entries: (subterm_id, noise_sigma, homothety_scale) -- sigma
-# scales the seeded perturbation so each target has a nonzero exact
+_DEFAULT_SEED = 20260815
+
+# Battery entries: (subterm_id, noise_sigma, homothety_scale, seed) --
+# sigma scales the seeded perturbation so each target has a nonzero exact
 # defect AND room to improve; scale sprawls the whole construction
 # (scale * (layout + noise)), which is what puts U21's anti-sprawl row
 # off its zero plateau. The five mandated load-bearing facets (U01, U07,
 # U11, U17, U21) are all represented; the rest add breadth across every
 # traced module, including the clusters family.
-BATTERY: Tuple[Tuple[str, float, float], ...] = (
-    ("U01.headline", 0.35, 1.0),
-    ("U7.base", 0.65, 1.0),
-    ("U11.v", 0.35, 1.0),
-    ("U17.1", 0.35, 1.0),
-    ("U18.le", 0.8, 1.0),
-    ("U21.d_sparse_n", 0.35, 4.0),
-    ("U03.r_1", 0.35, 1.0),
-    ("U09.headline", 0.35, 1.0),
-    ("U12.headline", 0.35, 1.0),
-    ("U26.i", 0.35, 1.0),
-    ("U27.i", 0.35, 1.0),
-    ("U28.iii", 0.35, 1.0),
-    ("U31.headline", 0.35, 1.0),
-    ("U32.L_iso", 0.35, 1.0),
-    ("U34.L_mono", 0.35, 1.0),
-    ("U35.headline", 0.35, 1.0),
+#
+# Three rows were re-fixtured after P3REVIEW2 OPUS5 MAJOR-5 found their
+# evidence vacuous, via a search over (sigma, seed) requiring: exact
+# defect in [0.02, 0.98], gradient norm >= 1e-4, strict non-annihilating
+# improvement under -grad AND strict worsening under +grad at the
+# smallest step (p3fix5_fixture_search.py):
+# - U7.base 0.65 -> (1.0, seed 99): the old fixture annihilated to
+#   exactly 0 at every ladder step and did not worsen under ascent (a
+#   knife edge, not alignment). On the new one, descent improves
+#   0.331884 -> 0.331787, ascent worsens to 0.331981, and BOTH seeded
+#   random directions worsen (0.331916 / 0.433316) -- the direction, not
+#   the displacement, carries the improvement.
+# - U11.v 0.35 -> 1.0: the old fixture started below 1e-6 with gradient
+#   norm 4.6e-10 (anchored zero). New: defect 0.200736, norm 0.61.
+# - U17.1 0.35 -> 1.2: the old fixture was saturated at 0.999990. New:
+#   0.969482, off the ceiling, with two-sided response.
+BATTERY: Tuple[Tuple[str, float, float, int], ...] = (
+    ("U01.headline", 0.35, 1.0, _DEFAULT_SEED),
+    ("U7.base", 1.0, 1.0, 99),
+    ("U11.v", 1.0, 1.0, _DEFAULT_SEED),
+    ("U17.1", 1.2, 1.0, _DEFAULT_SEED),
+    ("U18.le", 0.8, 1.0, _DEFAULT_SEED),
+    ("U21.d_sparse_n", 0.35, 4.0, _DEFAULT_SEED),
+    ("U03.r_1", 0.35, 1.0, _DEFAULT_SEED),
+    ("U09.headline", 0.35, 1.0, _DEFAULT_SEED),
+    ("U12.headline", 0.35, 1.0, _DEFAULT_SEED),
+    ("U26.i", 0.35, 1.0, _DEFAULT_SEED),
+    ("U27.i", 0.35, 1.0, _DEFAULT_SEED),
+    ("U28.iii", 0.35, 1.0, _DEFAULT_SEED),
+    ("U31.headline", 0.35, 1.0, _DEFAULT_SEED),
+    ("U32.L_iso", 0.35, 1.0, _DEFAULT_SEED),
+    ("U34.L_mono", 0.35, 1.0, _DEFAULT_SEED),
+    ("U35.headline", 0.35, 1.0, _DEFAULT_SEED),
 )
 
-_STEP_LADDER = (0.001, 0.005, 0.02, 0.08)
+# Every battery row improves at the SMALLEST step (measured histogram
+# 0.001: 16, others: 0 -- P3REVIEW2 MEASURED-ADDENDUM), so the old
+# any-step ladder was unused slack; the gate is the smallest step, both
+# directions.
+_STEP = 0.001
 
 
 def _table() -> WeightTable:
@@ -199,7 +232,7 @@ def _ingest_positions(graph: GraphSemantics, positions: torch.Tensor) -> Optiona
     return result.scene
 
 
-def _perturbed_scene(sigma: float, scale: float = 1.0, seed: int = 20260815) -> Scene:
+def _perturbed_scene(sigma: float, scale: float = 1.0, seed: int = _DEFAULT_SEED) -> Scene:
     """Ingest the semantic fixture under seeded noise and optional sprawl."""
 
     graph, constructed = _semantic_graph()
@@ -235,41 +268,103 @@ def test_l_total_backward_end_to_end() -> None:
     assert float(torch.linalg.vector_norm(traced.positions.grad)) > 0.0
 
 
-@pytest.mark.parametrize("subterm_id,sigma,scale", BATTERY)
-def test_descent_improves_exact_facet(subterm_id: str, sigma: float, scale: float) -> None:
-    """Spec 6.5 gradient sanity: -grad of the soft subterm improves the exact one."""
+def _descent_ascent_gate(
+    scene: Scene,
+    graph: GraphSemantics,
+    subterm_id: str,
+    profiles: ScoringProfiles,
+    traced,
+    label: str,
+    exact_before: Optional[float],
+) -> None:
+    """Run the two-sided smallest-step gradient-alignment gate on one row.
 
-    profiles = _profiles()
-    scene = _perturbed_scene(sigma, scale)
-    traced = score_scene_soft(scene, _table(), profiles)
-    assert subterm_id in traced.traced_subterms, f"{subterm_id} not traced"
+    Descent along -grad of the soft subterm must strictly improve the
+    exact subterm WITHOUT annihilating it to zero (a knife-edge fixture
+    where any displacement zeroes the events passes an improvement-only
+    check with an irrelevant gradient); ascent along +grad at the same
+    step must strictly worsen it.
+    """
+
+    assert subterm_id in traced.traced_subterms, f"{label} not traced"
     tensor = traced.traced_subterms[subterm_id]
-    assert tensor.requires_grad, f"{subterm_id} carries no graph"
-    exact_before = _exact_subterm(scene, subterm_id, profiles)
+    assert tensor.requires_grad, f"{label} carries no graph"
     assert exact_before is not None and exact_before > 0.0, (
-        f"{subterm_id} has zero defect on the acceptance fixture; battery fixture invalid"
+        f"{label} has zero defect; fixture invalid"
     )
-    (gradient,) = torch.autograd.grad(tensor, traced.positions, allow_unused=True)
-    assert gradient is not None, f"{subterm_id} gradient does not reach positions"
+    (gradient,) = torch.autograd.grad(
+        tensor, traced.positions, retain_graph=True, allow_unused=True
+    )
+    assert gradient is not None, f"{label} gradient does not reach positions"
     gradient_norm = float(torch.linalg.vector_norm(gradient))
-    assert gradient_norm > 0.0, f"{subterm_id} gradient is exactly zero at the fixture"
+    assert gradient_norm > 0.0, f"{label} gradient is exactly zero at the fixture"
     extent = float((scene.positions.max(dim=0).values - scene.positions.min(dim=0).values).max())
     direction = gradient / gradient_norm
-    graph, _ = _semantic_graph()
-    improved = False
-    for step in _STEP_LADDER:
-        stepped = scene.positions.detach() - (step * extent) * direction
-        candidate = _ingest_positions(graph, stepped)
-        if candidate is None:
-            continue
-        exact_after = _exact_subterm(candidate, subterm_id, profiles)
-        if exact_after is not None and exact_after < exact_before:
-            improved = True
-            break
-    assert improved, (
-        f"no step in {_STEP_LADDER} along -grad of soft {subterm_id} improved the "
-        f"exact facet from {exact_before}"
+
+    descended = _ingest_positions(graph, scene.positions.detach() - (_STEP * extent) * direction)
+    assert descended is not None, f"{label} descent step failed ingestion"
+    exact_after_descent = _exact_subterm(descended, subterm_id, profiles)
+    assert exact_after_descent is not None
+    assert exact_after_descent < exact_before, (
+        f"-grad of soft {label} did not improve the exact facet at the smallest "
+        f"step ({exact_before} -> {exact_after_descent})"
     )
+    assert exact_after_descent > 0.0, (
+        f"{label} annihilated to exactly zero at the smallest step: knife-edge "
+        "fixture, the descent direction is not what is being tested"
+    )
+
+    ascended = _ingest_positions(graph, scene.positions.detach() + (_STEP * extent) * direction)
+    assert ascended is not None, f"{label} ascent step failed ingestion"
+    exact_after_ascent = _exact_subterm(ascended, subterm_id, profiles)
+    assert exact_after_ascent is not None
+    assert exact_after_ascent > exact_before, (
+        f"+grad of soft {label} did not worsen the exact facet "
+        f"({exact_before} -> {exact_after_ascent}): the improvement is not "
+        "carried by the gradient direction"
+    )
+
+
+@pytest.mark.parametrize("subterm_id,sigma,scale,seed", BATTERY)
+def test_descent_improves_exact_facet(
+    subterm_id: str, sigma: float, scale: float, seed: int
+) -> None:
+    """Spec 6.5 gradient sanity, two-sided: -grad improves, +grad worsens."""
+
+    profiles = _profiles()
+    scene = _perturbed_scene(sigma, scale, seed)
+    facets = _evaluate_static_facets(scene, profiles)
+    traced = score_scene_soft(scene, _table(), profiles, exact_facets=facets)
+    graph, _ = _semantic_graph()
+    result = facets[_SUBTERM_FACET[subterm_id]]
+    exact_before = result.subterms.get(subterm_id) if result.subterms else None
+    _descent_ascent_gate(scene, graph, subterm_id, profiles, traced, subterm_id, exact_before)
+
+
+@pytest.mark.slow
+def test_descent_improves_exact_facet_on_bank_scene() -> None:
+    """The two-sided gate holds for all five mandated facets on a REAL bank scene.
+
+    chain/small's scrambled variant is the one pilot-bank scene that
+    carries every mandated row live (U01.headline, U7.base, U11.v,
+    U17.1, U21.d_sparse_n). The full n>=5-scenes-per-row evidence,
+    including medium/large scenes and U7 random-direction controls, is
+    banked offline (p3fix5_bank_descent.py); this keeps one bank case
+    permanently red-green.
+    """
+
+    from tests.eval.ruler_v4.scene_bank import build_cell
+
+    profiles = _profiles()
+    scene = build_cell("chain", "small").scenes[5]
+    facets = _evaluate_static_facets(scene, profiles)
+    traced = score_scene_soft(scene, _table(), profiles, exact_facets=facets)
+    for subterm_id in ("U01.headline", "U7.base", "U11.v", "U17.1", "U21.d_sparse_n"):
+        result = facets[_SUBTERM_FACET[subterm_id]]
+        exact_before = result.subterms.get(subterm_id) if result.subterms else None
+        _descent_ascent_gate(
+            scene, scene.graph, subterm_id, profiles, traced, f"bank {subterm_id}", exact_before
+        )
 
 
 def test_liveness_summary_floor() -> None:
