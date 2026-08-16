@@ -391,6 +391,34 @@ the production port; none of the entries below overrides a contract.
     (surrogate-certification stage) -- these gates run once on the frozen
     bank against the fitted table before any tier is licensed to prune in
     production.
+    P3FIX5 (P3REVIEW2 OPUS5 MAJOR-4): the pilot-bank tau floor is satisfied
+    VACUOUSLY and is published as such, never as passing evidence. Measured
+    reason: soft-vs-exact `l_total` deviation is 1-3 ULP (max 3.331e-16
+    across all 72 bank scenes) while the smallest inter-scene loss gap in
+    any cell is 2.809e-4 -- the deviation is 2.5e12 to 5.3e13 times smaller
+    than the gap it would have to bridge to flip one pair, so bank tau
+    cannot fall below 1.0 for any surrogate built as the frozen closed
+    forms executed differentiably. The OPERATIVE 6.5 gates at pilot tier
+    are gradient alignment (the descent/ascent battery plus the bank
+    descent evidence) and gradient liveness (72/72), not tau. Falsifiable
+    rank evidence ships in
+    `tests/eval/ruler_v4/test_certification_discriminating.py`: a graded
+    loss-gap ladder whose bottom rungs sit 1-4 ULP of `l_total` apart --
+    16 scenes, 120 comparable pairs of which 11 have gaps within 4x the
+    measured deviation (pairs a deviation-scale error CAN flip; a
+    discriminating-population precondition asserts they exist), tau 1.0
+    with zero discordant pairs (the traced deviation is a systematic
+    per-graph accumulation offset, so it cancels in comparisons) -- plus a
+    drift control proving the same machinery REFUSES a quantized
+    distillation-class surrogate (tau 0.354, uncertified) on the same
+    population. The former certification smoke's `tau == 1.0` assertion is
+    restated as the float-determinism check it is (the identity surrogate
+    can never produce another value). The 6.3 per-cell tau floor is
+    re-scoped at P5 to what it can still catch -- surrogate DRIFT
+    (distilled, partially detached, or re-implemented surrogates whose
+    forward value no longer tracks exact) -- not the delivered traced
+    surrogate's fidelity, which is pinned by construction and measured at
+    the ULP scale.
 40. V4_SPEC_r4 6.2(b)'s anytime-valid confidence machinery is not
     constructed anywhere in phase 3, and racing is single-round (P3REVIEW
     OPUS5 MAJOR-3/-7, FABLE M2). What exists: `confidence_id` is a required

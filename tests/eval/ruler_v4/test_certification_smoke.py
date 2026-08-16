@@ -1,4 +1,14 @@
-"""Fixed-seed end-to-end rank-fidelity certification smoke."""
+"""Fixed-seed determinism smoke of the identity-surrogate scoring pipeline.
+
+This is a FLOAT-DETERMINISM check, not certification evidence: with no
+``term_tensors`` bound, ``score_v4_soft`` recomposes the exact facet
+values, so ranking its output against the exact scorer compares f(x)
+with f(x) and tau is 1.0 for ANY batch by construction. The smoke pins
+only that two identically-seeded end-to-end runs produce identical
+bytes. Rank-fidelity evidence for the traced surrogate lives in
+test_certification_population.py (bank machinery) and
+test_certification_discriminating.py (the falsifiable population).
+"""
 
 from __future__ import annotations
 
@@ -182,12 +192,15 @@ def _certify_batch(base: Scene, seed: int) -> RankFidelityResult:
 
 
 @pytest.mark.smoke
-def test_fixed_seed_certification_smoke_is_deterministic(semantic_scene: Scene) -> None:
-    """The tiny generated batch certifies tau >= 0.85 reproducibly."""
+def test_identity_surrogate_scoring_is_deterministic(semantic_scene: Scene) -> None:
+    """Two identically-seeded end-to-end scoring runs are byte-identical.
+
+    No tau or certification assertion belongs here: the identity
+    surrogate's tau is definitionally 1.0 and certifies nothing
+    (P3REVIEW2 OPUS5 MAJOR-4).
+    """
 
     first = _certify_batch(semantic_scene, seed=20260815)
     second = _certify_batch(semantic_scene, seed=20260815)
 
     assert first == second
-    assert first.certified
-    assert first.tau == 1.0

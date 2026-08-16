@@ -8,6 +8,14 @@ by construction), and fail-closed comparability. The full pilot numbers
 (all classes and bands, plus the 6.2a conformance numbers) are produced
 by the population driver recorded in DISCREPANCIES entry 39; this test
 keeps the contract permanently red-green.
+
+Scope of the bank tau (P3REVIEW2 OPUS5 MAJOR-4): on THIS population the
+tau floor is satisfied vacuously -- soft-vs-exact deviation is 1-3 ULP
+while the smallest inter-scene gap is ~2.8e-4, so no bank pair can flip.
+The falsifiable rank-fidelity evidence is
+test_certification_discriminating.py's gap-ladder population; this
+test's value is pinning the machinery (traced path bound, real pairs,
+fail-closed comparability), not the tau number.
 """
 
 from __future__ import annotations
