@@ -32,6 +32,23 @@ import torch
 
 Scalar = Union[float, torch.Tensor]
 
+# One-sided tolerance for traced subterm values that drift past the [0, 1]
+# contract bound by accumulation-order noise. The traced-vs-exact gap is
+# measured at 1-3 ULP (~1e-16 near 1.0); 1e-12 gives four orders of margin
+# while still refusing anything that could be a real facet defect.
+TRACED_BOUND_TOLERANCE = 1e-12
+
+
+class SurrogateTraceError(ValueError):
+    """A traced (tensor-valued) subterm violated the facet value contract.
+
+    Raised instead of the exact path's bare ``ValueError`` so callers can
+    distinguish a surrogate-side numeric failure (NaN in a traced tensor,
+    or a beyond-tolerance bound violation) from a facet-contract violation
+    on the frozen float path.
+    """
+
+
 _TRACE_BUFFER: ContextVar[Optional[Dict[str, torch.Tensor]]] = ContextVar(
     "ruler_v4_trace_buffer", default=None
 )
