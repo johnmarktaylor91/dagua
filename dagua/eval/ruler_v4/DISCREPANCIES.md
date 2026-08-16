@@ -461,3 +461,29 @@ the production port; none of the entries below overrides a contract.
     `invalid_result("missing_required_tree_fields")`. Both dispositions
     are banked with their citations in
     `tests/eval/ruler_v4/test_review_repros.py`.
+42. V4_SPEC_r4 6.5's second named evaluation -- "it is evaluated for
+    gradient alignment and EXPLOITABILITY" (the clause has survived every
+    spec revision, r1 through r4) -- was delivered for gradient alignment
+    only; the exploitability half had no implementation, no owner, and no
+    deferral until P3FIX5 (P3REVIEW2 OPUS5 MAJOR-3). Structural finding,
+    now recorded and executed rather than asserted: the surrogate has NO
+    independent exploit surface, because `score_v4_soft`'s forward value is
+    the frozen closed forms evaluated on tensors and agrees with the exact
+    score to 1-3 ULP at EVERY drawing, not merely at bank drawings. Any
+    gradient-followable exploit of the surrogate is therefore an exploit of
+    the frozen ruler itself, and ruler exploitation is already owned:
+    6.2c routes exploitation discovery to "fresh preregistered blind
+    audits" producing V4.x, never a silent change (P5 calibration
+    campaign, blind-audit stage). What remains surrogate-specific is
+    optimizer DYNAMICS -- detached channels (non-chord routes, edge/cluster
+    label boxes, discrete decision layers) steer where descent goes -- a
+    descent-quality property with no scoring-integrity consequence, since
+    every visited drawing is re-scored by the exact forms. Delivered pilot
+    probe: `tests/eval/ruler_v4/test_surrogate_exploitability.py` runs pure
+    surrogate-gradient descent trajectories from noisy bank scenes of all
+    four structural classes (including the clustered Goodhart-attractor
+    family), re-ingests and re-scores BOTH paths at every visited drawing,
+    and fails if any trajectory opens |exact - soft| beyond 1e-12, fails to
+    reduce the surrogate loss, or fails to transfer the reduction to the
+    exact ruler. Measured at pilot: max trajectory gap 1.7e-16, exact loss
+    strictly reduced on every class.
