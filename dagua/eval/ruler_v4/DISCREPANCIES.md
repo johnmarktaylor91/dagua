@@ -461,6 +461,11 @@ the production port; none of the entries below overrides a contract.
     `invalid_result("missing_required_tree_fields")`. Both dispositions
     are banked with their citations in
     `tests/eval/ruler_v4/test_review_repros.py`.
+    P3FIX5 refinement (P3REVIEW2 OPUS5 m3): the fully-declared-but-TRIVIAL
+    arm (no root or no child anywhere; the "nontrivial" clause of the
+    applicability sentence) publishes its own reason token,
+    `NA:TREE_SEMANTICS_TRIVIAL`, so 7.2b's per-store applicability rates
+    can separate a declared-trivial tree block from true absence.
 42. V4_SPEC_r4 6.5's second named evaluation -- "it is evaluated for
     gradient alignment and EXPLOITABILITY" (the clause has survived every
     spec revision, r1 through r4) -- was delivered for gradient alignment
@@ -535,3 +540,14 @@ the production port; none of the entries below overrides a contract.
     40's confidence-sequence construction) -- adopt the curvature bound or
     demote the paired certificate from PRIMARY before any tier is licensed
     to prune in production.
+44. STILL OPEN, recorded so it cannot silently expire (r1 review m3,
+    re-raised as P3REVIEW2 OPUS5 m4):
+    `RulerRegistration.required_arguments` is advertised metadata that
+    `score_with_registered_ruler` never checks
+    (`dagua/eval/ruler_registry.py`), so a V3-shaped call routed at
+    `{"ruler": "ruler_v4"}` reaches the v4 scorer and dies with a raw
+    arity `TypeError` instead of a typed refusal at the registry seam.
+    Correctly outside both fix rounds' smallest-sufficient sets (no
+    production caller uses registered-ruler dispatch for v4 yet). OWNER:
+    registry-seam hardening, to land before any external caller is
+    pointed at `ruler="ruler_v4"` (pre-P5 wiring).

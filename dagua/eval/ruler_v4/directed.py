@@ -287,7 +287,11 @@ def U33(scene: Scene) -> FacetResult:
     if not roots or all(not child_nodes for child_nodes in children.values()):
         # A declared but trivial tree is not "a nontrivial declared rooted
         # tree/forest": outside applicability, hence NA (DISCREPANCIES 41).
-        return na_result("TREE_SEMANTICS_ABSENT")
+        # Its own reason token, distinct from TREE_SEMANTICS_ABSENT: 7.2b
+        # publishes per-store applicability rates, and a drawing whose tree
+        # block IS declared must be separable from true absence (P3REVIEW2
+        # OPUS5 m3).
+        return na_result("TREE_SEMANTICS_TRIVIAL")
     if mode == "layered":
         if scene.graph.flow_axis is None:
             return invalid_result("tree_depth_axis_absent")

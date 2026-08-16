@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, FrozenSet, Mapping, Optional, Tuple, Union
 
 import torch
 
-from dagua.eval.ruler_v4._tracing import Scalar, record_subterm
+from dagua.eval.ruler_v4._tracing import (
+    TRACED_BOUND_TOLERANCE,
+    Scalar,
+    SurrogateTraceError,
+    record_subterm,
+)
 
 
 class IngestionErrorCode(str, Enum):
@@ -580,17 +586,46 @@ def value_result(
     Raises
     ------
     ValueError
-        If the value or a sub-term is non-finite or out of range.
+        If the value or a sub-term is non-finite or out of range on the
+        frozen float path.
+    SurrogateTraceError
+        If a TRACED (tensor-valued) value is non-finite or violates the
+        ``[0, 1]`` bound by more than ``TRACED_BOUND_TOLERANCE``. A traced
+        value past the bound by at most the tolerance is a saturating
+        row's accumulation-order noise (the traced-vs-exact gap is 1-3
+        ULP): it is clamped, in both the recorded tensor (the boundary
+        clamp's zero gradient is the honest subgradient at saturation)
+        and the published float, instead of aborting the trace with a
+        bare ``ValueError`` from inside a facet.
     """
+
+    def traced_scalar(label: str, item: torch.Tensor) -> Tuple[torch.Tensor, float]:
+        """Validate one traced scalar with the ULP tolerance, clamping."""
+
+        raw_value = float(item.detach().item())
+        if not math.isfinite(raw_value):
+            raise SurrogateTraceError(f"traced value for {label} is non-finite")
+        if raw_value < -TRACED_BOUND_TOLERANCE or raw_value > 1.0 + TRACED_BOUND_TOLERANCE:
+            raise SurrogateTraceError(
+                f"traced value for {label} is {raw_value!r}, outside [0, 1] "
+                f"beyond the {TRACED_BOUND_TOLERANCE} tolerance"
+            )
+        if 0.0 <= raw_value <= 1.0:
+            return item, raw_value
+        return item.clamp(0.0, 1.0), min(max(raw_value, 0.0), 1.0)
 
     values = {}
     for key, item in (subterms or {}).items():
         if isinstance(item, torch.Tensor):
-            record_subterm(key, item)
-            values[key] = float(item.detach().item())
+            tensor, published = traced_scalar(key, item)
+            record_subterm(key, tensor)
+            values[key] = published
         else:
             values[key] = float(item)
-    headline = float(value.detach().item()) if isinstance(value, torch.Tensor) else float(value)
+    if isinstance(value, torch.Tensor):
+        _, headline = traced_scalar("the headline", value)
+    else:
+        headline = float(value)
     candidates = [headline, *values.values()]
     if any(
         not torch.isfinite(torch.tensor(item, dtype=torch.float64)).item() for item in candidates
