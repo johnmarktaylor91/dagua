@@ -1330,7 +1330,10 @@ def test_u33_absent_tree_semantics_is_na_not_invalid() -> None:
     assert result.reason == "TREE_SEMANTICS_ABSENT"
 
     # A declared but trivial tree (roots without a single child anywhere) is
-    # outside "a nontrivial declared rooted tree/forest": NA, same reason.
+    # outside "a nontrivial declared rooted tree/forest": NA, with its OWN
+    # reason token -- 7.2b publishes per-store applicability rates, and a
+    # drawing whose tree block IS declared must be separable from true
+    # absence (P3REVIEW2 OPUS5 m3).
     trivial = U33(
         _u33_scene(
             tree_parents=(None, None, None),
@@ -1339,7 +1342,7 @@ def test_u33_absent_tree_semantics_is_na_not_invalid() -> None:
         )
     )
     assert trivial.state is ResultState.NA
-    assert trivial.reason == "TREE_SEMANTICS_ABSENT"
+    assert trivial.reason == "TREE_SEMANTICS_TRIVIAL"
 
 
 def test_u33_partial_or_malformed_tree_block_stays_invalid() -> None:
@@ -1382,3 +1385,111 @@ def test_u33_partial_or_malformed_tree_block_stays_invalid() -> None:
     )
     assert depth_mismatch.state is ResultState.INVALID
     assert depth_mismatch.reason == "malformed_tree_semantics"
+
+
+def test_p_mean_underflow_publishes_the_true_gradient() -> None:
+    """The p-mean origin linearization fires only at the true all-zero origin.
+
+    Executed P3REVIEW2 OPUS5 m1 repro: with p = 2, equal masses, and
+    bound defects (1e-200, 0), the powered sum 0.5e-400 underflows to
+    exactly 0.0. The old guard tested the COMPOSED value, so the origin
+    linearization fired at a differentiable point and published the
+    gradient (w^(1/p), w^(1/p)) = (0.7071, 0.7071) where the true
+    gradient is (0.7071, 0.0) -- and the trigger threshold scaled as
+    DBL_MIN ** (1/p), about 1e-16 at the p = 20 the weight tables admit.
+    The fixed branch guards on "every bound term is exactly zero" and
+    evaluates the underflow region through the exact degree-1 homogeneous
+    rescaling, so the value is the true p-mean and the gradient
+    concentrates on the dominant term.
+    """
+
+    from dagua.eval.ruler_v4.composition import CompositionFamily, CompositionProfile
+    from dagua.eval.ruler_v4.scene import value_result
+    from dagua.eval.ruler_v4.surrogate import score_v4_soft
+    from dagua.eval.ruler_v4.weight_table import SubtermWeight, WeightTable
+
+    facets = {
+        "U01": value_result(1e-200, {"U01.headline": 1e-200}),
+        "U03": value_result(0.0, {"U03.r_1": 0.0}),
+    }
+    table = WeightTable(
+        entries=(
+            SubtermWeight("U01.headline", "U01", "G1", 1.0),
+            SubtermWeight("U03.r_1", "U03", "G1", 1.0),
+        ),
+        d_power=20,
+    )
+    profile = CompositionProfile(CompositionFamily.P_MEAN, power=2.0)
+    dominant = torch.tensor(1e-200, dtype=torch.float64, requires_grad=True)
+    zero = torch.tensor(0.0, dtype=torch.float64, requires_grad=True)
+
+    soft = score_v4_soft(
+        facets,
+        table,
+        profile,
+        term_tensors={"U01.headline": dominant, "U03.r_1": zero},
+    )
+    soft.l_total.backward()
+
+    # True value: sqrt(0.5) * 1e-200, not the underflowed 0.0 and not the
+    # linearized sum; true gradient: (1/sqrt(2), 0.0).
+    assert 0.0 < float(soft.l_total) < 1e-199
+    assert dominant.grad is not None and zero.grad is not None
+    assert float(dominant.grad) == pytest.approx(0.7071067811865476, abs=1e-12)
+    assert float(zero.grad) == 0.0
+
+    # The all-zero origin still takes the frozen linearization: value 0,
+    # gradient normalized_weight ** (1/p) per term (composition.py's
+    # published one-sided sensitivity).
+    origin_facets = {
+        "U01": value_result(0.0, {"U01.headline": 0.0}),
+        "U03": value_result(0.0, {"U03.r_1": 0.0}),
+    }
+    first = torch.tensor(0.0, dtype=torch.float64, requires_grad=True)
+    second = torch.tensor(0.0, dtype=torch.float64, requires_grad=True)
+    origin = score_v4_soft(
+        origin_facets,
+        table,
+        profile,
+        term_tensors={"U01.headline": first, "U03.r_1": second},
+    )
+    origin.l_total.backward()
+    assert float(origin.l_total) == 0.0
+    assert float(first.grad) == pytest.approx(0.7071067811865476, abs=1e-12)
+    assert float(second.grad) == pytest.approx(0.7071067811865476, abs=1e-12)
+
+
+def test_traced_bound_noise_is_clamped_and_gross_violations_typed() -> None:
+    """The traced arm tolerates ULP saturation noise and refuses real violations.
+
+    P3REVIEW2 OPUS5 m2: `value_result` validated traced subterms against
+    [0, 1] on the detached value with no tolerance, so a 1-ULP traced
+    deviation on a saturating row turned the traced pass into an uncaught
+    ValueError from inside a facet. The traced arm now clamps within
+    TRACED_BOUND_TOLERANCE (the boundary clamp's zero gradient is the
+    honest subgradient at saturation) and raises the typed
+    SurrogateTraceError beyond it; the frozen float path is untouched.
+    """
+
+    from dagua.eval.ruler_v4._tracing import SurrogateTraceError, trace_subterms
+    from dagua.eval.ruler_v4.scene import value_result
+
+    over_by_ulp = 1.0 + 1e-15
+    with trace_subterms() as buffer:
+        result = value_result(
+            0.5,
+            {"X.sub": torch.tensor(over_by_ulp, dtype=torch.float64, requires_grad=True)},
+        )
+    assert result.subterms["X.sub"] == 1.0
+    assert float(buffer["X.sub"].detach()) == 1.0
+
+    with trace_subterms():
+        with pytest.raises(SurrogateTraceError):
+            value_result(0.5, {"X.sub": torch.tensor(1.5, dtype=torch.float64)})
+        with pytest.raises(SurrogateTraceError):
+            value_result(0.5, {"X.sub": torch.tensor(float("nan"), dtype=torch.float64)})
+
+    # The frozen float path keeps its exact validation: the same 1-ULP
+    # float is a facet-contract violation, not surrogate noise.
+    with pytest.raises(ValueError):
+        value_result(0.5, {"X.sub": over_by_ulp})

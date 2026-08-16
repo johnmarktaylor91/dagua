@@ -219,17 +219,18 @@ def _compose_soft(
     if profile.family is CompositionFamily.P_MEAN:
         assert profile.power is not None
         power = profile.power
-        powered = torch.stack(
-            [term.normalized_weight * term.value.pow(power) for term in terms]
-        ).sum()
-        if float(powered.detach()) == 0.0:
+        if all(float(term.value.detach()) == 0.0 for term in terms):
             # composition.py's origin kink rule: at the p-mean's zero-defect
             # origin (p > 1) the exact side publishes the one-sided
             # sensitivity normalized_mass ** (1/p). pow(1/p) back-propagates
             # NaN at exactly zero, so the differentiable branch here is the
             # matching linearization: value 0 at the origin, gradient
             # normalized_weight ** (1/p) per term, exactly the frozen
-            # sibling's published derivative.
+            # sibling's published derivative. The guard is "every bound term
+            # is exactly zero", NOT "the composed value underflowed": the
+            # underflow region (term values below ~DBL_MIN ** (1/p), i.e.
+            # ~1e-16 at p = 20) is a differentiable point whose true
+            # gradient concentrates on the dominant terms, handled below.
             return (
                 l_mean,
                 None,
@@ -237,6 +238,22 @@ def _compose_soft(
                     [term.value * term.normalized_weight ** (1.0 / power) for term in terms]
                 ).sum(),
             )
+        powered = torch.stack(
+            [term.normalized_weight * term.value.pow(power) for term in terms]
+        ).sum()
+        if float(powered.detach()) == 0.0:
+            # Some term is nonzero but sum w * d^p underflowed to exactly
+            # 0.0, where pow(1/p) back-propagates an infinite gradient. The
+            # p-mean is positively homogeneous of degree 1, so factoring out
+            # the largest detached term value m gives L(d) = m * L(d / m)
+            # exactly, with max(d / m) = 1 -- no underflow -- and treating m
+            # as a constant leaves the gradient correct because dL/dd_i is
+            # homogeneous of degree 0.
+            scale = max(float(term.value.detach()) for term in terms)
+            rescaled = torch.stack(
+                [term.normalized_weight * (term.value / scale).pow(power) for term in terms]
+            ).sum()
+            return l_mean, None, scale * rescaled.pow(1.0 / power)
         return l_mean, None, powered.pow(1.0 / power)
 
     assert profile.bottleneck_mix is not None

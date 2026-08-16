@@ -34,6 +34,20 @@ Verified by `tests/eval/ruler_v4/test_surrogate_manifest.py`
 (completeness: every scored sub-term classified exactly once, enum
 valid) and by the traced-facet tests per module (liveness pins).
 
+**Scope: the `channel` column is conditional on the straight-route
+model.** The frozen reconstruction contract fixes the whole drawing pool
+to `bends: 0, curvature: 0, declared route style: straight`
+(SCENE_RECONSTRUCTION_CONTRACT.md sec 9a), and `build_traced_scene`
+re-links a route to the position leaf only when it is exactly the chord
+of its endpoints -- so on the certified population 100% of routes are
+live. Under a future profile that admits bends, non-chord routes become
+input-owned constants SILENTLY, and measured on the acceptance fixture
+that converts five now-live rows to constants (U11.v, U13.i,
+U31.headline, U34.L_back, U34.L_mono -- the two U34 rows carry entry
+38's flagship softplus citation). A bend-admitting profile must re-run
+the liveness sweep and re-derive this column before trusting it
+(P3REVIEW2 OPUS5 m5).
+
 | subterm | class | channel | citation / note |
 |---|---|---|---|
 | U01.headline | naturally-smooth | live | U01.md:15 isotonic stress; zero-residual strata take the exact-zero arm (e529778b guard) |
