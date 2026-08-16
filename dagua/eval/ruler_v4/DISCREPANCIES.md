@@ -487,3 +487,51 @@ the production port; none of the entries below overrides a contract.
     reduce the surrogate loss, or fails to transfer the reduction to the
     exact ruler. Measured at pilot: max trajectory gap 1.7e-16, exact loss
     strictly reduced on every class.
+43. KNOWING DEVIATION from V4_SPEC_r4 6.2a's cancellation sentence, plus
+    the conclusion 6.2a orders from its own measurement (P3REVIEW OPUS5
+    BLOCKER-3 fix, docketed per P3REVIEW2 OPUS5 MAJOR-1).
+    (i) The deviation. The spec's PRIMARY paired certificate says "shared
+    unobserved mass has `D_f` certified at exactly 0, SO IT CANCELS"
+    (V4_SPEC_r4, 6.2a). That cancellation claim is FALSE for every
+    nonlinear composition family the spec admits (`P_MEAN` with p > 1,
+    `MEAN_SOFT_BOTTLENECK`) and exact only for a linear composition: a
+    certified-zero paired difference removes the DIRECT channel only,
+    while the row's shared level still moves the exchange rate `dL/dd_i`
+    at `c + D` versus `c` for every other certified difference.
+    `certify_paired_difference` therefore charges every active row the
+    full oscillation bound `Lambda_f * (2*level_radius +
+    difference_radius)` with no linearity skip for `D == [0, 0]` rows.
+    Derivation: with `c_B,i` in the level interval and
+    `c_A,i = c_B,i + D_i`, `|c_B,i - c_hat_B,i| <= r_level,i` and
+    `|c_A,i - c_hat_A,i| <= r_level,i + r_diff,i`, so the triangle
+    inequality on `|L(c_A) - L(c_B) - (L(c_hat_A) - L(c_hat_B))|` with
+    per-argument sensitivity bounds `Lambda_i = sup |dL/dd_i|` gives
+    exactly `sum_i Lambda_i (2*r_level,i + r_diff,i)`. Single-counted
+    level oscillation: still strictly tighter than the marginal rule's
+    double-counted levels, but weaker than the spec's stated (unsound)
+    cancellation. SPEC AMENDMENT OWED (V4.x): replace "so it cancels" with
+    "so its direct channel cancels; the shared level keeps its
+    single-counted oscillation charge under any nonlinear family".
+    (ii) The measured consequence, which 6.2a itself orders published:
+    "if the marginal rule's pruning power is materially lower, the paired
+    rule is the difference between a surrogate and a no-op, and the freeze
+    report says so". Measured on the pilot bank across all 48 (cell, tier)
+    rows (12 cells x 4 tier half-widths): marginal, paired, and paired-CRN
+    certificates eliminate IDENTICAL candidate sets everywhere -- pooled
+    elimination fractions 0.683 / 0.550 / 0.250 / 0.000 under all three
+    families. The power gap is ZERO at pilot scale: with the corrected
+    oscillation charge, the PRIMARY paired certificate currently buys
+    nothing over the rule 6.2a retains as merely "sufficient", and the
+    freeze report says so (GRIND_SUMMARY pruning-power section). The
+    r3 rationale for promoting the paired rule (OPUS5 F3's double-counting
+    grievance) is voided by the corrected bound at these interval widths.
+    (iii) The sound tighter alternative that would restore the paired
+    rule's advantage: a curvature bound
+    `sup |dL/dd_i(c + D) - dL/dd_i(c)| <= K_i * |D|`, replacing the
+    row-width-driven oscillation charge with a difference-width-driven
+    one; 6.2d already asserts curvature is analytic "for every RIVALRY-3
+    family", so `K_i` is computable at the same cost class as `Lambda_i`.
+    OWNER: P5 calibration campaign (racing-activation stage, with entry
+    40's confidence-sequence construction) -- adopt the curvature bound or
+    demote the paired certificate from PRIMARY before any tier is licensed
+    to prune in production.
