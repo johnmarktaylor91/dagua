@@ -289,8 +289,8 @@ def U33(scene: Scene) -> FacetResult:
         # tree/forest": outside applicability, hence NA (DISCREPANCIES 41).
         # Its own reason token, distinct from TREE_SEMANTICS_ABSENT: 7.2b
         # publishes per-store applicability rates, and a drawing whose tree
-        # block IS declared must be separable from true absence (P3REVIEW2
-        # OPUS5 m3).
+        # block IS declared must be separable from true absence
+        # (DISCREPANCIES entry 41, P3FIX5 refinement).
         return na_result("TREE_SEMANTICS_TRIVIAL")
     if mode == "layered":
         if scene.graph.flow_axis is None:
