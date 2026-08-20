@@ -237,6 +237,11 @@ class JudgmentBank:
         Complete scheduled presentation census for each guarded TEST role.
     report : BankLoadReport
         Inclusion and exclusion audit.
+
+    Notes
+    -----
+    Instances are intentionally not picklable. Their mapping proxies prevent
+    multiprocessing or cache serialization from weakening sealed-label opacity.
     """
 
     _rows: Tuple[JudgmentRow, ...]
