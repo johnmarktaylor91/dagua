@@ -239,6 +239,7 @@ def _loaded_holdout_fixture(tmp_path: Path) -> tuple[object, Path, Path, Path]:
     schedule_rows = []
     bank_rows = []
     for suffix, graph_hash in (("fit", "fit-graph"), ("test", "test-graph")):
+        role = graphs[graph_hash]["role"]
         schedule_rows.append(
             {
                 "presentation_id": f"presentation-{suffix}",
@@ -249,6 +250,7 @@ def _loaded_holdout_fixture(tmp_path: Path) -> tuple[object, Path, Path, Path]:
                 "blind_id_B": f"B-{suffix}",
                 "profile_opaque_id": "profile",
                 "budget_line": "PRIMARY",
+                "partition": role,
             }
         )
         bank_rows.append(
@@ -270,7 +272,8 @@ def _loaded_holdout_fixture(tmp_path: Path) -> tuple[object, Path, Path, Path]:
         "".join(f"{json.dumps(row)}\n" for row in schedule_rows), encoding="utf-8"
     )
     bank_path.write_text("".join(f"{json.dumps(row)}\n" for row in bank_rows), encoding="utf-8")
-    bank = load_bank((bank_path,), (schedule_path,), family_path)
+    schedule_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
+    bank = load_bank((bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest)
     return bank, bank_path, schedule_path, family_path
 
 
@@ -510,7 +513,10 @@ def test_test_holdout_access_fails_closed_on_all_review_defeats(
     with pytest.raises(HoldoutConsumedError):
         HoldoutGuard().consume(partitions, "cross-family-sealed")
 
-    reloaded = load_bank((bank_path,), (schedule_path,), family_path)
+    schedule_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
+    reloaded = load_bank(
+        (bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest
+    )
     with pytest.raises(HoldoutConsumedError):
         HoldoutGuard().consume(partition_holdouts(reloaded), "cross-family-sealed")
 
@@ -548,7 +554,7 @@ def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
     second_bank = dict(bank_rows[1])
     second_bank.update(
         presentation_id="presentation-test-cf1",
-        session_id="session-test-cf1",
+        session_id="main-session-test-cf1",
         base_pair_id="pair-test-cf1",
         judge_id="judge/CF@1",
     )
@@ -560,14 +566,56 @@ def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
         "".join(f"{json.dumps(row)}\n" for row in (*bank_rows, second_bank)),
         encoding="utf-8",
     )
-    full = partition_holdouts(load_bank((bank_path,), (schedule_path,), family_path))
-    subset_bank = load_bank((bank_path,), (schedule_path,), family_path, era="CF@1")
+    schedule_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
+    full = partition_holdouts(
+        load_bank((bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest)
+    )
+    subset_bank = load_bank(
+        (bank_path,),
+        (schedule_path,),
+        family_path,
+        schedule_path,
+        schedule_digest,
+        era="CF@1",
+    )
     subset = partition_holdouts(subset_bank)
 
     assert full.role_hash == subset.role_hash
     with pytest.raises(ValueError, match="partial"):
         HoldoutGuard().consume(subset, "cross-family-sealed")
     assert not (tmp_path / "state").exists()
+
+    bank_subset_path = tmp_path / "bank-subset.jsonl"
+    bank_subset_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in bank_rows), encoding="utf-8"
+    )
+    bank_subset = partition_holdouts(
+        load_bank(
+            (bank_subset_path,),
+            (schedule_path,),
+            family_path,
+            schedule_path,
+            schedule_digest,
+        )
+    )
+    with pytest.raises(ValueError, match="partial"):
+        HoldoutGuard().consume(bank_subset, "cross-family-sealed")
+
+    schedule_subset_path = tmp_path / "schedule-subset.jsonl"
+    schedule_subset_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in schedule_rows), encoding="utf-8"
+    )
+    schedule_subset = partition_holdouts(
+        load_bank(
+            (bank_path,),
+            (schedule_subset_path,),
+            family_path,
+            schedule_path,
+            schedule_digest,
+        )
+    )
+    with pytest.raises(ValueError, match="partial"):
+        HoldoutGuard().consume(schedule_subset, "cross-family-sealed")
 
     consumed = HoldoutGuard().consume(full, "cross-family-sealed")
     assert len(consumed) == 2
@@ -600,6 +648,7 @@ def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(tmp_path: Pa
         "blind_id_B": "B-class-holdout",
         "profile_opaque_id": "profile",
         "budget_line": "PRIMARY",
+        "partition": "entire-class-holdout",
     }
     bank_row = {
         "presentation_id": "presentation-class-holdout",
@@ -619,7 +668,8 @@ def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(tmp_path: Pa
     with bank_path.open("a", encoding="utf-8") as handle:
         handle.write(f"{json.dumps(bank_row)}\n")
 
-    bank = load_bank((bank_path,), (schedule_path,), family_path)
+    schedule_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
+    bank = load_bank((bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest)
     partitions = partition_holdouts(bank)
 
     assert bank.guarded_test_count == 1
@@ -657,6 +707,7 @@ def test_sealed_roles_have_separate_labelled_in_tree_ledger_budgets(
         "blind_id_B": "B-within",
         "profile_opaque_id": "profile",
         "budget_line": "PRIMARY",
+        "partition": "within-family-sealed",
     }
     bank_row = {
         "presentation_id": "presentation-within",
@@ -675,7 +726,10 @@ def test_sealed_roles_have_separate_labelled_in_tree_ledger_budgets(
         handle.write(f"{json.dumps(schedule_row)}\n")
     with bank_path.open("a", encoding="utf-8") as handle:
         handle.write(f"{json.dumps(bank_row)}\n")
-    partitions = partition_holdouts(load_bank((bank_path,), (schedule_path,), family_path))
+    schedule_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
+    partitions = partition_holdouts(
+        load_bank((bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest)
+    )
 
     cross = HoldoutGuard().consume(partitions, "cross-family-sealed")
     within = HoldoutGuard().consume(partitions, "within-family-sealed")
@@ -711,11 +765,11 @@ def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
     family.write_text('{"graphs": {}}', encoding="utf-8")
 
     with pytest.raises(PermissionError, match="quarantined"):
-        load_bank((pilot,), (schedule,), family)
+        load_bank((pilot,), (schedule,), family, schedule, hashlib.sha256(b"").hexdigest())
     with pytest.raises(PermissionError, match="quarantined"):
-        load_bank((sealed,), (schedule,), family)
+        load_bank((sealed,), (schedule,), family, schedule, hashlib.sha256(b"").hexdigest())
     with pytest.raises(PermissionError, match="recursive quarantined"):
-        load_bank((bank_root,), (schedule,), family)
+        load_bank((bank_root,), (schedule,), family, schedule, hashlib.sha256(b"").hexdigest())
 
 
 def test_frozen_recorded_bank_fixture_has_stable_loader_digest(tmp_path: Path) -> None:
@@ -761,17 +815,26 @@ def test_bank_loader_validates_a13_labels_and_schedule_schema(tmp_path: Path) ->
     rows = [json.loads(line) for line in bank_path.read_text(encoding="utf-8").splitlines()]
     rows[0].update({"verdict": 0, "tie": False})
     bank_path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
-    implicit_abstain = load_bank((bank_path,), (schedule_path,), family_path)
+    schedule_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
+    implicit_abstain = load_bank(
+        (bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest
+    )
     assert implicit_abstain.report.excluded_invalid == 1
 
     rows[0].update({"verdict": 2, "tie": True})
     bank_path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
     with pytest.raises(ValueError, match="verdict and tie"):
-        load_bank((bank_path,), (schedule_path,), family_path)
+        load_bank((bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest)
 
     schedule_path.write_text("{}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="lacks presentation identities"):
-        load_bank((bank_path,), (schedule_path,), family_path)
+        load_bank(
+            (bank_path,),
+            (schedule_path,),
+            family_path,
+            schedule_path,
+            hashlib.sha256(schedule_path.read_bytes()).hexdigest(),
+        )
 
 
 def test_weight_fit_refuses_nonfit_and_replication_rows() -> None:
