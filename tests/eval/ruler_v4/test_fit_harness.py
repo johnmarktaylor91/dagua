@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import pickle
@@ -227,7 +228,11 @@ def _loaded_holdout_fixture(tmp_path: Path) -> tuple[object, Path, Path, Path]:
             "generator_family": "family",
         },
     }
-    family_path.write_text(json.dumps({"graphs": graphs}), encoding="utf-8")
+    role_lines = "\n".join(
+        f"{graph_hash}\t{graph['role']}" for graph_hash, graph in sorted(graphs.items())
+    )
+    role_hash = hashlib.sha256(role_lines.encode("utf-8")).hexdigest()
+    family_path.write_text(json.dumps({"graphs": graphs, "role_hash": role_hash}), encoding="utf-8")
     schedule_rows = []
     bank_rows = []
     for suffix, graph_hash in (("fit", "fit-graph"), ("test", "test-graph")):
@@ -494,6 +499,53 @@ def test_test_holdout_refuses_empty_partition_before_spending(
     with pytest.raises(ValueError, match="empty"):
         HoldoutGuard().consume(empty_test)
     assert not (tmp_path / "state").exists()
+
+
+def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loader selectors cannot mint a fresh one-shot or spend a partial seal."""
+
+    monkeypatch.setattr(holdout_module, "_TEST_HOLDOUT_STATE_ROOT", tmp_path / "state")
+    _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
+    schedule_rows = [
+        json.loads(line) for line in schedule_path.read_text(encoding="utf-8").splitlines()
+    ]
+    bank_rows = [json.loads(line) for line in bank_path.read_text(encoding="utf-8").splitlines()]
+    second_schedule = dict(schedule_rows[1])
+    second_schedule.update(
+        presentation_id="presentation-test-cf1",
+        session_id="session-test-cf1",
+        base_pair_id="pair-test-cf1",
+    )
+    second_bank = dict(bank_rows[1])
+    second_bank.update(
+        presentation_id="presentation-test-cf1",
+        session_id="session-test-cf1",
+        base_pair_id="pair-test-cf1",
+        judge_id="judge/CF@1",
+    )
+    schedule_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in (*schedule_rows, second_schedule)),
+        encoding="utf-8",
+    )
+    bank_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in (*bank_rows, second_bank)),
+        encoding="utf-8",
+    )
+    full = partition_holdouts(load_bank((bank_path,), (schedule_path,), family_path))
+    subset_bank = load_bank((bank_path,), (schedule_path,), family_path, era="CF@1")
+    subset = partition_holdouts(subset_bank)
+
+    assert full.role_hash == subset.role_hash
+    with pytest.raises(ValueError, match="partial"):
+        HoldoutGuard().consume(subset)
+    assert not (tmp_path / "state").exists()
+
+    consumed = HoldoutGuard().consume(full)
+    assert len(consumed) == 2
+    with pytest.raises(HoldoutConsumedError):
+        HoldoutGuard().consume(full)
 
 
 def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:

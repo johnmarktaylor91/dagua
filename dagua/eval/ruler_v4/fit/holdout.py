@@ -38,15 +38,18 @@ class HoldoutPartitions:
         Reusable adversarial diagnostic rows, never fitted.
     _test_refs : tuple[_SealedJudgmentRef, ...]
         Opaque sealed-row locators without verdicts or tie labels.
-    bank_identity : str
-        Content identity binding this partition to one persistent record.
+    role_hash : str
+        Frozen A15 role-assignment identity binding the persistent record.
+    expected_test_presentations : tuple[str, ...]
+        Complete scheduled presentation census for guarded TEST roles.
     """
 
     fit: Tuple[JudgmentRow, ...]
     validate: Tuple[JudgmentRow, ...]
     diagnostic: Tuple[JudgmentRow, ...]
     _test_refs: Tuple[_SealedJudgmentRef, ...]
-    bank_identity: str
+    role_hash: str
+    expected_test_presentations: Tuple[str, ...]
 
     @property
     def test_count(self) -> int:
@@ -80,13 +83,15 @@ def partition_holdouts(
     if isinstance(rows, JudgmentBank):
         source_rows = rows.rows
         test_refs = rows._partition_test_refs()
-        bank_identity = rows.bank_identity
+        role_hash = rows.role_hash
+        expected_test_presentations = rows.expected_test_presentations
     else:
         source_rows = tuple(rows)
         if any(row.purpose is SplitPurpose.TEST for row in source_rows):
             raise ValueError("explicit TEST rows bypass bank label opacity")
         test_refs = ()
-        bank_identity = ""
+        role_hash = ""
+        expected_test_presentations = ()
     grouped = {purpose: [] for purpose in SplitPurpose}
     for row in source_rows:
         grouped[row.purpose].append(row)
@@ -95,7 +100,8 @@ def partition_holdouts(
         validate=tuple(grouped[SplitPurpose.VALIDATE]),
         diagnostic=tuple(grouped[SplitPurpose.DIAGNOSTIC]),
         _test_refs=test_refs,
-        bank_identity=bank_identity,
+        role_hash=role_hash,
+        expected_test_presentations=expected_test_presentations,
     )
 
 
@@ -146,9 +152,14 @@ class TestHoldoutGuard:
             raise TestHoldoutConsumedError("A15 TEST has already been touched")
         if not partitions._test_refs:
             raise ValueError("cannot consume an empty A15 TEST partition")
-        if not partitions.bank_identity:
-            raise ValueError("A15 TEST partition lacks a bank content identity")
-        path = _TEST_HOLDOUT_STATE_ROOT / f"{partitions.bank_identity}.json"
+        if not partitions.role_hash:
+            raise ValueError("A15 TEST partition lacks a frozen role hash")
+        actual_presentations = tuple(
+            sorted(str(ref.row_fields["presentation_id"]) for ref in partitions._test_refs)
+        )
+        if actual_presentations != partitions.expected_test_presentations:
+            raise ValueError("cannot consume a partial A15 TEST partition")
+        path = _TEST_HOLDOUT_STATE_ROOT / f"{partitions.role_hash}.json"
         if self._path is not None and self._path != path:
             raise ValueError("one guard instance cannot consume different TEST banks")
         self._path = path
@@ -161,7 +172,7 @@ class TestHoldoutGuard:
         payload = json.dumps(
             {
                 "state": "CONSUMED",
-                "bank_identity": partitions.bank_identity,
+                "role_hash": partitions.role_hash,
                 "row_count": len(partitions._test_refs),
                 "presentation_digest": presentation_digest,
             },
@@ -174,7 +185,7 @@ class TestHoldoutGuard:
         except FileExistsError as error:
             existing = json.loads(self._path.read_text(encoding="utf-8"))
             if (
-                existing.get("bank_identity") != partitions.bank_identity
+                existing.get("role_hash") != partitions.role_hash
                 or existing.get("presentation_digest") != presentation_digest
             ):
                 raise ValueError("A15 TEST access record disagrees with the partition") from error
