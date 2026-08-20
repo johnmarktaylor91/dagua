@@ -20,7 +20,8 @@ class OptimizerConfig:
     Parameters
     ----------
     seed : int, default=20260811
-        Frozen seed applied to Python, NumPy, and Torch.
+        Frozen campaign provenance value. The optimizer draws no randomness and
+        does not apply this value to any process-global RNG.
     steps : int, default=1000
         Maximum optimizer updates.
     learning_rate : float, default=0.03
@@ -81,7 +82,8 @@ class FitResult:
     steps_completed : int
         Number of optimizer updates.
     seed : int
-        Deterministic seed used by the fit.
+        Campaign provenance value copied from the optimizer configuration; no
+        RNG is seeded because the fitting loop draws no randomness.
     """
 
     weights: Mapping[str, float]

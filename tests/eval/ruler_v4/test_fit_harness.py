@@ -312,7 +312,7 @@ def test_weight_fit_preserves_host_rng_and_determinism_state() -> None:
     objective = PairwiseObjective(
         _synthetic_recovery_rows(count=4), FittingPlan(_weight_parameters())
     )
-    fit_weights(objective, OptimizerConfig(seed=20260811, steps=1))
+    result = fit_weights(objective, OptimizerConfig(seed=20260811, steps=1))
 
     assert random.getstate() == python_state
     current_numpy_state = np.random.get_state()
@@ -321,6 +321,7 @@ def test_weight_fit_preserves_host_rng_and_determinism_state() -> None:
     assert current_numpy_state[2:] == numpy_state[2:]
     assert torch.equal(torch.random.get_rng_state(), torch_state)
     assert torch.are_deterministic_algorithms_enabled() is deterministic
+    assert result.seed == 20260811
 
 
 def test_prior_penalty_scales_as_one_dataset_prior_not_per_row() -> None:
