@@ -125,6 +125,9 @@ class FittingPlan:
         names = [parameter.name for parameter in weights]
         if len(set(names)) != len(names) or set(names) & set(others):
             raise ValueError("fitted parameter identities must be globally unique")
+        facet_owners = [facet_id for parameter in weights for facet_id in parameter.facet_ids]
+        if len(facet_owners) != len(set(facet_owners)):
+            raise ValueError("each facet may be controlled by only one fitted scalar")
         if any(bucket not in ASSIGNABLE_DOF_BUCKETS for bucket in others.values()):
             raise ValueError("other fitted parameters require assignable A18 buckets")
         usage = {bucket: 0 for bucket in DOF_ALLOCATION}
@@ -145,8 +148,18 @@ class FittingPlan:
         ):
             raise ValueError("prior floors are positive and limited to U12, U13, and U34")
         for parameter in weights:
+            required = set(parameter.facet_ids) & REQUIRED_PRIOR_FLOOR_FACETS
+            missing = sorted(required - set(floors))
+            if missing:
+                raise ValueError(f"fitted traceability facets require prior floors: {missing}")
             for facet_id in set(parameter.facet_ids) & set(floors):
-                if parameter.lower is None or parameter.lower < floors[facet_id]:
+                if len(parameter.facet_ids) == 1:
+                    effective_lower = float(parameter.lower) * math.fsum(
+                        parameter.subterm_coefficients.values()
+                    )
+                else:
+                    effective_lower = float(parameter.lower)
+                if effective_lower < floors[facet_id]:
                     raise ValueError(f"{facet_id} fitted bound falls below its prior floor")
         if not math.isfinite(self.prior_strength) or self.prior_strength < 0.0:
             raise ValueError("prior strength must be finite and nonnegative")
@@ -320,13 +333,59 @@ def fit_pairs_from_rescoring(
 
     weight_table.validate_for_contracts()
     claimed = {}
+    actual_facets_by_parameter = {}
     for index, parameter in enumerate(plan.weights):
+        actual_facets = set()
         for subterm_id in parameter.subterm_coefficients:
             if subterm_id in claimed:
                 raise ValueError(f"fitted sub-term is controlled twice: {subterm_id}")
             if subterm_id not in weight_table.by_subterm:
                 raise ValueError(f"fitted sub-term absent from weight table: {subterm_id}")
+            entry = weight_table.by_subterm[subterm_id]
+            if entry.diagnostic or entry.weight == 0.0:
+                raise ValueError(f"diagnostic or weight-0 sub-term cannot be fitted: {subterm_id}")
+            if entry.facet_id not in parameter.facet_ids:
+                raise ValueError(
+                    f"{subterm_id} belongs to {entry.facet_id}, not {parameter.facet_ids}"
+                )
+            if entry.fitted_parameter != parameter.name:
+                raise ValueError(
+                    f"{subterm_id} fitted identity {entry.fitted_parameter!r} "
+                    f"does not match plan identity {parameter.name!r}"
+                )
+            actual_facets.add(entry.facet_id)
             claimed[subterm_id] = index
+        if actual_facets != set(parameter.facet_ids):
+            raise ValueError(
+                f"parameter {parameter.name} facet declaration does not match its sub-terms"
+            )
+        actual_facets_by_parameter[parameter.name] = actual_facets
+    table_fitted = {
+        entry.subterm_id: entry.fitted_parameter
+        for entry in weight_table.entries
+        if entry.fitted_parameter is not None
+    }
+    claimed_identities = {
+        subterm_id: plan.weights[index].name for subterm_id, index in claimed.items()
+    }
+    if table_fitted != claimed_identities:
+        raise ValueError("fitting plan is not bijective with the weight-table fitted declaration")
+    for parameter in plan.weights:
+        table_bucket = weight_table.fitted_parameter_buckets.get(parameter.name)
+        if table_bucket != parameter.bucket:
+            raise ValueError(f"{parameter.name} A18 bucket disagrees with the weight table")
+        for facet_id in actual_facets_by_parameter[parameter.name] & REQUIRED_PRIOR_FLOOR_FACETS:
+            table_floor = weight_table.prior_floors.get(facet_id)
+            plan_floor = plan.prior_floors.get(facet_id)
+            if table_floor != plan_floor:
+                raise ValueError(f"{facet_id} prior floor disagrees with the weight table")
+            facet_ratio = math.fsum(
+                ratio
+                for subterm_id, ratio in parameter.subterm_coefficients.items()
+                if weight_table.by_subterm[subterm_id].facet_id == facet_id
+            )
+            if float(parameter.lower) * facet_ratio < float(table_floor):
+                raise ValueError(f"{facet_id} effective fitted mass falls below its prior floor")
     result = []
     for pair in pairs:
         a = pair.side_a.subterms

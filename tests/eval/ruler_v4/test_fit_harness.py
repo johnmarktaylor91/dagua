@@ -26,6 +26,7 @@ from dagua.eval.ruler_v4.fit import (
     SplitPurpose,
     WeightParameter,
     fit_jnd_heterogeneity,
+    fit_pairs_from_rescoring,
     fit_weights,
     load_bank,
     partition_holdouts,
@@ -37,6 +38,7 @@ from dagua.eval.ruler_v4.fit import (
     TestHoldoutGuard as HoldoutGuard,
 )
 from dagua.eval.ruler_v4.scene import Scene
+from dagua.eval.ruler_v4.weight_table import WeightTable
 from tests.eval.ruler_v4.test_score import _complete_table, _profiles, _scorable_scene
 
 _RESEARCH_ROOT = Path.home() / ".claude/research/dagua/ruler_v4/p3"
@@ -70,6 +72,37 @@ def _weight_parameters() -> tuple[WeightParameter, WeightParameter]:
             lower=0.25,
             upper=4.0,
         ),
+    )
+
+
+def _fitted_weight_table() -> WeightTable:
+    """Build a complete table whose fitted declaration matches the test plan.
+
+    Returns
+    -------
+    WeightTable
+        Contract-valid table with two fitted outer-weight identities.
+    """
+
+    table = _complete_table()
+    identities = {
+        "U01.headline": "w_structure",
+        "U03.r_1": "w_neighborhood",
+    }
+    entries = tuple(
+        replace(
+            entry,
+            fitted_parameter=identities[entry.subterm_id],
+            provenance_class="fitted",
+        )
+        if entry.subterm_id in identities
+        else entry
+        for entry in table.entries
+    )
+    return replace(
+        table,
+        entries=entries,
+        fitted_parameter_buckets={name: "universal" for name in identities.values()},
     )
 
 
@@ -263,7 +296,7 @@ def test_fitting_plan_refuses_off_ledger_dof_and_diag_facets() -> None:
             "universal",
             1.0,
             {f"term_{index}": 1.0},
-            ("U01",),
+            (f"synthetic-{index}",),
         )
         for index in range(10)
     )
@@ -288,6 +321,33 @@ def test_fitting_plan_enforces_traceability_prior_floor() -> None:
     )
     with pytest.raises(ValueError, match="prior floor"):
         FittingPlan((parameter,), prior_floors={"U12": 0.5})
+    with pytest.raises(ValueError, match="require prior floors"):
+        FittingPlan((replace(parameter, lower=0.6),))
+    diluted = replace(parameter, subterm_coefficients={"U12.headline": 0.05}, lower=0.6)
+    with pytest.raises(ValueError, match="prior floor"):
+        FittingPlan((diluted,), prior_floors={"U12": 0.5})
+
+
+def test_rescoring_bridge_reconciles_facet_and_fitted_dof_ownership() -> None:
+    """Frozen table ownership defeats DIAG smuggling and identity mislabelling."""
+
+    table = _fitted_weight_table()
+    plan = FittingPlan(_weight_parameters())
+    assert fit_pairs_from_rescoring((), plan, table, 2.0, {}, 0.0) == ()
+
+    smuggled = WeightParameter("w_smuggled", "universal", 1.0, {"U20a.i": 1.0}, ("U01",))
+    with pytest.raises(ValueError, match="diagnostic or weight-0"):
+        fit_pairs_from_rescoring((), FittingPlan((smuggled,)), _complete_table(), 2.0, {}, 0.0)
+
+    wrong_owner = replace(_weight_parameters()[0], facet_ids=("U99",))
+    with pytest.raises(ValueError, match="belongs to U01"):
+        fit_pairs_from_rescoring(
+            (), FittingPlan((wrong_owner,)), _fitted_weight_table(), 2.0, {}, 0.0
+        )
+
+    duplicate_owner = replace(_weight_parameters()[1], facet_ids=("U01",))
+    with pytest.raises(ValueError, match="only one fitted scalar"):
+        FittingPlan((_weight_parameters()[0], duplicate_owner))
 
 
 def test_test_holdout_access_fails_closed_on_all_review_defeats(
