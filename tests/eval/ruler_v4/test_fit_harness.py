@@ -7,6 +7,7 @@ import json
 import math
 import pickle
 import random
+import runpy
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Dict
@@ -790,10 +791,48 @@ def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
 
 
 def test_frozen_recorded_bank_fixture_has_stable_loader_digest(tmp_path: Path) -> None:
-    """A recorded main-bank schema fixture pins loader reconciliation output."""
+    """A recorded real main-bank slice pins loader reconciliation output."""
 
-    bank, _, _, _ = _loaded_holdout_fixture(tmp_path)
+    fixture_path = Path(__file__).parents[2] / "fixtures/ruler_v4_real_bank_slice.py"
+    fixture = runpy.run_path(str(fixture_path))["FIXTURE"]
+    bank_path = tmp_path / "main-s0001.jsonl"
+    schedule_path = tmp_path / "session_manifest.jsonl"
+    frozen_schedule_path = tmp_path / "PRESENTATION_SCHEDULE.jsonl"
+    family_path = tmp_path / "A15_FAMILY_MAP.json"
+    bank_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in fixture["bank_rows"]), encoding="utf-8"
+    )
+    schedule_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in fixture["manifest_rows"]),
+        encoding="utf-8",
+    )
+    frozen_schedule_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in fixture["frozen_schedule_rows"]),
+        encoding="utf-8",
+    )
+    graphs = fixture["graphs"]
+    role_lines = "\n".join(
+        f"{graph_hash}\t{graph['role']}" for graph_hash, graph in sorted(graphs.items())
+    )
+    family_path.write_text(
+        json.dumps(
+            {
+                "graphs": graphs,
+                "role_hash": hashlib.sha256(role_lines.encode("utf-8")).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    frozen_digest = hashlib.sha256(frozen_schedule_path.read_bytes()).hexdigest()
+    bank = load_bank(
+        (bank_path,),
+        (schedule_path,),
+        family_path,
+        frozen_schedule_path,
+        frozen_digest,
+    )
     payload = {
+        "source": fixture["source"],
         "report": asdict(bank.report),
         "role_hash": bank.role_hash,
         "rows": [
@@ -821,7 +860,7 @@ def test_frozen_recorded_bank_fixture_has_stable_loader_digest(tmp_path: Path) -
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     assert hashlib.sha256(encoded).hexdigest() == (
-        "bcbfa97d77ed5fe731ffc65068ef4598d4da8e8bbcbf3c8888ce8f661b5e3591"  # noqa: E501  # pragma: allowlist secret
+        "c5ef7b4db569527ff695e444e43fca2f8ec32dcfe44742a94ff97e439b4b249e"  # noqa: E501  # pragma: allowlist secret
     )
 
 
