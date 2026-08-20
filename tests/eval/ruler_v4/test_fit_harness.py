@@ -266,7 +266,7 @@ def _loaded_holdout_fixture(tmp_path: Path) -> tuple[object, Path, Path, Path]:
 
 
 def test_synthetic_judgments_recover_known_weights_deterministically() -> None:
-    """The fitting loop recovers both known outer weights within 0.15."""
+    """The fitting loop reproduces this fixed sample's MLE deterministically."""
 
     plan = FittingPlan(_weight_parameters())
     objective = PairwiseObjective(_synthetic_recovery_rows(), plan)
@@ -282,8 +282,10 @@ def test_synthetic_judgments_recover_known_weights_deterministically() -> None:
     second = fit_weights(objective, config)
 
     assert first == second
-    assert first.weights["w_structure"] == pytest.approx(0.6, abs=0.15)
-    assert first.weights["w_neighborhood"] == pytest.approx(1.6, abs=0.15)
+    # These are sample-MLE regression pins, not claims about one draw recovering
+    # population truth more tightly than its measured sampling error.
+    assert first.weights["w_structure"] == pytest.approx(0.7135333, abs=1.0e-6)
+    assert first.weights["w_neighborhood"] == pytest.approx(1.6472902, abs=1.0e-6)
     assert first.losses[-1] < first.losses[0]
 
 
