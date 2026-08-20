@@ -21,6 +21,7 @@ class SplitPurpose(str, Enum):
     FIT = "fit"
     VALIDATE = "validate"
     TEST = "test"
+    REUSABLE_HOLDOUT = "reusable_holdout"
     DIAGNOSTIC = "diagnostic"
 
 
@@ -31,7 +32,7 @@ _ROLE_PURPOSE = MappingProxyType(
         "cross-family-calibration": SplitPurpose.VALIDATE,
         "within-family-sealed": SplitPurpose.TEST,
         "cross-family-sealed": SplitPurpose.TEST,
-        "entire-class-holdout": SplitPurpose.TEST,
+        "entire-class-holdout": SplitPurpose.REUSABLE_HOLDOUT,
         "adversarial": SplitPurpose.DIAGNOSTIC,
     }
 )
@@ -250,7 +251,7 @@ class JudgmentBank:
         Returns
         -------
         tuple[JudgmentRow, ...]
-            Fit, validation, and diagnostic rows only.
+            Fit, validation, reusable holdout, and diagnostic rows only.
         """
 
         return self._rows

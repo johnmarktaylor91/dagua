@@ -36,6 +36,8 @@ class HoldoutPartitions:
         Within- and cross-family calibration rows.
     diagnostic : tuple[JudgmentRow, ...]
         Reusable adversarial diagnostic rows, never fitted.
+    reusable_holdout : tuple[JudgmentRow, ...]
+        Reusable entire-class holdout rows, never fitted.
     _test_refs : tuple[_SealedJudgmentRef, ...]
         Opaque sealed-row locators without verdicts or tie labels.
     role_hash : str
@@ -46,6 +48,7 @@ class HoldoutPartitions:
 
     fit: Tuple[JudgmentRow, ...]
     validate: Tuple[JudgmentRow, ...]
+    reusable_holdout: Tuple[JudgmentRow, ...]
     diagnostic: Tuple[JudgmentRow, ...]
     _test_refs: Tuple[_SealedJudgmentRef, ...]
     role_hash: str
@@ -98,6 +101,7 @@ def partition_holdouts(
     return HoldoutPartitions(
         fit=tuple(grouped[SplitPurpose.FIT]),
         validate=tuple(grouped[SplitPurpose.VALIDATE]),
+        reusable_holdout=tuple(grouped[SplitPurpose.REUSABLE_HOLDOUT]),
         diagnostic=tuple(grouped[SplitPurpose.DIAGNOSTIC]),
         _test_refs=test_refs,
         role_hash=role_hash,
