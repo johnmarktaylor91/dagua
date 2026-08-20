@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import pickle
 from dataclasses import replace
 from pathlib import Path
 from typing import Dict
@@ -12,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 
+import dagua.eval.ruler_v4.fit.holdout as holdout_module
 from dagua.eval.ruler_v4.fit import (
     FitPair,
     FittingPlan,
@@ -160,6 +163,75 @@ def _judgment(purpose: SplitPurpose, suffix: str = "0") -> JudgmentRow:
     )
 
 
+def _loaded_holdout_fixture(tmp_path: Path) -> tuple[object, Path, Path, Path]:
+    """Build a minimal file-backed bank with one FIT and one TEST row.
+
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        Isolated fixture directory.
+
+    Returns
+    -------
+    tuple[object, pathlib.Path, pathlib.Path, pathlib.Path]
+        Loaded bank and its bank, schedule, and family-map paths.
+    """
+
+    bank_path = tmp_path / "bank.jsonl"
+    schedule_path = tmp_path / "schedule.jsonl"
+    family_path = tmp_path / "A15_FAMILY_MAP.json"
+    graphs = {
+        "fit-graph": {
+            "role": "train",
+            "primary_class": "class",
+            "size_band": "band",
+            "generator_family": "family",
+        },
+        "test-graph": {
+            "role": "cross-family-sealed",
+            "primary_class": "class",
+            "size_band": "band",
+            "generator_family": "family",
+        },
+    }
+    family_path.write_text(json.dumps({"graphs": graphs}), encoding="utf-8")
+    schedule_rows = []
+    bank_rows = []
+    for suffix, graph_hash in (("fit", "fit-graph"), ("test", "test-graph")):
+        schedule_rows.append(
+            {
+                "presentation_id": f"presentation-{suffix}",
+                "session_id": f"session-{suffix}",
+                "base_pair_id": f"pair-{suffix}",
+                "graph_hash": graph_hash,
+                "blind_id_A": f"A-{suffix}",
+                "blind_id_B": f"B-{suffix}",
+                "profile_opaque_id": "profile",
+                "budget_line": "PRIMARY",
+            }
+        )
+        bank_rows.append(
+            {
+                "presentation_id": f"presentation-{suffix}",
+                "session_id": f"session-{suffix}",
+                "base_pair_id": f"pair-{suffix}",
+                "graph_hash": graph_hash,
+                "session_accepted": True,
+                "instrument_hash": "instrument",
+                "judge_id": "judge/CF@4",
+                "verdict": 3 if suffix == "test" else -1,
+                "tie": False,
+                "side_bit": 0,
+            }
+        )
+    schedule_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in schedule_rows), encoding="utf-8"
+    )
+    bank_path.write_text("".join(f"{json.dumps(row)}\n" for row in bank_rows), encoding="utf-8")
+    bank = load_bank((bank_path,), (schedule_path,), family_path)
+    return bank, bank_path, schedule_path, family_path
+
+
 def test_synthetic_judgments_recover_known_weights_deterministically() -> None:
     """The fitting loop recovers both known outer weights within 0.15."""
 
@@ -218,22 +290,49 @@ def test_fitting_plan_enforces_traceability_prior_floor() -> None:
         FittingPlan((parameter,), prior_floors={"U12": 0.5})
 
 
-def test_test_holdout_access_fails_closed_on_repeat(tmp_path: Path) -> None:
-    """TEST labels are returned once and stay spent across guard instances."""
+def test_test_holdout_access_fails_closed_on_all_review_defeats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TEST labels stay opaque and content-bound across every review attack."""
 
-    rows = tuple(_judgment(purpose, str(index)) for index, purpose in enumerate(SplitPurpose))
-    partitions = partition_holdouts(rows)
-    record = tmp_path / "test-access.json"
+    monkeypatch.setattr(holdout_module, "_TEST_HOLDOUT_STATE_ROOT", tmp_path / "state")
+    bank, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
+    partitions = partition_holdouts(bank)
 
-    first = HoldoutGuard(record)
+    assert bank.guarded_test_count == 1
+    assert not hasattr(partitions, "_test")
+    assert "verdict=3" not in repr(bank)
+    with pytest.raises(TypeError):
+        pickle.dumps(partitions)
+    with pytest.raises(TypeError):
+        HoldoutGuard(tmp_path / "alternate-record.json")
+
+    first = HoldoutGuard()
     consumed = first.consume(partitions)
 
     assert len(consumed) == 1
     assert consumed[0].purpose is SplitPurpose.TEST
+    assert consumed[0].verdict == 3
     with pytest.raises(HoldoutConsumedError):
         first.consume(partitions)
     with pytest.raises(HoldoutConsumedError):
-        HoldoutGuard(record).consume(partitions)
+        HoldoutGuard().consume(partitions)
+
+    reloaded = load_bank((bank_path,), (schedule_path,), family_path)
+    with pytest.raises(HoldoutConsumedError):
+        HoldoutGuard().consume(partition_holdouts(reloaded))
+
+
+def test_weight_fit_refuses_nonfit_and_replication_rows() -> None:
+    """Purpose and replication provenance are enforced at the fit boundary."""
+
+    plan = FittingPlan(_weight_parameters())
+    row = _synthetic_recovery_rows(count=1)[0]
+    config = OptimizerConfig(steps=1)
+    with pytest.raises(ValueError, match="FIT rows only"):
+        fit_weights(PairwiseObjective((replace(row, purpose=SplitPurpose.VALIDATE),), plan), config)
+    with pytest.raises(ValueError, match="replication"):
+        fit_weights(PairwiseObjective((replace(row, is_replication=True),), plan), config)
 
 
 def test_scene_rescorer_uses_score_type_m_and_caches(semantic_scene: Scene) -> None:

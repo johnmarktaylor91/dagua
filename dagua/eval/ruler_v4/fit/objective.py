@@ -9,6 +9,7 @@ from typing import Mapping, Optional, Sequence, Tuple
 
 import torch
 
+from dagua.eval.ruler_v4.fit.bank import SplitPurpose
 from dagua.eval.ruler_v4.fit.rescoring import RescoredPair
 from dagua.eval.ruler_v4.weight_table import (
     ASSIGNABLE_DOF_BUCKETS,
@@ -190,8 +191,14 @@ class FitPair:
         Uniform three-outcome lapse mixture in ``[0, 1)``.
     primary_class, size_band, graph_hash, generator_family, era, instrument_hash : str
         Frozen diagnostic strata.
+    observation_profile : str
+        Opaque observation-profile likelihood stratum.
+    purpose : SplitPurpose
+        Frozen A15 consumption purpose.
     is_replication : bool
         Whether the judgment belongs to the cross-session replication line.
+    base_pair_id, session_id, blind_id_a, blind_id_b : str
+        Replication and displayed-order provenance.
     """
 
     numerator_a: Tuple[float, ...]
@@ -210,7 +217,13 @@ class FitPair:
     generator_family: str = "synthetic"
     era: str = "synthetic"
     instrument_hash: str = "synthetic"
+    observation_profile: str = "synthetic"
+    purpose: SplitPurpose = SplitPurpose.FIT
     is_replication: bool = False
+    base_pair_id: str = "synthetic"
+    session_id: str = "synthetic"
+    blind_id_a: str = "synthetic-a"
+    blind_id_b: str = "synthetic-b"
 
     def __post_init__(self) -> None:
         """Validate feature dimensions and likelihood constants.
@@ -248,6 +261,18 @@ class FitPair:
             raise ValueError("JND must be finite and positive")
         if not math.isfinite(self.lapse_rate) or not 0.0 <= self.lapse_rate < 1.0:
             raise ValueError("lapse rate must lie in [0, 1)")
+        if not isinstance(self.purpose, SplitPurpose):
+            raise ValueError("pair purpose must be a SplitPurpose")
+        if not all(
+            (
+                self.observation_profile,
+                self.base_pair_id,
+                self.session_id,
+                self.blind_id_a,
+                self.blind_id_b,
+            )
+        ):
+            raise ValueError("pair likelihood and replication identities must be nonempty")
         object.__setattr__(self, "numerator_a", numerator_a)
         object.__setattr__(self, "numerator_b", numerator_b)
         object.__setattr__(self, "mass_coefficients", masses)
@@ -363,7 +388,13 @@ def fit_pairs_from_rescoring(
                 generator_family=pair.judgment.generator_family,
                 era=pair.judgment.era,
                 instrument_hash=pair.judgment.instrument_hash,
+                observation_profile=pair.judgment.observation_profile,
+                purpose=pair.judgment.purpose,
                 is_replication=pair.judgment.is_replication,
+                base_pair_id=pair.judgment.base_pair_id,
+                session_id=pair.judgment.session_id,
+                blind_id_a=pair.judgment.blind_id_a,
+                blind_id_b=pair.judgment.blind_id_b,
             )
         )
     return tuple(result)
@@ -412,9 +443,11 @@ class PairwiseObjective:
         dimension = len(plan.weights)
         if dimension == 0 or any(len(row.numerator_a) != dimension for row in rows):
             raise ValueError("pair dimensions must match the fitting plan")
-        strata = {(row.instrument_hash, row.era) for row in rows}
+        strata = {
+            (row.instrument_hash, row.era, row.observation_profile, row.purpose) for row in rows
+        }
         if len(strata) != 1:
-            raise ValueError("one likelihood may not cross instrument/era strata")
+            raise ValueError("one likelihood may not cross instrument/era/profile/purpose strata")
         self.pairs = rows
         self.plan = plan
         self.dtype = dtype
