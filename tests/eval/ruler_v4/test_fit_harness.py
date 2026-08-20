@@ -500,7 +500,7 @@ def test_test_holdout_access_fails_closed_on_all_review_defeats(
     assert not hasattr(bank_module, "_reveal_test_rows")
     refs = partitions._test_refs_by_role["cross-family-sealed"]
     with pytest.raises(RuntimeError, match="reservation"):
-        HoldoutGuard()._reveal_test_rows(refs)
+        HoldoutGuard()._reveal_test_rows(refs, "cross-family-sealed")
 
     first = HoldoutGuard()
     consumed = first.consume(partitions, "cross-family-sealed")
@@ -741,7 +741,14 @@ def test_sealed_roles_have_separate_labelled_in_tree_ledger_budgets(
         load_bank((bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest)
     )
 
-    cross = HoldoutGuard().consume(partitions, "cross-family-sealed")
+    cross_guard = HoldoutGuard()
+    cross = cross_guard.consume(partitions, "cross-family-sealed")
+    with pytest.raises(RuntimeError, match="reservation"):
+        cross_guard._reveal_test_rows(
+            partitions._test_refs_by_role["within-family-sealed"],
+            "within-family-sealed",
+        )
+    assert not (ledger_root / f"{partitions.role_hash}.within-family-sealed.1.lock").exists()
     within = HoldoutGuard().consume(partitions, "within-family-sealed")
 
     assert [row.role for row in cross] == ["cross-family-sealed"]
