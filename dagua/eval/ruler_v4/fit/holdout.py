@@ -45,7 +45,10 @@ class HoldoutPartitions:
     role_hash : str
         Frozen A15 role-assignment identity binding the persistent record.
     expected_test_presentations : mapping[str, tuple[str, ...]]
-        Complete scheduled presentation census for each guarded TEST role.
+        Complete screened presentation census before loader selectors for each
+        guarded TEST role.
+    expected_test_graphs : mapping[str, tuple[str, ...]]
+        Frozen graph-hash census for each guarded TEST role.
 
     Notes
     -----
@@ -60,6 +63,7 @@ class HoldoutPartitions:
     _test_refs_by_role: Mapping[str, Tuple[_SealedJudgmentRef, ...]]
     role_hash: str
     expected_test_presentations: Mapping[str, Tuple[str, ...]]
+    expected_test_graphs: Mapping[str, Tuple[str, ...]]
 
     @property
     def test_count(self) -> int:
@@ -99,6 +103,7 @@ def partition_holdouts(
         }
         role_hash = rows.role_hash
         expected_test_presentations = rows.expected_test_presentations
+        expected_test_graphs = rows.expected_test_graphs
     else:
         source_rows = tuple(rows)
         if any(row.purpose is SplitPurpose.TEST for row in source_rows):
@@ -106,6 +111,7 @@ def partition_holdouts(
         test_refs_by_role = {}
         role_hash = ""
         expected_test_presentations = {}
+        expected_test_graphs = {}
     grouped = {purpose: [] for purpose in SplitPurpose}
     for row in source_rows:
         grouped[row.purpose].append(row)
@@ -117,6 +123,7 @@ def partition_holdouts(
         _test_refs_by_role=MappingProxyType(test_refs_by_role),
         role_hash=role_hash,
         expected_test_presentations=expected_test_presentations,
+        expected_test_graphs=expected_test_graphs,
     )
 
 
@@ -241,6 +248,10 @@ class TestHoldoutGuard:
         expected_presentations = partitions.expected_test_presentations.get(role, ())
         if actual_presentations != expected_presentations:
             raise ValueError(f"cannot consume a partial A15 TEST role: {role}")
+        actual_graphs = tuple(sorted({str(ref.row_fields["graph_hash"]) for ref in refs}))
+        expected_graphs = partitions.expected_test_graphs.get(role, ())
+        if actual_graphs != expected_graphs:
+            raise ValueError(f"A15 TEST role does not cover its frozen graph census: {role}")
         path = _ACCESS_LEDGER_ROOT / f"{partitions.role_hash}.jsonl"
         lock_path = _ACCESS_LEDGER_ROOT / f"{partitions.role_hash}.{role}.1.lock"
         if self._path is not None and self._path != path:

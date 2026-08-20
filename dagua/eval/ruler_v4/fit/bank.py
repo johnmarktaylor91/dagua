@@ -234,7 +234,10 @@ class JudgmentBank:
     role_hash : str
         Frozen A15 role-assignment identity binding the TEST access record.
     expected_test_presentations : mapping[str, tuple[str, ...]]
-        Complete scheduled presentation census for each guarded TEST role.
+        Complete screened presentation census before loader selectors for each
+        guarded TEST role.
+    expected_test_graphs : mapping[str, tuple[str, ...]]
+        Frozen graph-hash census for each guarded TEST role.
     report : BankLoadReport
         Inclusion and exclusion audit.
 
@@ -248,6 +251,7 @@ class JudgmentBank:
     _test_refs: Tuple[_SealedJudgmentRef, ...]
     role_hash: str
     expected_test_presentations: Mapping[str, Tuple[str, ...]]
+    expected_test_graphs: Mapping[str, Tuple[str, ...]]
     report: BankLoadReport
 
     def __post_init__(self) -> None:
@@ -257,7 +261,11 @@ class JudgmentBank:
             role: tuple(presentations)
             for role, presentations in self.expected_test_presentations.items()
         }
+        graph_census = {
+            role: tuple(graph_hashes) for role, graph_hashes in self.expected_test_graphs.items()
+        }
         object.__setattr__(self, "expected_test_presentations", MappingProxyType(census))
+        object.__setattr__(self, "expected_test_graphs", MappingProxyType(graph_census))
 
     @property
     def rows(self) -> Tuple[JudgmentRow, ...]:
@@ -637,15 +645,15 @@ def load_bank(
     paths = _bank_jsonl_paths(bank_inputs)
     schedule = load_schedule(schedule_inputs)
     graph_map, role_hash = _load_a15_family_map(family_map_path)
-    expected_test_presentations = {
+    expected_test_presentations: dict[str, list[str]] = {
+        role: [] for role in sorted(SEALED_TEST_ROLES)
+    }
+    expected_test_graphs = {
         role: tuple(
             sorted(
-                scheduled.presentation_id
-                for scheduled in schedule.values()
-                if scheduled.control_type is None
-                and scheduled.budget_line not in _NON_FITTING_BUDGET_LINES
-                and scheduled.graph_hash in graph_map
-                and str(graph_map[scheduled.graph_hash].get("role", "")) == role
+                graph_hash
+                for graph_hash, graph in graph_map.items()
+                if str(graph.get("role", "")) == role
             )
         )
         for role in sorted(SEALED_TEST_ROLES)
@@ -692,11 +700,6 @@ def load_bank(
                 continue
             row_era = _era(raw.get("judge_id", ""))
             row_instrument = str(raw.get("instrument_hash", ""))
-            if (era is not None and row_era != era) or (
-                instrument_hash is not None and row_instrument != instrument_hash
-            ):
-                counts["excluded_era"] += 1
-                continue
             graph = graph_map.get(scheduled.graph_hash)
             if graph is None:
                 raise ValueError(f"graph absent from frozen A15 map: {scheduled.graph_hash}")
@@ -716,6 +719,13 @@ def load_bank(
             confidence = int(raw.get("confidence", 0))
             if confidence not in (1, 2, 3):
                 raise ValueError(f"confidence outside A13 range: {confidence}")
+            if purpose is SplitPurpose.TEST:
+                expected_test_presentations[role].append(scheduled.presentation_id)
+            if (era is not None and row_era != era) or (
+                instrument_hash is not None and row_instrument != instrument_hash
+            ):
+                counts["excluded_era"] += 1
+                continue
             row_fields = {
                 "presentation_id": scheduled.presentation_id,
                 "session_id": scheduled.session_id,
@@ -773,6 +783,10 @@ def load_bank(
         _rows=ordered,
         _test_refs=ordered_refs,
         role_hash=role_hash,
-        expected_test_presentations=expected_test_presentations,
+        expected_test_presentations={
+            role: tuple(sorted(presentations))
+            for role, presentations in expected_test_presentations.items()
+        },
+        expected_test_graphs=expected_test_graphs,
         report=report,
     )
