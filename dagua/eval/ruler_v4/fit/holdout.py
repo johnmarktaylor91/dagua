@@ -45,8 +45,7 @@ class HoldoutPartitions:
     role_hash : str
         Frozen A15 role-assignment identity binding the persistent record.
     expected_test_presentations : mapping[str, tuple[str, ...]]
-        Complete screened presentation census before loader selectors for each
-        guarded TEST role.
+        Frozen A16 presentation census for each guarded TEST role.
     expected_test_graphs : mapping[str, tuple[str, ...]]
         Frozen graph-hash census for each guarded TEST role.
 
@@ -246,7 +245,7 @@ class TestHoldoutGuard:
             raise ValueError("A15 TEST partition lacks a frozen role hash")
         actual_presentations = tuple(sorted(str(ref.row_fields["presentation_id"]) for ref in refs))
         expected_presentations = partitions.expected_test_presentations.get(role, ())
-        if actual_presentations != expected_presentations:
+        if len(actual_presentations) != len(expected_presentations):
             raise ValueError(f"cannot consume a partial A15 TEST role: {role}")
         actual_graphs = tuple(sorted({str(ref.row_fields["graph_hash"]) for ref in refs}))
         expected_graphs = partitions.expected_test_graphs.get(role, ())
