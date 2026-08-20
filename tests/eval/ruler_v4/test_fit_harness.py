@@ -172,6 +172,7 @@ def _judgment(purpose: SplitPurpose, suffix: str = "0") -> JudgmentRow:
         SplitPurpose.FIT: "train",
         SplitPurpose.VALIDATE: "within-family-calibration",
         SplitPurpose.TEST: "cross-family-sealed",
+        SplitPurpose.REUSABLE_HOLDOUT: "entire-class-holdout",
         SplitPurpose.DIAGNOSTIC: "adversarial",
     }[purpose]
     return JudgmentRow(
@@ -546,6 +547,59 @@ def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
     assert len(consumed) == 2
     with pytest.raises(HoldoutConsumedError):
         HoldoutGuard().consume(full)
+
+
+def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(tmp_path: Path) -> None:
+    """A15's reusable entire-class role remains outside the once-only guard."""
+
+    _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
+    family = json.loads(family_path.read_text(encoding="utf-8"))
+    family["graphs"]["class-holdout-graph"] = {
+        "role": "entire-class-holdout",
+        "primary_class": "held-out-class",
+        "size_band": "band",
+        "generator_family": "held-out-family",
+    }
+    role_lines = "\n".join(
+        f"{graph_hash}\t{graph['role']}" for graph_hash, graph in sorted(family["graphs"].items())
+    )
+    family["role_hash"] = hashlib.sha256(role_lines.encode("utf-8")).hexdigest()
+    family_path.write_text(json.dumps(family), encoding="utf-8")
+    schedule_row = {
+        "presentation_id": "presentation-class-holdout",
+        "session_id": "session-class-holdout",
+        "base_pair_id": "pair-class-holdout",
+        "graph_hash": "class-holdout-graph",
+        "blind_id_A": "A-class-holdout",
+        "blind_id_B": "B-class-holdout",
+        "profile_opaque_id": "profile",
+        "budget_line": "PRIMARY",
+    }
+    bank_row = {
+        "presentation_id": "presentation-class-holdout",
+        "session_id": "session-class-holdout",
+        "base_pair_id": "pair-class-holdout",
+        "graph_hash": "class-holdout-graph",
+        "session_accepted": True,
+        "instrument_hash": "instrument",
+        "judge_id": "judge/CF@4",
+        "verdict": 1,
+        "tie": False,
+        "confidence": 2,
+        "side_bit": 0,
+    }
+    with schedule_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(schedule_row)}\n")
+    with bank_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(bank_row)}\n")
+
+    bank = load_bank((bank_path,), (schedule_path,), family_path)
+    partitions = partition_holdouts(bank)
+
+    assert bank.guarded_test_count == 1
+    assert bank.select(purpose=SplitPurpose.REUSABLE_HOLDOUT) == partitions.reusable_holdout
+    assert len(partitions.reusable_holdout) == 1
+    assert partitions.reusable_holdout[0].role == "entire-class-holdout"
 
 
 def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
