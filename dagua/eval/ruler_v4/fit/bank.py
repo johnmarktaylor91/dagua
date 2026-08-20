@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from enum import Enum
@@ -149,6 +150,38 @@ class JudgmentRow:
 
 
 @dataclass(frozen=True)
+class _SealedJudgmentRef:
+    """Retain TEST provenance without materializing its verdict.
+
+    Parameters
+    ----------
+    source_path : str
+        Bank JSONL path containing the guarded row.
+    source_line : int
+        One-based JSONL line number.
+    row_fields : mapping[str, object]
+        Non-label :class:`JudgmentRow` constructor fields.
+    """
+
+    source_path: str
+    source_line: int
+    row_fields: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        """Freeze non-label row metadata.
+
+        Raises
+        ------
+        ValueError
+            If the source locator is invalid.
+        """
+
+        if not self.source_path or self.source_line <= 0:
+            raise ValueError("sealed judgment references require a source locator")
+        object.__setattr__(self, "row_fields", MappingProxyType(dict(self.row_fields)))
+
+
+@dataclass(frozen=True)
 class BankLoadReport:
     """Publish deterministic loader inclusion and exclusion counts.
 
@@ -189,13 +222,18 @@ class JudgmentBank:
     Parameters
     ----------
     _rows : tuple[JudgmentRow, ...]
-        Stable presentation-sorted inputs. TEST rows are kept private and may
-        be released only through :class:`TestHoldoutGuard`.
+        Stable presentation-sorted reusable inputs. TEST labels are absent.
+    _test_refs : tuple[_SealedJudgmentRef, ...]
+        Stable opaque TEST source references without verdict or tie fields.
+    bank_identity : str
+        Content identity used to bind the persistent TEST access record.
     report : BankLoadReport
         Inclusion and exclusion audit.
     """
 
     _rows: Tuple[JudgmentRow, ...]
+    _test_refs: Tuple[_SealedJudgmentRef, ...]
+    bank_identity: str
     report: BankLoadReport
 
     @property
@@ -208,7 +246,7 @@ class JudgmentBank:
             Fit, validation, and diagnostic rows only.
         """
 
-        return tuple(row for row in self._rows if row.purpose is not SplitPurpose.TEST)
+        return self._rows
 
     @property
     def guarded_test_count(self) -> int:
@@ -220,18 +258,18 @@ class JudgmentBank:
             Number of rows behind the once-only holdout guard.
         """
 
-        return sum(row.purpose is SplitPurpose.TEST for row in self._rows)
+        return len(self._test_refs)
 
-    def _partition_rows(self) -> Tuple[JudgmentRow, ...]:
-        """Return all rows exclusively to the holdout partition boundary.
+    def _partition_test_refs(self) -> Tuple[_SealedJudgmentRef, ...]:
+        """Return opaque TEST references to the holdout boundary.
 
         Returns
         -------
-        tuple[JudgmentRow, ...]
-            Internal rows including guarded TEST labels.
+        tuple[_SealedJudgmentRef, ...]
+            Internal source references that contain no TEST labels.
         """
 
-        return self._rows
+        return self._test_refs
 
     def select(
         self,
@@ -333,6 +371,80 @@ def _read_jsonl(path: Path) -> Iterable[Mapping[str, Any]]:
             if not isinstance(value, dict):
                 raise ValueError(f"{path}:{line_number}: expected a JSON object")
             yield value
+
+
+def _read_jsonl_with_line_numbers(path: Path) -> Iterable[Tuple[int, Mapping[str, Any]]]:
+    """Yield decoded JSON objects with stable one-based line numbers.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Existing JSONL path.
+
+    Yields
+    ------
+    tuple[int, mapping[str, Any]]
+        Source line number and decoded object.
+
+    Raises
+    ------
+    ValueError
+        If a nonblank line is not a JSON object.
+    """
+
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise ValueError(f"{path}:{line_number}: expected a JSON object")
+            yield line_number, value
+
+
+def _reveal_test_rows(refs: Tuple[_SealedJudgmentRef, ...]) -> Tuple[JudgmentRow, ...]:
+    """Re-read guarded TEST labels from their exact bank locations.
+
+    Parameters
+    ----------
+    refs : tuple[_SealedJudgmentRef, ...]
+        Opaque references released by a :class:`JudgmentBank`.
+
+    Returns
+    -------
+    tuple[JudgmentRow, ...]
+        Materialized TEST rows in stable presentation order.
+
+    Raises
+    ------
+    ValueError
+        If a source row moved, changed identity, or has invalid labels.
+    """
+
+    by_path: dict[Path, dict[int, _SealedJudgmentRef]] = {}
+    for ref in refs:
+        by_path.setdefault(Path(ref.source_path), {})[ref.source_line] = ref
+    rows = []
+    for path, expected in sorted(by_path.items(), key=lambda item: str(item[0])):
+        found = set()
+        for line_number, raw in _read_jsonl_with_line_numbers(path):
+            ref = expected.get(line_number)
+            if ref is None:
+                continue
+            found.add(line_number)
+            if (
+                str(raw.get("session_id", "")) != ref.row_fields["session_id"]
+                or str(raw.get("presentation_id", "")) != ref.row_fields["presentation_id"]
+            ):
+                raise ValueError("guarded TEST source identity changed")
+            verdict = int(raw.get("verdict", 0))
+            tie = bool(raw.get("tie", verdict == 0))
+            if verdict < -3 or verdict > 3:
+                raise ValueError(f"verdict outside A13 range: {verdict}")
+            rows.append(JudgmentRow(**ref.row_fields, verdict=verdict, tie=tie))
+        if found != set(expected):
+            raise ValueError(f"guarded TEST source rows missing from {path}")
+    return tuple(sorted(rows, key=lambda row: (row.session_id, row.presentation_id)))
 
 
 def load_schedule(inputs: Iterable[PathLike]) -> Mapping[Tuple[str, str], ScheduledPair]:
@@ -479,6 +591,8 @@ def load_bank(
     schedule = load_schedule(schedule_inputs)
     graph_map = _load_a15_graphs(family_map_path)
     rows = []
+    test_refs = []
+    bank_identity = hashlib.sha256(Path(family_map_path).read_bytes())
     counts = {
         "raw_rows": 0,
         "excluded_rejected_session": 0,
@@ -488,7 +602,7 @@ def load_bank(
         "excluded_era": 0,
     }
     for path in paths:
-        for raw in _read_jsonl(path):
+        for source_line, raw in _read_jsonl_with_line_numbers(path):
             counts["raw_rows"] += 1
             if raw.get("session_accepted") is not True:
                 counts["excluded_rejected_session"] += 1
@@ -531,37 +645,65 @@ def load_bank(
             verdict = int(raw.get("verdict", 0))
             if verdict < -3 or verdict > 3:
                 raise ValueError(f"verdict outside A13 range: {verdict}")
-            rows.append(
-                JudgmentRow(
-                    presentation_id=scheduled.presentation_id,
-                    session_id=scheduled.session_id,
-                    base_pair_id=scheduled.base_pair_id,
-                    graph_hash=scheduled.graph_hash,
-                    blind_id_a=scheduled.blind_id_a,
-                    blind_id_b=scheduled.blind_id_b,
-                    instrument_hash=row_instrument,
-                    era=row_era,
-                    observation_profile=scheduled.profile_opaque_id,
-                    verdict=verdict,
-                    tie=bool(raw.get("tie", verdict == 0)),
-                    is_replication=bool(raw.get("is_replication", budget_line == "REPLICATION")),
-                    role=role,
-                    purpose=purpose,
-                    primary_class=str(graph.get("primary_class", "")),
-                    size_band=str(graph.get("size_band", "")),
-                    generator_family=str(graph.get("generator_family", "")),
-                    source_path=str(path),
+            row_fields = {
+                "presentation_id": scheduled.presentation_id,
+                "session_id": scheduled.session_id,
+                "base_pair_id": scheduled.base_pair_id,
+                "graph_hash": scheduled.graph_hash,
+                "blind_id_a": scheduled.blind_id_a,
+                "blind_id_b": scheduled.blind_id_b,
+                "instrument_hash": row_instrument,
+                "era": row_era,
+                "observation_profile": scheduled.profile_opaque_id,
+                "is_replication": bool(raw.get("is_replication", budget_line == "REPLICATION")),
+                "role": role,
+                "purpose": purpose,
+                "primary_class": str(graph.get("primary_class", "")),
+                "size_band": str(graph.get("size_band", "")),
+                "generator_family": str(graph.get("generator_family", "")),
+                "source_path": str(path),
+            }
+            if purpose is SplitPurpose.TEST:
+                bank_identity.update(
+                    json.dumps(raw, sort_keys=True, separators=(",", ":")).encode("utf-8")
                 )
-            )
+                bank_identity.update(b"\0")
+                test_refs.append(
+                    _SealedJudgmentRef(
+                        source_path=str(path), source_line=source_line, row_fields=row_fields
+                    )
+                )
+            else:
+                rows.append(
+                    JudgmentRow(
+                        **row_fields,
+                        verdict=verdict,
+                        tie=bool(raw.get("tie", verdict == 0)),
+                    )
+                )
     ordered = tuple(sorted(rows, key=lambda row: (row.session_id, row.presentation_id)))
     report = BankLoadReport(
         files=len(paths),
         raw_rows=counts["raw_rows"],
-        included_rows=len(ordered),
+        included_rows=len(ordered) + len(test_refs),
         excluded_rejected_session=counts["excluded_rejected_session"],
         excluded_invalid=counts["excluded_invalid"],
         excluded_controls=counts["excluded_controls"],
         excluded_unscheduled=counts["excluded_unscheduled"],
         excluded_era=counts["excluded_era"],
     )
-    return JudgmentBank(_rows=ordered, report=report)
+    ordered_refs = tuple(
+        sorted(
+            test_refs,
+            key=lambda ref: (
+                str(ref.row_fields["session_id"]),
+                str(ref.row_fields["presentation_id"]),
+            ),
+        )
+    )
+    return JudgmentBank(
+        _rows=ordered,
+        _test_refs=ordered_refs,
+        bank_identity=bank_identity.hexdigest(),
+        report=report,
+    )

@@ -11,6 +11,7 @@ from typing import Mapping, Tuple
 import numpy as np
 import torch
 
+from dagua.eval.ruler_v4.fit.bank import SplitPurpose
 from dagua.eval.ruler_v4.fit.objective import PairwiseObjective
 
 
@@ -145,10 +146,16 @@ def fit_weights(objective: PairwiseObjective, config: OptimizerConfig) -> FitRes
 
     Raises
     ------
+    ValueError
+        If non-FIT or replication rows reach the weight optimizer.
     FloatingPointError
         If the objective or a gradient becomes nonfinite.
     """
 
+    if any(pair.purpose is not SplitPurpose.FIT for pair in objective.pairs):
+        raise ValueError("weight fitting accepts A15 FIT rows only")
+    if any(pair.is_replication for pair in objective.pairs):
+        raise ValueError("weight fitting excludes correlated replication rows")
     _seed_everything(config.seed)
     plan = objective.plan
     names = plan.parameter_names
