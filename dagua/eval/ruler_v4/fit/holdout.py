@@ -44,8 +44,8 @@ class HoldoutPartitions:
         Opaque sealed-row locators grouped by frozen role.
     role_hash : str
         Frozen A15 role-assignment identity binding the persistent record.
-    expected_test_presentations : mapping[str, tuple[str, ...]]
-        Frozen A16 presentation census for each guarded TEST role.
+    expected_test_base_pairs : mapping[str, tuple[str, ...]]
+        Frozen A16 base-pair census for each guarded TEST role.
     expected_test_graphs : mapping[str, tuple[str, ...]]
         Frozen graph-hash census for each guarded TEST role.
 
@@ -61,7 +61,7 @@ class HoldoutPartitions:
     diagnostic: Tuple[JudgmentRow, ...]
     _test_refs_by_role: Mapping[str, Tuple[_SealedJudgmentRef, ...]]
     role_hash: str
-    expected_test_presentations: Mapping[str, Tuple[str, ...]]
+    expected_test_base_pairs: Mapping[str, Tuple[str, ...]]
     expected_test_graphs: Mapping[str, Tuple[str, ...]]
 
     @property
@@ -101,7 +101,7 @@ def partition_holdouts(
             for role in sorted(SEALED_TEST_ROLES)
         }
         role_hash = rows.role_hash
-        expected_test_presentations = rows.expected_test_presentations
+        expected_test_base_pairs = rows.expected_test_base_pairs
         expected_test_graphs = rows.expected_test_graphs
     else:
         source_rows = tuple(rows)
@@ -109,7 +109,7 @@ def partition_holdouts(
             raise ValueError("explicit TEST rows bypass bank label opacity")
         test_refs_by_role = {}
         role_hash = ""
-        expected_test_presentations = {}
+        expected_test_base_pairs = {}
         expected_test_graphs = {}
     grouped = {purpose: [] for purpose in SplitPurpose}
     for row in source_rows:
@@ -121,7 +121,7 @@ def partition_holdouts(
         diagnostic=tuple(grouped[SplitPurpose.DIAGNOSTIC]),
         _test_refs_by_role=MappingProxyType(test_refs_by_role),
         role_hash=role_hash,
-        expected_test_presentations=expected_test_presentations,
+        expected_test_base_pairs=expected_test_base_pairs,
         expected_test_graphs=expected_test_graphs,
     )
 
@@ -255,10 +255,19 @@ class TestHoldoutGuard:
             raise ValueError(f"cannot consume an empty A15 TEST role: {role}")
         if not partitions.role_hash:
             raise ValueError("A15 TEST partition lacks a frozen role hash")
-        actual_presentations = tuple(sorted(str(ref.row_fields["presentation_id"]) for ref in refs))
-        expected_presentations = partitions.expected_test_presentations.get(role, ())
-        if len(actual_presentations) != len(expected_presentations):
-            raise ValueError(f"cannot consume a partial A15 TEST role: {role}")
+        actual_base_pairs = {str(ref.row_fields["base_pair_id"]) for ref in refs}
+        expected_base_pairs = set(partitions.expected_test_base_pairs.get(role, ()))
+        extras = actual_base_pairs - expected_base_pairs
+        if extras:
+            raise ValueError(
+                f"A15 TEST row set is not a subset of its frozen role census: {role}; "
+                f"extras={len(extras)}"
+            )
+        missing = expected_base_pairs - actual_base_pairs
+        if missing:
+            raise ValueError(
+                f"cannot consume a partial A15 TEST role: {role}; missing={len(missing)}"
+            )
         actual_graphs = tuple(sorted({str(ref.row_fields["graph_hash"]) for ref in refs}))
         expected_graphs = partitions.expected_test_graphs.get(role, ())
         if actual_graphs != expected_graphs:

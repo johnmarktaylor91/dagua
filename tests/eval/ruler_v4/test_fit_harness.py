@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import math
 import pickle
@@ -10,7 +11,8 @@ import random
 import runpy
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -201,6 +203,58 @@ def _judgment(purpose: SplitPurpose, suffix: str = "0") -> JudgmentRow:
     )
 
 
+def _load_synthetic_bank(
+    bank_inputs: tuple[Path, ...],
+    schedule_inputs: tuple[Path, ...],
+    family_map_path: Path,
+    frozen_schedule_path: Path,
+    era: Optional[str] = None,
+    instrument_hash: Optional[str] = None,
+) -> bank_module.JudgmentBank:
+    """Load a synthetic bank through the non-campaign digest seam.
+
+    Parameters
+    ----------
+    bank_inputs : tuple[pathlib.Path, ...]
+        Synthetic bank JSONL paths.
+    schedule_inputs : tuple[pathlib.Path, ...]
+        Synthetic delivered-session manifest paths.
+    family_map_path : pathlib.Path
+        Synthetic A15 family map.
+    frozen_schedule_path : pathlib.Path
+        Synthetic frozen A16 schedule.
+    era : str or None
+        Optional exact era selector.
+    instrument_hash : str or None
+        Optional exact instrument selector.
+
+    Returns
+    -------
+    JudgmentBank
+        Loaded synthetic bank.
+
+    Raises
+    ------
+    AssertionError
+        If a test attempts to override the real campaign role hash.
+    """
+
+    family = json.loads(family_map_path.read_text(encoding="utf-8"))
+    role_hash = str(family.get("role_hash", ""))
+    if role_hash == bank_module._FROZEN_A15_ROLE_HASH:
+        raise AssertionError("synthetic digest seam cannot target the frozen campaign role hash")
+    digest = hashlib.sha256(frozen_schedule_path.read_bytes()).hexdigest()
+    with patch.object(bank_module, "_TEST_ONLY_A16_DIGESTS_BY_ROLE_HASH", {role_hash: digest}):
+        return load_bank(
+            bank_inputs,
+            schedule_inputs,
+            family_map_path,
+            frozen_schedule_path,
+            era=era,
+            instrument_hash=instrument_hash,
+        )
+
+
 def _loaded_holdout_fixture(tmp_path: Path) -> tuple[object, Path, Path, Path]:
     """Build a minimal file-backed bank with one FIT and one TEST row.
 
@@ -273,8 +327,7 @@ def _loaded_holdout_fixture(tmp_path: Path) -> tuple[object, Path, Path, Path]:
         "".join(f"{json.dumps(row)}\n" for row in schedule_rows), encoding="utf-8"
     )
     bank_path.write_text("".join(f"{json.dumps(row)}\n" for row in bank_rows), encoding="utf-8")
-    schedule_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
-    bank = load_bank((bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest)
+    bank = _load_synthetic_bank((bank_path,), (schedule_path,), family_path, schedule_path)
     return bank, bank_path, schedule_path, family_path
 
 
@@ -515,10 +568,7 @@ def test_test_holdout_access_fails_closed_on_all_review_defeats(
     with pytest.raises(HoldoutConsumedError):
         HoldoutGuard().consume(partitions, "cross-family-sealed")
 
-    schedule_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
-    reloaded = load_bank(
-        (bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest
-    )
+    reloaded = _load_synthetic_bank((bank_path,), (schedule_path,), family_path, schedule_path)
     with pytest.raises(HoldoutConsumedError):
         HoldoutGuard().consume(partition_holdouts(reloaded), "cross-family-sealed")
 
@@ -544,6 +594,80 @@ def test_holdout_default_ledger_root_is_frozen_campaign_config() -> None:
     assert holdout_module._ACCESS_LEDGER_ROOT == expected
     assert HoldoutGuard()._ledger_root == expected
     assert expected.is_absolute()
+
+
+def test_frozen_schedule_digest_is_pinned_against_real_role_hash_attack(tmp_path: Path) -> None:
+    """A crafted self-attested census cannot target the real ledger identity."""
+
+    _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
+    family = json.loads(family_path.read_text(encoding="utf-8"))
+    crafted_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
+
+    assert "frozen_schedule_digest" not in inspect.signature(load_bank).parameters
+    with patch.object(
+        bank_module,
+        "_load_a15_family_map",
+        return_value=(family["graphs"], bank_module._FROZEN_A15_ROLE_HASH),
+    ):
+        with patch.object(
+            bank_module,
+            "_TEST_ONLY_A16_DIGESTS_BY_ROLE_HASH",
+            {bank_module._FROZEN_A15_ROLE_HASH: crafted_digest},
+        ):
+            with pytest.raises(ValueError, match="digest does not match"):
+                load_bank((bank_path,), (schedule_path,), family_path, schedule_path)
+
+
+def test_holdout_reconciles_replanned_ids_and_rejects_equal_size_content_attack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Base-pair content joins disjoint plan/campaign ids and defeats count swaps."""
+
+    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
+    _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
+    frozen_schedule_path = tmp_path / "PRESENTATION_SCHEDULE.jsonl"
+    frozen_schedule_path.write_bytes(schedule_path.read_bytes())
+    schedule_rows = [
+        json.loads(line) for line in schedule_path.read_text(encoding="utf-8").splitlines()
+    ]
+    bank_rows = [json.loads(line) for line in bank_path.read_text(encoding="utf-8").splitlines()]
+    schedule_rows[1].update(
+        presentation_id="campaign-presentation-test",
+        session_id="main-campaign-session-test",
+        base_pair_id="crafted-pair-same-cardinality",
+    )
+    bank_rows[1].update(
+        presentation_id="campaign-presentation-test",
+        session_id="main-campaign-session-test",
+        base_pair_id="crafted-pair-same-cardinality",
+    )
+    schedule_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in schedule_rows), encoding="utf-8"
+    )
+    bank_path.write_text("".join(f"{json.dumps(row)}\n" for row in bank_rows), encoding="utf-8")
+    attacked = partition_holdouts(
+        _load_synthetic_bank((bank_path,), (schedule_path,), family_path, frozen_schedule_path)
+    )
+
+    assert len(attacked._test_refs_by_role["cross-family-sealed"]) == len(
+        attacked.expected_test_base_pairs["cross-family-sealed"]
+    )
+    with pytest.raises(ValueError, match="not a subset"):
+        HoldoutGuard().consume(attacked, "cross-family-sealed")
+    assert not (tmp_path / "state").exists()
+
+    schedule_rows[1]["base_pair_id"] = "pair-test"
+    bank_rows[1]["base_pair_id"] = "pair-test"
+    schedule_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in schedule_rows), encoding="utf-8"
+    )
+    bank_path.write_text("".join(f"{json.dumps(row)}\n" for row in bank_rows), encoding="utf-8")
+    reconciled = partition_holdouts(
+        _load_synthetic_bank((bank_path,), (schedule_path,), family_path, frozen_schedule_path)
+    )
+
+    assert reconciled.expected_test_base_pairs["cross-family-sealed"] == ("pair-test",)
+    assert len(HoldoutGuard().consume(reconciled, "cross-family-sealed")) == 1
 
 
 def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
@@ -578,16 +702,14 @@ def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
         "".join(f"{json.dumps(row)}\n" for row in (*bank_rows, second_bank)),
         encoding="utf-8",
     )
-    schedule_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
     full = partition_holdouts(
-        load_bank((bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest)
+        _load_synthetic_bank((bank_path,), (schedule_path,), family_path, schedule_path)
     )
-    subset_bank = load_bank(
+    subset_bank = _load_synthetic_bank(
         (bank_path,),
         (schedule_path,),
         family_path,
         schedule_path,
-        schedule_digest,
         era="CF@1",
     )
     subset = partition_holdouts(subset_bank)
@@ -602,12 +724,11 @@ def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
         "".join(f"{json.dumps(row)}\n" for row in bank_rows), encoding="utf-8"
     )
     bank_subset = partition_holdouts(
-        load_bank(
+        _load_synthetic_bank(
             (bank_subset_path,),
             (schedule_path,),
             family_path,
             schedule_path,
-            schedule_digest,
         )
     )
     with pytest.raises(ValueError, match="partial"):
@@ -618,12 +739,11 @@ def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
         "".join(f"{json.dumps(row)}\n" for row in schedule_rows), encoding="utf-8"
     )
     schedule_subset = partition_holdouts(
-        load_bank(
+        _load_synthetic_bank(
             (bank_path,),
             (schedule_subset_path,),
             family_path,
             schedule_path,
-            schedule_digest,
         )
     )
     with pytest.raises(ValueError, match="partial"):
@@ -680,8 +800,7 @@ def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(tmp_path: Pa
     with bank_path.open("a", encoding="utf-8") as handle:
         handle.write(f"{json.dumps(bank_row)}\n")
 
-    schedule_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
-    bank = load_bank((bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest)
+    bank = _load_synthetic_bank((bank_path,), (schedule_path,), family_path, schedule_path)
     partitions = partition_holdouts(bank)
 
     assert bank.guarded_test_count == 1
@@ -738,9 +857,8 @@ def test_sealed_roles_have_separate_labelled_in_tree_ledger_budgets(
         handle.write(f"{json.dumps(schedule_row)}\n")
     with bank_path.open("a", encoding="utf-8") as handle:
         handle.write(f"{json.dumps(bank_row)}\n")
-    schedule_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
     partitions = partition_holdouts(
-        load_bank((bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest)
+        _load_synthetic_bank((bank_path,), (schedule_path,), family_path, schedule_path)
     )
 
     cross_guard = HoldoutGuard()
@@ -784,11 +902,11 @@ def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
     family.write_text('{"graphs": {}}', encoding="utf-8")
 
     with pytest.raises(PermissionError, match="quarantined"):
-        load_bank((pilot,), (schedule,), family, schedule, hashlib.sha256(b"").hexdigest())
+        load_bank((pilot,), (schedule,), family, schedule)
     with pytest.raises(PermissionError, match="quarantined"):
-        load_bank((sealed,), (schedule,), family, schedule, hashlib.sha256(b"").hexdigest())
+        load_bank((sealed,), (schedule,), family, schedule)
     with pytest.raises(PermissionError, match="recursive quarantined"):
-        load_bank((bank_root,), (schedule,), family, schedule, hashlib.sha256(b"").hexdigest())
+        load_bank((bank_root,), (schedule,), family, schedule)
 
 
 def test_frozen_recorded_bank_fixture_has_stable_loader_digest(tmp_path: Path) -> None:
@@ -824,13 +942,11 @@ def test_frozen_recorded_bank_fixture_has_stable_loader_digest(tmp_path: Path) -
         ),
         encoding="utf-8",
     )
-    frozen_digest = hashlib.sha256(frozen_schedule_path.read_bytes()).hexdigest()
-    bank = load_bank(
+    bank = _load_synthetic_bank(
         (bank_path,),
         (schedule_path,),
         family_path,
         frozen_schedule_path,
-        frozen_digest,
     )
     payload = {
         "source": fixture["source"],
@@ -850,9 +966,8 @@ def test_frozen_recorded_bank_fixture_has_stable_loader_digest(tmp_path: Path) -
             for row in bank.rows
         ],
         "guarded_test_count": bank.guarded_test_count,
-        "expected_test_presentations": {
-            role: list(presentations)
-            for role, presentations in bank.expected_test_presentations.items()
+        "expected_test_base_pairs": {
+            role: list(base_pairs) for role, base_pairs in bank.expected_test_base_pairs.items()
         },
         "expected_test_graphs": {
             role: list(graph_hashes) for role, graph_hashes in bank.expected_test_graphs.items()
@@ -861,7 +976,7 @@ def test_frozen_recorded_bank_fixture_has_stable_loader_digest(tmp_path: Path) -
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     assert hashlib.sha256(encoded).hexdigest() == (
-        "c5ef7b4db569527ff695e444e43fca2f8ec32dcfe44742a94ff97e439b4b249e"  # noqa: E501  # pragma: allowlist secret
+        "86d66e6055f042238ca491af8aac24677272743d67e10b3ca47788b0965fecc3"  # noqa: E501  # pragma: allowlist secret
     )
 
 
@@ -872,25 +987,23 @@ def test_bank_loader_validates_a13_labels_and_schedule_schema(tmp_path: Path) ->
     rows = [json.loads(line) for line in bank_path.read_text(encoding="utf-8").splitlines()]
     rows[0].update({"verdict": 0, "tie": False})
     bank_path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
-    schedule_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
-    implicit_abstain = load_bank(
-        (bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest
+    implicit_abstain = _load_synthetic_bank(
+        (bank_path,), (schedule_path,), family_path, schedule_path
     )
     assert implicit_abstain.report.excluded_invalid == 1
 
     rows[0].update({"verdict": 2, "tie": True})
     bank_path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
     with pytest.raises(ValueError, match="verdict and tie"):
-        load_bank((bank_path,), (schedule_path,), family_path, schedule_path, schedule_digest)
+        _load_synthetic_bank((bank_path,), (schedule_path,), family_path, schedule_path)
 
     schedule_path.write_text("{}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="lacks presentation identities"):
-        load_bank(
+        _load_synthetic_bank(
             (bank_path,),
             (schedule_path,),
             family_path,
             schedule_path,
-            hashlib.sha256(schedule_path.read_bytes()).hexdigest(),
         )
 
 

@@ -575,8 +575,10 @@ the production port; none of the entries below overrides a contract.
     (e) also requires the ledger root to remain the injected absolute campaign
     home, never checkout-derived; (f) requires the sealed census to remain sourced
     only from the verified A15 role hash and frozen A16 schedule digest, with a
-    partial release failing closed. The shipped seal implements these (e)/(f)
-    boundaries; the (a)-(d) calibration path remains open. OWNER: campaign
+    partial release failing closed. The shipped seal implements (e) and pins
+    (f)'s A16 digest in-package; its census reconciles the superseded 341-session
+    plan with the delivered 370-session campaign in stable `base_pair_id` space.
+    The (a)-(d) calibration path remains open. OWNER: campaign
     activation must add the content-bound four-look ledger and metadata accessor
     before calibration is used for stopping or capacity selection.
 48. Outer-weight split-half CIs and JND/strict-win uncertainty publications are
@@ -621,3 +623,11 @@ the production port; none of the entries below overrides a contract.
     claims compliance. OWNER: the freeze-fit implementation must publish C-06
     beside the ledgered JND `+2` and execute the frozen response if audited
     complexity exceeds the allocation.
+55. The frozen A16 schedule's 341-session presentation-id space is disjoint from
+    the delivered 370-session campaign after replanning re-minted presentation
+    and session ids. The sealed roles reconcile exactly in the stable,
+    LOOK-LEDGER(a-bis)-whitelisted `base_pair_id` space: 479 cross-family and
+    622 within-family pairs, with zero extras in either direction. The TEST seal
+    therefore enforces content subset and completeness in base-pair space while
+    retaining the independent graph census check. OWNER: the next protocol
+    addendum should record this already-enforced reconciliation explicitly.
