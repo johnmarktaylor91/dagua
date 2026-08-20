@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import DefaultDict, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -292,7 +292,7 @@ def jnd_band_calibration(
         if cell not in jnd_by_cell:
             raise ValueError(f"JND missing for calibration cell: {cell}")
         jnd = float(jnd_by_cell[cell])
-        adjusted = tuple(FitPair(**{**member.__dict__, "jnd": jnd}) for member in members)
+        adjusted = tuple(replace(member, jnd=jnd) for member in members)
         objective = PairwiseObjective(adjusted, plan)
         metrics = evaluate_objective(objective, weights)
         rows.append(
