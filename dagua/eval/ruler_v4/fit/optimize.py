@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import math
-import random
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping, Tuple
 
-import numpy as np
 import torch
 
 from dagua.eval.ruler_v4.fit.bank import SplitPurpose
@@ -119,21 +117,6 @@ class FitResult:
         object.__setattr__(self, "at_bounds", MappingProxyType(at_bounds))
 
 
-def _seed_everything(seed: int) -> None:
-    """Seed every RNG used by the fitting harness.
-
-    Parameters
-    ----------
-    seed : int
-        Nonnegative deterministic seed.
-    """
-
-    random.seed(seed)
-    np.random.seed(seed % (2**32))
-    torch.manual_seed(seed)
-    torch.use_deterministic_algorithms(True)
-
-
 def fit_weights(objective: PairwiseObjective, config: OptimizerConfig) -> FitResult:
     """Fit bounded weights with deterministic projected Adam.
 
@@ -165,7 +148,6 @@ def fit_weights(objective: PairwiseObjective, config: OptimizerConfig) -> FitRes
         raise ValueError("weight fitting accepts A15 FIT rows only")
     if any(pair.is_replication for pair in objective.pairs):
         raise ValueError("weight fitting excludes correlated replication rows")
-    _seed_everything(config.seed)
     plan = objective.plan
     names = plan.parameter_names
     lower = torch.tensor([parameter.lower for parameter in plan.weights], dtype=objective.dtype)

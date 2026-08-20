@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import pickle
+import random
 from dataclasses import replace
 from pathlib import Path
 from typing import Dict
@@ -284,6 +285,31 @@ def test_synthetic_judgments_recover_known_weights_deterministically() -> None:
     assert first.weights["w_structure"] == pytest.approx(0.6, abs=0.15)
     assert first.weights["w_neighborhood"] == pytest.approx(1.6, abs=0.15)
     assert first.losses[-1] < first.losses[0]
+
+
+def test_weight_fit_preserves_host_rng_and_determinism_state() -> None:
+    """A deterministic fit does not mutate process-global random state."""
+
+    random.seed(19)
+    np.random.seed(23)
+    torch.manual_seed(29)
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_state = torch.random.get_rng_state()
+    deterministic = torch.are_deterministic_algorithms_enabled()
+
+    objective = PairwiseObjective(
+        _synthetic_recovery_rows(count=4), FittingPlan(_weight_parameters())
+    )
+    fit_weights(objective, OptimizerConfig(seed=20260811, steps=1))
+
+    assert random.getstate() == python_state
+    current_numpy_state = np.random.get_state()
+    assert current_numpy_state[0] == numpy_state[0]
+    assert np.array_equal(current_numpy_state[1], numpy_state[1])
+    assert current_numpy_state[2:] == numpy_state[2:]
+    assert torch.equal(torch.random.get_rng_state(), torch_state)
+    assert torch.are_deterministic_algorithms_enabled() is deterministic
 
 
 def test_prior_penalty_scales_as_one_dataset_prior_not_per_row() -> None:
