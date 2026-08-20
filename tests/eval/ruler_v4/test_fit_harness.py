@@ -461,7 +461,7 @@ def test_test_holdout_access_fails_closed_on_all_review_defeats(
 ) -> None:
     """TEST labels stay opaque and content-bound across every review attack."""
 
-    monkeypatch.setattr(holdout_module, "_TEST_HOLDOUT_STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
     bank, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
     partitions = partition_holdouts(bank)
 
@@ -474,19 +474,19 @@ def test_test_holdout_access_fails_closed_on_all_review_defeats(
         HoldoutGuard(tmp_path / "alternate-record.json")
 
     first = HoldoutGuard()
-    consumed = first.consume(partitions)
+    consumed = first.consume(partitions, "cross-family-sealed")
 
     assert len(consumed) == 1
     assert consumed[0].purpose is SplitPurpose.TEST
     assert consumed[0].verdict == 3
     with pytest.raises(HoldoutConsumedError):
-        first.consume(partitions)
+        first.consume(partitions, "cross-family-sealed")
     with pytest.raises(HoldoutConsumedError):
-        HoldoutGuard().consume(partitions)
+        HoldoutGuard().consume(partitions, "cross-family-sealed")
 
     reloaded = load_bank((bank_path,), (schedule_path,), family_path)
     with pytest.raises(HoldoutConsumedError):
-        HoldoutGuard().consume(partition_holdouts(reloaded))
+        HoldoutGuard().consume(partition_holdouts(reloaded), "cross-family-sealed")
 
 
 def test_test_holdout_refuses_empty_partition_before_spending(
@@ -494,11 +494,11 @@ def test_test_holdout_refuses_empty_partition_before_spending(
 ) -> None:
     """The natural ``partition_holdouts(bank.rows)`` composition cannot burn TEST."""
 
-    monkeypatch.setattr(holdout_module, "_TEST_HOLDOUT_STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
     bank, _, _, _ = _loaded_holdout_fixture(tmp_path)
     empty_test = partition_holdouts(bank.rows)
     with pytest.raises(ValueError, match="empty"):
-        HoldoutGuard().consume(empty_test)
+        HoldoutGuard().consume(empty_test, "cross-family-sealed")
     assert not (tmp_path / "state").exists()
 
 
@@ -507,7 +507,7 @@ def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
 ) -> None:
     """Loader selectors cannot mint a fresh one-shot or spend a partial seal."""
 
-    monkeypatch.setattr(holdout_module, "_TEST_HOLDOUT_STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
     _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
     schedule_rows = [
         json.loads(line) for line in schedule_path.read_text(encoding="utf-8").splitlines()
@@ -540,13 +540,13 @@ def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
 
     assert full.role_hash == subset.role_hash
     with pytest.raises(ValueError, match="partial"):
-        HoldoutGuard().consume(subset)
+        HoldoutGuard().consume(subset, "cross-family-sealed")
     assert not (tmp_path / "state").exists()
 
-    consumed = HoldoutGuard().consume(full)
+    consumed = HoldoutGuard().consume(full, "cross-family-sealed")
     assert len(consumed) == 2
     with pytest.raises(HoldoutConsumedError):
-        HoldoutGuard().consume(full)
+        HoldoutGuard().consume(full, "cross-family-sealed")
 
 
 def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(tmp_path: Path) -> None:
@@ -600,6 +600,72 @@ def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(tmp_path: Pa
     assert bank.select(purpose=SplitPurpose.REUSABLE_HOLDOUT) == partitions.reusable_holdout
     assert len(partitions.reusable_holdout) == 1
     assert partitions.reusable_holdout[0].role == "entire-class-holdout"
+
+
+def test_sealed_roles_have_separate_labelled_in_tree_ledger_budgets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Within/cross sealed roles each append one independently budgeted record."""
+
+    ledger_root = tmp_path / "p3/gate/ACCESS_LEDGER"
+    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", ledger_root)
+    _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
+    family = json.loads(family_path.read_text(encoding="utf-8"))
+    family["graphs"]["within-test-graph"] = {
+        "role": "within-family-sealed",
+        "primary_class": "class",
+        "size_band": "band",
+        "generator_family": "family",
+    }
+    role_lines = "\n".join(
+        f"{graph_hash}\t{graph['role']}" for graph_hash, graph in sorted(family["graphs"].items())
+    )
+    family["role_hash"] = hashlib.sha256(role_lines.encode("utf-8")).hexdigest()
+    family_path.write_text(json.dumps(family), encoding="utf-8")
+    schedule_row = {
+        "presentation_id": "presentation-within",
+        "session_id": "session-within",
+        "base_pair_id": "pair-within",
+        "graph_hash": "within-test-graph",
+        "blind_id_A": "A-within",
+        "blind_id_B": "B-within",
+        "profile_opaque_id": "profile",
+        "budget_line": "PRIMARY",
+    }
+    bank_row = {
+        "presentation_id": "presentation-within",
+        "session_id": "session-within",
+        "base_pair_id": "pair-within",
+        "graph_hash": "within-test-graph",
+        "session_accepted": True,
+        "instrument_hash": "instrument",
+        "judge_id": "judge/CF@4",
+        "verdict": -2,
+        "tie": False,
+        "confidence": 3,
+        "side_bit": 0,
+    }
+    with schedule_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(schedule_row)}\n")
+    with bank_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(bank_row)}\n")
+    partitions = partition_holdouts(load_bank((bank_path,), (schedule_path,), family_path))
+
+    cross = HoldoutGuard().consume(partitions, "cross-family-sealed")
+    within = HoldoutGuard().consume(partitions, "within-family-sealed")
+
+    assert [row.role for row in cross] == ["cross-family-sealed"]
+    assert [row.role for row in within] == ["within-family-sealed"]
+    ledger_path = ledger_root / f"{partitions.role_hash}.jsonl"
+    records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert [(record["role"], record["label"], record["budget"]) for record in records] == [
+        ("cross-family-sealed", "cross", 1),
+        ("within-family-sealed", "within", 1),
+    ]
+    with pytest.raises(HoldoutConsumedError):
+        HoldoutGuard().consume(partitions, "cross-family-sealed")
+    with pytest.raises(HoldoutConsumedError):
+        HoldoutGuard().consume(partitions, "within-family-sealed")
 
 
 def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:

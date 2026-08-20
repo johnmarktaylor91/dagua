@@ -7,9 +7,11 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Tuple, Union
+from types import MappingProxyType
+from typing import Iterable, Mapping, Tuple, Union
 
 from dagua.eval.ruler_v4.fit.bank import (
+    SEALED_TEST_ROLES,
     JudgmentBank,
     JudgmentRow,
     SplitPurpose,
@@ -17,7 +19,7 @@ from dagua.eval.ruler_v4.fit.bank import (
     _SealedJudgmentRef,
 )
 
-_TEST_HOLDOUT_STATE_ROOT = Path.home() / ".local/state/dagua/ruler_v4/test-holdout"
+_ACCESS_LEDGER_ROOT = Path(__file__).resolve().parents[4] / "p3/gate/ACCESS_LEDGER"
 
 
 class TestHoldoutConsumedError(RuntimeError):
@@ -38,21 +40,21 @@ class HoldoutPartitions:
         Reusable adversarial diagnostic rows, never fitted.
     reusable_holdout : tuple[JudgmentRow, ...]
         Reusable entire-class holdout rows, never fitted.
-    _test_refs : tuple[_SealedJudgmentRef, ...]
-        Opaque sealed-row locators without verdicts or tie labels.
+    _test_refs_by_role : mapping[str, tuple[_SealedJudgmentRef, ...]]
+        Opaque sealed-row locators grouped by frozen role.
     role_hash : str
         Frozen A15 role-assignment identity binding the persistent record.
-    expected_test_presentations : tuple[str, ...]
-        Complete scheduled presentation census for guarded TEST roles.
+    expected_test_presentations : mapping[str, tuple[str, ...]]
+        Complete scheduled presentation census for each guarded TEST role.
     """
 
     fit: Tuple[JudgmentRow, ...]
     validate: Tuple[JudgmentRow, ...]
     reusable_holdout: Tuple[JudgmentRow, ...]
     diagnostic: Tuple[JudgmentRow, ...]
-    _test_refs: Tuple[_SealedJudgmentRef, ...]
+    _test_refs_by_role: Mapping[str, Tuple[_SealedJudgmentRef, ...]]
     role_hash: str
-    expected_test_presentations: Tuple[str, ...]
+    expected_test_presentations: Mapping[str, Tuple[str, ...]]
 
     @property
     def test_count(self) -> int:
@@ -64,7 +66,7 @@ class HoldoutPartitions:
             Guarded test-row count.
         """
 
-        return len(self._test_refs)
+        return sum(len(refs) for refs in self._test_refs_by_role.values())
 
 
 def partition_holdouts(
@@ -86,15 +88,19 @@ def partition_holdouts(
     if isinstance(rows, JudgmentBank):
         source_rows = rows.rows
         test_refs = rows._partition_test_refs()
+        test_refs_by_role = {
+            role: tuple(ref for ref in test_refs if ref.row_fields["role"] == role)
+            for role in sorted(SEALED_TEST_ROLES)
+        }
         role_hash = rows.role_hash
         expected_test_presentations = rows.expected_test_presentations
     else:
         source_rows = tuple(rows)
         if any(row.purpose is SplitPurpose.TEST for row in source_rows):
             raise ValueError("explicit TEST rows bypass bank label opacity")
-        test_refs = ()
+        test_refs_by_role = {}
         role_hash = ""
-        expected_test_presentations = ()
+        expected_test_presentations = {}
     grouped = {purpose: [] for purpose in SplitPurpose}
     for row in source_rows:
         grouped[row.purpose].append(row)
@@ -103,7 +109,7 @@ def partition_holdouts(
         validate=tuple(grouped[SplitPurpose.VALIDATE]),
         reusable_holdout=tuple(grouped[SplitPurpose.REUSABLE_HOLDOUT]),
         diagnostic=tuple(grouped[SplitPurpose.DIAGNOSTIC]),
-        _test_refs=test_refs,
+        _test_refs_by_role=MappingProxyType(test_refs_by_role),
         role_hash=role_hash,
         expected_test_presentations=expected_test_presentations,
     )
@@ -116,6 +122,7 @@ class TestHoldoutGuard:
         """Initialize a guard without accepting a caller-chosen record path."""
 
         self._path: Union[Path, None] = None
+        self._lock_path: Union[Path, None] = None
         self._consumed_in_process = False
 
     @property
@@ -130,8 +137,8 @@ class TestHoldoutGuard:
 
         return self._consumed_in_process or (self._path is not None and self._path.exists())
 
-    def consume(self, partitions: HoldoutPartitions) -> Tuple[JudgmentRow, ...]:
-        """Touch and return A15 TEST labels exactly once.
+    def consume(self, partitions: HoldoutPartitions, role: str) -> Tuple[JudgmentRow, ...]:
+        """Touch and return one labelled A15 sealed role exactly once.
 
         The access record is reserved before rows are returned. A crash after
         reservation therefore spends the test set instead of allowing a retry.
@@ -140,6 +147,8 @@ class TestHoldoutGuard:
         ----------
         partitions : HoldoutPartitions
             Partitions whose private TEST rows will be consumed.
+        role : str
+            ``within-family-sealed`` or ``cross-family-sealed``.
 
         Returns
         -------
@@ -150,54 +159,69 @@ class TestHoldoutGuard:
         ------
         TestHoldoutConsumedError
             If TEST was touched previously in this or another process.
+        ValueError
+            If the role is invalid or its release is empty or partial.
         """
 
         if self._consumed_in_process:
             raise TestHoldoutConsumedError("A15 TEST has already been touched")
-        if not partitions._test_refs:
-            raise ValueError("cannot consume an empty A15 TEST partition")
+        if role not in SEALED_TEST_ROLES:
+            raise ValueError(f"unknown A15 sealed role: {role!r}")
+        refs = partitions._test_refs_by_role.get(role, ())
+        if not refs:
+            raise ValueError(f"cannot consume an empty A15 TEST role: {role}")
         if not partitions.role_hash:
             raise ValueError("A15 TEST partition lacks a frozen role hash")
-        actual_presentations = tuple(
-            sorted(str(ref.row_fields["presentation_id"]) for ref in partitions._test_refs)
-        )
-        if actual_presentations != partitions.expected_test_presentations:
-            raise ValueError("cannot consume a partial A15 TEST partition")
-        path = _TEST_HOLDOUT_STATE_ROOT / f"{partitions.role_hash}.json"
+        actual_presentations = tuple(sorted(str(ref.row_fields["presentation_id"]) for ref in refs))
+        expected_presentations = partitions.expected_test_presentations.get(role, ())
+        if actual_presentations != expected_presentations:
+            raise ValueError(f"cannot consume a partial A15 TEST role: {role}")
+        path = _ACCESS_LEDGER_ROOT / f"{partitions.role_hash}.jsonl"
+        lock_path = _ACCESS_LEDGER_ROOT / f"{partitions.role_hash}.{role}.1.lock"
         if self._path is not None and self._path != path:
             raise ValueError("one guard instance cannot consume different TEST banks")
         self._path = path
+        self._lock_path = lock_path
         self._path.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
-        for ref in partitions._test_refs:
+        for ref in refs:
             digest.update(str(ref.row_fields["presentation_id"]).encode("utf-8"))
             digest.update(b"\0")
         presentation_digest = digest.hexdigest()
-        payload = json.dumps(
-            {
-                "state": "CONSUMED",
-                "role_hash": partitions.role_hash,
-                "row_count": len(partitions._test_refs),
-                "presentation_digest": presentation_digest,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
+        role_label = "within" if role == "within-family-sealed" else "cross"
+        payload = (
+            json.dumps(
+                {
+                    "state": "CONSUMED",
+                    "role_hash": partitions.role_hash,
+                    "role": role,
+                    "label": role_label,
+                    "budget": 1,
+                    "row_count": len(refs),
+                    "presentation_digest": presentation_digest,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
         ).encode("utf-8")
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
         try:
-            descriptor = os.open(self._path, flags, 0o600)
+            lock_descriptor = os.open(self._lock_path, flags, 0o600)
         except FileExistsError as error:
-            existing = json.loads(self._path.read_text(encoding="utf-8"))
-            if (
-                existing.get("role_hash") != partitions.role_hash
-                or existing.get("presentation_digest") != presentation_digest
-            ):
-                raise ValueError("A15 TEST access record disagrees with the partition") from error
-            raise TestHoldoutConsumedError("A15 TEST has already been touched") from error
+            raise TestHoldoutConsumedError(
+                f"A15 TEST role has already been touched: {role}"
+            ) from error
+        try:
+            os.fsync(lock_descriptor)
+        finally:
+            os.close(lock_descriptor)
+        ledger_flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
+        descriptor = os.open(self._path, ledger_flags, 0o600)
         try:
             os.write(descriptor, payload)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
         self._consumed_in_process = True
-        return _reveal_test_rows(partitions._test_refs)
+        return _reveal_test_rows(refs)
