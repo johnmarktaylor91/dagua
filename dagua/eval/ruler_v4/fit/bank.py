@@ -229,15 +229,18 @@ class JudgmentBank:
         Stable presentation-sorted reusable inputs. TEST labels are absent.
     _test_refs : tuple[_SealedJudgmentRef, ...]
         Stable opaque TEST source references without verdict or tie fields.
-    bank_identity : str
-        Content identity used to bind the persistent TEST access record.
+    role_hash : str
+        Frozen A15 role-assignment identity binding the TEST access record.
+    expected_test_presentations : tuple[str, ...]
+        Complete scheduled presentation census for guarded TEST roles.
     report : BankLoadReport
         Inclusion and exclusion audit.
     """
 
     _rows: Tuple[JudgmentRow, ...]
     _test_refs: Tuple[_SealedJudgmentRef, ...]
-    bank_identity: str
+    role_hash: str
+    expected_test_presentations: Tuple[str, ...]
     report: BankLoadReport
 
     @property
@@ -576,8 +579,10 @@ def load_schedule(inputs: Iterable[PathLike]) -> Mapping[Tuple[str, str], Schedu
     return MappingProxyType(schedule)
 
 
-def _load_a15_graphs(path: PathLike) -> Mapping[str, Mapping[str, Any]]:
-    """Load graph roles and strata from the frozen A15 family map.
+def _load_a15_family_map(
+    path: PathLike,
+) -> Tuple[Mapping[str, Mapping[str, Any]], str]:
+    """Load and verify graph roles from the frozen A15 family map.
 
     Parameters
     ----------
@@ -586,8 +591,13 @@ def _load_a15_graphs(path: PathLike) -> Mapping[str, Mapping[str, Any]]:
 
     Returns
     -------
-    mapping[str, mapping[str, Any]]
-        Graph metadata keyed by canonical hash.
+    tuple[mapping[str, mapping[str, Any]], str]
+        Graph metadata keyed by canonical hash and the verified role hash.
+
+    Raises
+    ------
+    ValueError
+        If the graph mapping or its frozen role hash is absent or inconsistent.
     """
 
     with Path(path).open("r", encoding="utf-8") as handle:
@@ -595,7 +605,18 @@ def _load_a15_graphs(path: PathLike) -> Mapping[str, Mapping[str, Any]]:
     graphs = payload.get("graphs") if isinstance(payload, dict) else None
     if not isinstance(graphs, dict):
         raise ValueError("A15 family map has no graph mapping")
-    return graphs
+    role_hash = payload.get("role_hash")
+    if not isinstance(role_hash, str) or not role_hash:
+        raise ValueError("A15 family map has no frozen role hash")
+    role_lines = []
+    for graph_hash, graph in sorted(graphs.items()):
+        if not isinstance(graph, dict) or not isinstance(graph.get("role"), str):
+            raise ValueError(f"A15 graph lacks a frozen role: {graph_hash}")
+        role_lines.append(f"{graph_hash}\t{graph['role']}")
+    computed = hashlib.sha256("\n".join(role_lines).encode("utf-8")).hexdigest()
+    if computed != role_hash:
+        raise ValueError("A15 family-map role hash does not match its graph census")
+    return graphs, role_hash
 
 
 def _era(judge_id: object) -> str:
@@ -656,10 +677,20 @@ def load_bank(
 
     paths = _bank_jsonl_paths(bank_inputs)
     schedule = load_schedule(schedule_inputs)
-    graph_map = _load_a15_graphs(family_map_path)
+    graph_map, role_hash = _load_a15_family_map(family_map_path)
+    expected_test_presentations = tuple(
+        sorted(
+            scheduled.presentation_id
+            for scheduled in schedule.values()
+            if scheduled.control_type is None
+            and scheduled.budget_line not in _NON_FITTING_BUDGET_LINES
+            and scheduled.graph_hash in graph_map
+            and _ROLE_PURPOSE.get(str(graph_map[scheduled.graph_hash].get("role", "")))
+            is SplitPurpose.TEST
+        )
+    )
     rows = []
     test_refs = []
-    bank_identity = hashlib.sha256(Path(family_map_path).read_bytes())
     counts = {
         "raw_rows": 0,
         "excluded_rejected_session": 0,
@@ -743,10 +774,6 @@ def load_bank(
                 "source_path": str(path),
             }
             if purpose is SplitPurpose.TEST:
-                bank_identity.update(
-                    json.dumps(raw, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                )
-                bank_identity.update(b"\0")
                 test_refs.append(
                     _SealedJudgmentRef(
                         source_path=str(path), source_line=source_line, row_fields=row_fields
@@ -784,6 +811,7 @@ def load_bank(
     return JudgmentBank(
         _rows=ordered,
         _test_refs=ordered_refs,
-        bank_identity=bank_identity.hexdigest(),
+        role_hash=role_hash,
+        expected_test_presentations=expected_test_presentations,
         report=report,
     )
