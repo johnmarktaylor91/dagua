@@ -141,15 +141,21 @@ def fit_weights(objective: PairwiseObjective, config: OptimizerConfig) -> FitRes
     Raises
     ------
     ValueError
-        If non-FIT or replication rows reach the weight optimizer.
+        If a non-FIT row reaches the weight optimizer.
+    NotImplementedError
+        If a real row reaches the low-level fixed-lapse optimizer before the
+        pilot lapse prior's family and strength are frozen.
     FloatingPointError
         If the objective or a gradient becomes nonfinite.
     """
 
     if any(pair.purpose is not SplitPurpose.FIT for pair in objective.pairs):
         raise ValueError("weight fitting accepts A15 FIT rows only")
-    if any(pair.is_replication for pair in objective.pairs):
-        raise ValueError("weight fitting excludes correlated replication rows")
+    if any(not pair.synthetic for pair in objective.pairs):
+        raise NotImplementedError(
+            "real FIT-ORD fitting is fail-closed because ADDENDUM-27 does not "
+            "freeze the pilot lapse prior family or strength"
+        )
     plan = objective.plan
     names = plan.parameter_names
     lower = torch.tensor([parameter.lower for parameter in plan.weights], dtype=objective.dtype)

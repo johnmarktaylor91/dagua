@@ -38,6 +38,30 @@ class EvaluationMetrics:
 
 
 @dataclass(frozen=True)
+class OrderedCalibrationBin:
+    """Publish observed and predicted ordered responses in one score decile.
+
+    Parameters
+    ----------
+    decile : int
+        One-based score-difference decile.
+    count : int
+        Rows assigned to the bin.
+    difference_min, difference_max : float
+        Inclusive score-difference range.
+    observed, predicted : tuple[float, ...]
+        Seven category frequencies in verdict order ``-3`` through ``+3``.
+    """
+
+    decile: int
+    count: int
+    difference_min: float
+    difference_max: float
+    observed: Tuple[float, ...]
+    predicted: Tuple[float, ...]
+
+
+@dataclass(frozen=True)
 class JNDCellCalibration:
     """Publish calibration for one class/size-band JND cell.
 
@@ -216,7 +240,7 @@ def evaluate_objective(
     vector = torch.tensor(
         [weights[name] for name in objective.plan.parameter_names], dtype=objective.dtype
     )
-    probabilities = objective.outcome_probabilities(vector).detach()
+    probabilities = objective.directional_probabilities(vector).detach()
     truth = torch.tensor([pair.outcome + 1 for pair in objective.pairs], dtype=torch.int64)
     predictions = probabilities.argmax(dim=1)
     accuracy = float((predictions == truth).to(torch.float64).mean())
@@ -230,6 +254,55 @@ def evaluate_objective(
         tie_rate_observed=observed_tie,
         tie_rate_predicted=predicted_tie,
     )
+
+
+def ordered_response_calibration(
+    objective: PairwiseObjective, weights: Mapping[str, float]
+) -> Tuple[OrderedCalibrationBin, ...]:
+    """Build the frozen observed-vs-predicted table by decile of ``d_j``.
+
+    Parameters
+    ----------
+    objective : PairwiseObjective
+        One ordered-probit likelihood stratum.
+    weights : mapping[str, float]
+        Fitted outer weights keyed by plan identity.
+
+    Returns
+    -------
+    tuple[OrderedCalibrationBin, ...]
+        Up to ten nonempty rank-balanced score-difference bins.
+    """
+
+    vector = torch.tensor(
+        [weights[name] for name in objective.plan.parameter_names], dtype=objective.dtype
+    )
+    differences = objective.score_differences(vector).detach()
+    probabilities = objective.outcome_probabilities(vector).detach()
+    order = torch.argsort(differences, stable=True)
+    count = len(objective.pairs)
+    bins: list[OrderedCalibrationBin] = []
+    for decile in range(10):
+        start = decile * count // 10
+        stop = (decile + 1) * count // 10
+        if start == stop:
+            continue
+        indices = order[start:stop]
+        observed_counts = [0] * 7
+        for index in indices.tolist():
+            observed_counts[objective.pairs[index].graded_verdict + 3] += 1
+        member_count = stop - start
+        bins.append(
+            OrderedCalibrationBin(
+                decile=decile + 1,
+                count=member_count,
+                difference_min=float(differences[indices].min()),
+                difference_max=float(differences[indices].max()),
+                observed=tuple(value / member_count for value in observed_counts),
+                predicted=tuple(float(value) for value in probabilities[indices].mean(dim=0)),
+            )
+        )
+    return tuple(bins)
 
 
 def facet_weight_paths(
