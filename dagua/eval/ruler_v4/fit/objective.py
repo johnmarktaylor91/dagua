@@ -606,5 +606,5 @@ class PairwiseObjective:
         nll = self.negative_log_likelihood(weights)
         if self.plan.prior_strength == 0.0:
             return nll
-        shrinkage = torch.square(torch.log(weights / self._priors) / math.log(4.0)).mean()
-        return nll + self.plan.prior_strength * shrinkage
+        shrinkage = torch.square(torch.log(weights / self._priors) / math.log(4.0)).sum()
+        return nll + self.plan.prior_strength * shrinkage / len(self.pairs)

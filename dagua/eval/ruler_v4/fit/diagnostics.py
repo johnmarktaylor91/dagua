@@ -464,8 +464,10 @@ def fit_jnd_heterogeneity(
         probabilities = (1.0 - lapse.unsqueeze(1)) * probabilities + lapse.unsqueeze(1) / 3.0
         selected_probability = probabilities.gather(1, outcomes.unsqueeze(1)).squeeze(1)
         nll = -torch.log(torch.clamp(selected_probability, min=1.0e-12)).mean()
-        penalty = config.shrinkage * (
-            torch.square(class_effects).mean() + torch.square(band_effects).mean()
+        penalty = (
+            config.shrinkage
+            * (torch.square(class_effects).sum() + torch.square(band_effects).sum())
+            / len(selected)
         )
         loss = nll + penalty
         if not bool(torch.isfinite(loss)):
