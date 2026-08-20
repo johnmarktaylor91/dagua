@@ -41,7 +41,10 @@ from dagua.eval.ruler_v4.fit import (
     fit_weights,
     jnd_band_calibration,
     load_bank,
+    ordered_response_calibration,
+    partition_fit_ord_lines,
     partition_holdouts,
+    synthetic_fit_pair,
 )
 from dagua.eval.ruler_v4.fit import (
     TestHoldoutConsumedError as HoldoutConsumedError,
@@ -117,7 +120,7 @@ def _fitted_weight_table() -> WeightTable:
 
 
 def _synthetic_recovery_rows(count: int = 1500) -> tuple[FitPair, ...]:
-    """Sample judgments from known P-mean weights.
+    """Sample seven-point probit judgments from known P-mean weights.
 
     Parameters
     ----------
@@ -142,17 +145,21 @@ def _synthetic_recovery_rows(count: int = 1500) -> tuple[FitPair, ...]:
         difference = (fixed_a + float(numerator_a @ truth)) / mass
         difference -= (fixed_b + float(numerator_b @ truth)) / mass
         jnd = 0.18
-        probability_a = 1.0 / (1.0 + math.exp(jnd + difference))
-        upper = 1.0 / (1.0 + math.exp(difference - jnd))
-        probabilities = (probability_a, upper - probability_a, 1.0 - upper)
-        outcome = int(generator.choice((-1, 0, 1), p=probabilities))
+        cutpoints = np.asarray((-3, -2, -1, 1, 2, 3), dtype=np.float64) * jnd
+        cdf = np.asarray(
+            [
+                0.5 * (1.0 + math.erf((cutpoint - difference) / math.sqrt(2.0)))
+                for cutpoint in cutpoints
+            ]
+        )
+        probabilities = np.diff(np.concatenate(([0.0], cdf, [1.0])))
+        verdict = int(generator.choice(tuple(range(-3, 4)), p=probabilities))
         rows.append(
-            FitPair(
+            synthetic_fit_pair(
                 numerator_a=tuple(numerator_a),
                 numerator_b=tuple(numerator_b),
                 mass_coefficients=(1.0, 1.0),
-                outcome=outcome,
-                graded_verdict=outcome,
+                graded_verdict=verdict,
                 fixed_numerator_a=fixed_a,
                 fixed_numerator_b=fixed_b,
                 fixed_mass=1.0,
@@ -356,8 +363,8 @@ def test_synthetic_judgments_recover_known_weights_deterministically() -> None:
     assert first == second
     # These are sample-MLE regression pins, not claims about one draw recovering
     # population truth more tightly than its measured sampling error.
-    assert first.weights["w_structure"] == pytest.approx(0.7135333, abs=1.0e-6)
-    assert first.weights["w_neighborhood"] == pytest.approx(1.6472902, abs=1.0e-6)
+    assert first.weights["w_structure"] == pytest.approx(0.6431144, abs=1.0e-6)
+    assert first.weights["w_neighborhood"] == pytest.approx(1.5997255, abs=1.0e-6)
     assert first.losses[-1] < first.losses[0]
 
 
@@ -391,17 +398,20 @@ def test_prior_penalty_scales_as_one_dataset_prior_not_per_row() -> None:
     """A fixed prior contribution vanishes relative to growing evidence."""
 
     rows = _synthetic_recovery_rows(count=8)
-    plan = FittingPlan(_weight_parameters(), prior_strength=0.1)
+    plan = FittingPlan(_weight_parameters())
     objective = PairwiseObjective(rows, plan)
     weights = torch.tensor((0.5, 2.0), dtype=torch.float64)
     penalty = objective.loss(weights) - objective.negative_log_likelihood(weights)
     expected_sum = sum((math.log(value) / math.log(4.0)) ** 2 for value in (0.5, 2.0))
 
-    assert float(penalty) == pytest.approx(0.1 * expected_sum / len(rows))
+    assert plan.prior_strength == 2.0
+    assert float(penalty) == pytest.approx(2.0 * expected_sum / len(rows))
+    with pytest.raises(TypeError, match="prior_strength"):
+        FittingPlan(_weight_parameters(), prior_strength=0.1)
 
 
-def test_objective_refuses_silent_graded_verdict_collapse() -> None:
-    """A 7-point A13 response cannot silently enter the three-way model."""
+def test_objective_consumes_all_seven_graded_verdicts_with_probit_cutpoints() -> None:
+    """The full A13 scale reaches the fixed-ratio ordered-probit likelihood."""
 
     with pytest.raises(TypeError, match="graded_verdict"):
         FitPair(
@@ -410,19 +420,54 @@ def test_objective_refuses_silent_graded_verdict_collapse() -> None:
             mass_coefficients=(1.0,),
             outcome=1,
         )
-    row = replace(_synthetic_recovery_rows(count=1)[0], outcome=1, graded_verdict=3)
-    with pytest.raises(ValueError, match="ordered-probit"):
-        PairwiseObjective((row,), FittingPlan(_weight_parameters()))
+    rows = tuple(
+        replace(
+            _synthetic_recovery_rows(count=1)[0],
+            outcome=0 if verdict == 0 else (1 if verdict > 0 else -1),
+            graded_verdict=verdict,
+        )
+        for verdict in range(-3, 4)
+    )
+    objective = PairwiseObjective(rows, FittingPlan(_weight_parameters()))
+    weights = torch.tensor((1.0, 1.0), dtype=torch.float64)
+    probabilities = objective.outcome_probabilities(weights)
+
+    assert probabilities.shape == (7, 7)
+    assert torch.allclose(probabilities.sum(dim=1), torch.ones(7, dtype=torch.float64))
+    assert objective.directional_probabilities(weights).shape == (7, 3)
+    difference = float(objective.score_differences(weights)[0])
+    first_cutpoint = rows[0].jnd
+    expected_tie = 0.5 * (
+        math.erf((first_cutpoint - difference) / math.sqrt(2.0))
+        - math.erf((-first_cutpoint - difference) / math.sqrt(2.0))
+    )
+    assert float(probabilities[0, 3]) == pytest.approx(expected_tie)
+    lapsed = PairwiseObjective(
+        tuple(replace(row, lapse_rate=0.35) for row in rows), objective.plan
+    ).outcome_probabilities(weights)
+    assert torch.allclose(lapsed, 0.65 * probabilities + 0.35 / 7.0)
+    confidence_changed = PairwiseObjective(
+        tuple(replace(row, confidence=3) for row in rows), objective.plan
+    )
+    assert torch.equal(
+        probabilities,
+        confidence_changed.outcome_probabilities(weights),
+    )
+    calibration = ordered_response_calibration(
+        objective,
+        {"w_structure": 1.0, "w_neighborhood": 1.0},
+    )
+    assert sum(item.count for item in calibration) == 7
+    assert all(len(item.observed) == len(item.predicted) == 7 for item in calibration)
 
 
 def test_objective_refuses_unidentified_scale_and_flags_bound_weights() -> None:
     """Scale-invariant fits fail and projected bound endpoints are published."""
 
-    unidentified = FitPair(
+    unidentified = synthetic_fit_pair(
         numerator_a=(1.0, 2.0),
         numerator_b=(2.0, 1.0),
         mass_coefficients=(1.0, 1.0),
-        outcome=1,
         graded_verdict=1,
     )
     with pytest.raises(ValueError, match="not identifiable"):
@@ -437,11 +482,10 @@ def test_objective_refuses_unidentified_scale_and_flags_bound_weights() -> None:
         lower=1.0,
         upper=1.0,
     )
-    bounded_row = FitPair(
+    bounded_row = synthetic_fit_pair(
         numerator_a=(1.0,),
         numerator_b=(2.0,),
         mass_coefficients=(1.0,),
-        outcome=1,
         graded_verdict=1,
         fixed_numerator_a=1.0,
         fixed_numerator_b=1.0,
@@ -1156,16 +1200,25 @@ def test_bank_loader_validates_a13_labels_and_schedule_schema(tmp_path: Path) ->
         )
 
 
-def test_weight_fit_refuses_nonfit_and_replication_rows() -> None:
-    """Purpose and replication provenance are enforced at the fit boundary."""
+def test_weight_fit_refuses_nonfit_but_consumes_train_replication_rows() -> None:
+    """Weights consume both train lines while JND receives only replication."""
 
     plan = FittingPlan(_weight_parameters())
     row = _synthetic_recovery_rows(count=1)[0]
     config = OptimizerConfig(steps=1)
-    with pytest.raises(ValueError, match="FIT rows only"):
-        fit_weights(PairwiseObjective((replace(row, purpose=SplitPurpose.VALIDATE),), plan), config)
-    with pytest.raises(ValueError, match="replication"):
-        fit_weights(PairwiseObjective((replace(row, is_replication=True),), plan), config)
+    with pytest.raises(ValueError, match="non-train"):
+        PairwiseObjective((replace(row, purpose=SplitPurpose.VALIDATE),), plan)
+    replication = replace(row, is_replication=True)
+    result = fit_weights(PairwiseObjective((replication,), plan), config)
+    lines = partition_fit_ord_lines((row, replication))
+
+    assert result.steps_completed == 1
+    assert lines.train == (row, replication)
+    assert lines.replication == (replication,)
+    with pytest.raises(NotImplementedError, match="lapse prior"):
+        fit_weights(PairwiseObjective((replace(replication, synthetic=False),), plan), config)
+    with pytest.raises(ValueError, match="non-train"):
+        partition_fit_ord_lines((replace(row, purpose=SplitPurpose.VALIDATE), replication))
 
 
 def test_objective_fences_observation_profiles() -> None:

@@ -23,11 +23,13 @@ from dagua.eval.ruler_v4.fit.diagnostics import (
     JNDCellCalibration,
     JNDFitConfig,
     JNDHeterogeneityFit,
+    OrderedCalibrationBin,
     era_robustness,
     evaluate_objective,
     facet_weight_paths,
     fit_jnd_heterogeneity,
     jnd_band_calibration,
+    ordered_response_calibration,
 )
 from dagua.eval.ruler_v4.fit.holdout import (
     CalibrationLookConsumedError,
@@ -39,11 +41,14 @@ from dagua.eval.ruler_v4.fit.holdout import (
     partition_holdouts,
 )
 from dagua.eval.ruler_v4.fit.objective import (
+    FitOrdLines,
     FitPair,
     FittingPlan,
     PairwiseObjective,
     WeightParameter,
     fit_pairs_from_rescoring,
+    partition_fit_ord_lines,
+    synthetic_fit_pair,
 )
 from dagua.eval.ruler_v4.fit.optimize import FitResult, OptimizerConfig, fit_weights
 from dagua.eval.ruler_v4.fit.rescoring import (
@@ -63,6 +68,7 @@ __all__ = [
     "EraRobustness",
     "EvaluationMetrics",
     "FitPair",
+    "FitOrdLines",
     "FitResult",
     "FittingPlan",
     "HoldoutPartitions",
@@ -75,6 +81,7 @@ __all__ = [
     "JudgmentRow",
     "LookReservation",
     "OptimizerConfig",
+    "OrderedCalibrationBin",
     "PairwiseObjective",
     "RescoredPair",
     "ReusableJudgmentGuard",
@@ -96,4 +103,7 @@ __all__ = [
     "load_bank",
     "load_schedule",
     "partition_holdouts",
+    "partition_fit_ord_lines",
+    "ordered_response_calibration",
+    "synthetic_fit_pair",
 ]
