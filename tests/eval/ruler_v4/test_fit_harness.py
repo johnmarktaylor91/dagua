@@ -1152,6 +1152,38 @@ def test_w08_look_schedule_is_separate_and_has_no_alpha(
         )
 
 
+def test_calibration_alpha_spend_matches_frozen_disclosure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Calibration looks spend increasing upper-tail O'Brien-Fleming alpha."""
+
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "ACCESS_LEDGER")
+    ledger = AccessLedger()
+    role_hash = bank_module._FROZEN_A15_ROLE_HASH
+    informative_counts = (2000, 4000, 6000, 7100)
+    cumulative = []
+    incremental = []
+    for occasion, informative_count in zip(
+        ("post-M1", "post-M2", "post-M3", "stopping"), informative_counts
+    ):
+        reservation = ledger.reserve_look(
+            role_hash,
+            "within-family-calibration",
+            occasion,
+            ("calibration-row",),
+            "capacity unlock",
+            informative_judgments=informative_count,
+        )
+        cumulative.append(float(reservation.cumulative_alpha))
+        incremental.append(float(reservation.incremental_alpha))
+
+    assert cumulative == sorted(cumulative)
+    assert all(value >= 0.0 for value in incremental)
+    assert cumulative[-1] == pytest.approx(0.031791, abs=5.0e-7)
+    assert access_module._cumulative_alpha(0.7) == pytest.approx(0.019150, abs=5.0e-7)
+    assert access_module._cumulative_alpha(1.0) == pytest.approx(0.05)
+
+
 def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
     """Public ingestion refuses direct and recursive quarantined-bank reads."""
 
