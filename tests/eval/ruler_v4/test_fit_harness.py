@@ -510,7 +510,7 @@ def test_jnd_heterogeneity_rejects_non_replication_rows() -> None:
             rows,
             plan,
             {"w_structure": 0.6, "w_neighborhood": 1.6},
-            JNDFitConfig(steps=1),
+            JNDFitConfig(minimum_cell_count=2, steps=1),
         )
 
 
@@ -533,7 +533,7 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
             unswapped,
             plan,
             {"w_structure": 0.6, "w_neighborhood": 1.6},
-            JNDFitConfig(steps=1),
+            JNDFitConfig(minimum_cell_count=2, steps=1),
         )
 
     swapped = (
@@ -554,10 +554,10 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
             blind_id_b="drawing-a",
         ),
     )
-    result = fit_jnd_heterogeneity(
-        swapped,
-        plan,
-        {"w_structure": 0.6, "w_neighborhood": 1.6},
-        JNDFitConfig(steps=1),
-    )
-    assert result.cell_counts == {("synthetic", "synthetic"): 2}
+    with pytest.raises(NotImplementedError, match="split-half stability"):
+        fit_jnd_heterogeneity(
+            swapped,
+            plan,
+            {"w_structure": 0.6, "w_neighborhood": 1.6},
+            JNDFitConfig(minimum_cell_count=2, steps=1),
+        )

@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import math
-import random
 from collections import defaultdict
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import DefaultDict, Dict, Mapping, Optional, Sequence, Tuple
 
-import numpy as np
 import torch
 
 from dagua.eval.ruler_v4.fit.objective import FitPair, FittingPlan, PairwiseObjective
@@ -101,29 +99,26 @@ class EraRobustness:
 
 @dataclass(frozen=True)
 class JNDFitConfig:
-    """Configure replication-only JND-HET optimization.
+    """Configure the replication support gate for the pending JND-HET fit.
 
     Parameters
     ----------
+    minimum_cell_count : int
+        Explicit preregistered minimum replication rows per cell.
     seed : int, default=20260811
-        Deterministic Torch/NumPy/Python seed.
+        Reserved deterministic bootstrap/optimizer seed.
     steps : int, default=1000
         Adam updates.
     learning_rate : float, default=0.03
         Adam learning rate.
-    shrinkage : float, default=0.1
-        L2 shrinkage for class and band log-JND effects.
-    minimum_cell_count : int, default=1
-        Minimum replication rows required to estimate a cell.
     initial_jnd : float, default=0.1
         Positive pooled starting band.
     """
 
+    minimum_cell_count: int
     seed: int = 20260811
     steps: int = 1000
     learning_rate: float = 0.03
-    shrinkage: float = 0.1
-    minimum_cell_count: int = 1
     initial_jnd: float = 0.1
 
     def __post_init__(self) -> None:
@@ -141,8 +136,6 @@ class JNDFitConfig:
             raise ValueError("JND steps must be a positive integer")
         if not math.isfinite(self.learning_rate) or self.learning_rate <= 0.0:
             raise ValueError("JND learning rate must be finite and positive")
-        if not math.isfinite(self.shrinkage) or self.shrinkage < 0.0:
-            raise ValueError("JND shrinkage must be finite and nonnegative")
         if self.minimum_cell_count <= 0:
             raise ValueError("JND cell minimum must be positive")
         if not math.isfinite(self.initial_jnd) or self.initial_jnd <= 0.0:
@@ -390,14 +383,14 @@ def fit_jnd_heterogeneity(
     weights: Mapping[str, float],
     config: JNDFitConfig,
 ) -> JNDHeterogeneityFit:
-    """Fit ``log JND_(c,b) = mu + u_c + v_b`` on replications only.
+    """Validate JND-HET inputs and refuse the unresolved frozen-model gap.
 
-    Effects are centered after each deterministic Adam update and shrunk
-    toward zero. Cells below ``minimum_cell_count`` are listed and excluded,
-    never silently imputed. ``tau_class`` and ``tau_band`` are the fitted
-    effects' RMS hierarchical spreads; split-half/bootstrap uncertainty is a
-    caller-level freeze-fit obligation because its resampling unit is supplied
-    by the frozen campaign manifest.
+    W-13 requires fitted variance components, split-half stability, cell CIs,
+    and graph-cluster/bootstrap CIs for spread. The frozen artifacts do not pin
+    ``minimum_cell_count`` and the prior implementation substituted fixed L2
+    point effects. This boundary therefore validates provenance and support,
+    then fails closed until the contract owner supplies the missing constant
+    and hierarchical uncertainty procedure.
 
     Parameters
     ----------
@@ -413,12 +406,14 @@ def fit_jnd_heterogeneity(
     Returns
     -------
     JNDHeterogeneityFit
-        Pooled/effect/spread fit and supported-cell ledger.
+        This return is reserved for the completed W-13 implementation.
 
     Raises
     ------
     ValueError
         If non-replication rows enter, no cell is supported, or strata cross.
+    NotImplementedError
+        Always after input validation, pending the complete W-13 model.
     """
 
     rows = tuple(pairs)
@@ -439,83 +434,10 @@ def fit_jnd_heterogeneity(
     for pair in rows:
         counts[(pair.primary_class, pair.size_band)] += 1
     supported = {cell for cell, count in counts.items() if count >= config.minimum_cell_count}
-    unestimated = tuple(sorted(set(counts) - supported))
-    selected = tuple(pair for pair in rows if (pair.primary_class, pair.size_band) in supported)
-    if not selected:
+    if not supported:
         raise ValueError("no JND-HET cell meets the replication minimum")
-    objective = PairwiseObjective(selected, plan)
-    weight_vector = torch.tensor(
-        [weights[name] for name in plan.parameter_names], dtype=objective.dtype
-    )
-    differences = objective.score_differences(weight_vector).detach()
-    classes = sorted({pair.primary_class for pair in selected})
-    bands = sorted({pair.size_band for pair in selected})
-    class_index = {value: index for index, value in enumerate(classes)}
-    band_index = {value: index for index, value in enumerate(bands)}
-    class_rows = torch.tensor([class_index[pair.primary_class] for pair in selected])
-    band_rows = torch.tensor([band_index[pair.size_band] for pair in selected])
-    outcomes = torch.tensor([pair.outcome + 1 for pair in selected], dtype=torch.int64)
-    lapse = torch.tensor([pair.lapse_rate for pair in selected], dtype=objective.dtype)
-    random.seed(config.seed)
-    np.random.seed(config.seed % (2**32))
-    torch.manual_seed(config.seed)
-    torch.use_deterministic_algorithms(True)
-    mu = torch.tensor(math.log(config.initial_jnd), dtype=objective.dtype, requires_grad=True)
-    class_effects = torch.zeros(len(classes), dtype=objective.dtype, requires_grad=True)
-    band_effects = torch.zeros(len(bands), dtype=objective.dtype, requires_grad=True)
-    optimizer = torch.optim.Adam((mu, class_effects, band_effects), lr=config.learning_rate)
-    loss_path = []
-    for _ in range(config.steps):
-        optimizer.zero_grad(set_to_none=True)
-        log_jnd = mu + class_effects[class_rows] + band_effects[band_rows]
-        jnd = torch.exp(log_jnd)
-        lower = torch.sigmoid(-jnd - differences)
-        upper = torch.sigmoid(jnd - differences)
-        probabilities = torch.stack((lower, upper - lower, 1.0 - upper), dim=1)
-        probabilities = (1.0 - lapse.unsqueeze(1)) * probabilities + lapse.unsqueeze(1) / 3.0
-        selected_probability = probabilities.gather(1, outcomes.unsqueeze(1)).squeeze(1)
-        nll = -torch.log(torch.clamp(selected_probability, min=1.0e-12)).mean()
-        penalty = (
-            config.shrinkage
-            * (torch.square(class_effects).sum() + torch.square(band_effects).sum())
-            / len(selected)
-        )
-        loss = nll + penalty
-        if not bool(torch.isfinite(loss)):
-            raise FloatingPointError("JND-HET objective became nonfinite")
-        loss.backward()
-        optimizer.step()
-        with torch.no_grad():
-            class_mean = class_effects.mean()
-            band_mean = band_effects.mean()
-            class_effects.sub_(class_mean)
-            band_effects.sub_(band_mean)
-            mu.add_(class_mean + band_mean)
-        loss_path.append(float(loss.detach()))
-    class_values = {
-        value: float(class_effects[index].detach()) for value, index in class_index.items()
-    }
-    band_values = {
-        value: float(band_effects[index].detach()) for value, index in band_index.items()
-    }
-    mu_value = float(mu.detach())
-    cell_jnd = {
-        cell: math.exp(mu_value + class_values[cell[0]] + band_values[cell[1]])
-        for cell in sorted(supported)
-    }
-    values = np.asarray(tuple(cell_jnd.values()), dtype=np.float64)
-    p10, p90 = np.percentile(values, (10.0, 90.0))
-    tau_class = float(np.sqrt(np.mean(np.square(tuple(class_values.values())))))
-    tau_band = float(np.sqrt(np.mean(np.square(tuple(band_values.values())))))
-    return JNDHeterogeneityFit(
-        mu=mu_value,
-        tau_class=tau_class,
-        tau_band=tau_band,
-        class_effects=class_values,
-        band_effects=band_values,
-        cell_jnd=cell_jnd,
-        cell_counts=dict(counts),
-        unestimated_cells=unestimated,
-        spread=float(p90 / p10),
-        loss_path=tuple(loss_path),
+    del plan, weights
+    raise NotImplementedError(
+        "W-13 JND-HET requires fitted tau components, split-half stability, "
+        "cell CIs, and graph-cluster/bootstrap spread CIs"
     )
