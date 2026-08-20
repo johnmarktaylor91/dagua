@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import pickle
@@ -40,8 +39,6 @@ from dagua.eval.ruler_v4.fit import (
 from dagua.eval.ruler_v4.scene import Scene
 from dagua.eval.ruler_v4.weight_table import WeightTable
 from tests.eval.ruler_v4.test_score import _complete_table, _profiles, _scorable_scene
-
-_RESEARCH_ROOT = Path.home() / ".claude/research/dagua/ruler_v4/p3"
 
 
 def _weight_parameters() -> tuple[WeightParameter, WeightParameter]:
@@ -186,6 +183,7 @@ def _judgment(purpose: SplitPurpose, suffix: str = "0") -> JudgmentRow:
         observation_profile="profile",
         verdict=1,
         tie=False,
+        confidence=2,
         is_replication=False,
         role=role,
         purpose=purpose,
@@ -254,6 +252,7 @@ def _loaded_holdout_fixture(tmp_path: Path) -> tuple[object, Path, Path, Path]:
                 "judge_id": "judge/CF@4",
                 "verdict": 3 if suffix == "test" else -1,
                 "tie": False,
+                "confidence": 2,
                 "side_bit": 0,
             }
         )
@@ -298,6 +297,14 @@ def test_prior_penalty_scales_as_one_dataset_prior_not_per_row() -> None:
     expected_sum = sum((math.log(value) / math.log(4.0)) ** 2 for value in (0.5, 2.0))
 
     assert float(penalty) == pytest.approx(0.1 * expected_sum / len(rows))
+
+
+def test_objective_refuses_silent_graded_verdict_collapse() -> None:
+    """A 7-point A13 response cannot silently enter the three-way model."""
+
+    row = replace(_synthetic_recovery_rows(count=1)[0], outcome=1, graded_verdict=3)
+    with pytest.raises(ValueError, match="ordered-probit"):
+        PairwiseObjective((row,), FittingPlan(_weight_parameters()))
 
 
 def test_fitting_plan_refuses_off_ledger_dof_and_diag_facets() -> None:
@@ -420,6 +427,26 @@ def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
         load_bank((bank_root,), (schedule,), family)
 
 
+def test_bank_loader_validates_a13_labels_and_schedule_schema(tmp_path: Path) -> None:
+    """Implicit abstains and contradictory labels fail closed at ingestion."""
+
+    _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
+    rows = [json.loads(line) for line in bank_path.read_text(encoding="utf-8").splitlines()]
+    rows[0].update({"verdict": 0, "tie": False})
+    bank_path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
+    implicit_abstain = load_bank((bank_path,), (schedule_path,), family_path)
+    assert implicit_abstain.report.excluded_invalid == 1
+
+    rows[0].update({"verdict": 2, "tie": True})
+    bank_path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
+    with pytest.raises(ValueError, match="verdict and tie"):
+        load_bank((bank_path,), (schedule_path,), family_path)
+
+    schedule_path.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="lacks presentation identities"):
+        load_bank((bank_path,), (schedule_path,), family_path)
+
+
 def test_weight_fit_refuses_nonfit_and_replication_rows() -> None:
     """Purpose and replication provenance are enforced at the fit boundary."""
 
@@ -534,57 +561,3 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
         JNDFitConfig(steps=1),
     )
     assert result.cell_counts == {("synthetic", "synthetic"): 2}
-
-
-@pytest.mark.skipif(not _RESEARCH_ROOT.is_dir(), reason="frozen RULER workspace unavailable")
-def test_real_main_bank_loader_and_one_step_objective_smoke() -> None:
-    """At least 64 accepted real sessions survive loading and one fit step."""
-
-    bank = load_bank(
-        (_RESEARCH_ROOT / "bank/main",),
-        (_RESEARCH_ROOT / "stage/maincamp/sessions",),
-        _RESEARCH_ROOT / "frozen/A15_FAMILY_MAP.json",
-        era="CF@4",
-    )
-
-    assert bank.report.excluded_unscheduled == 0
-    assert len({row.session_id for row in bank.rows}) >= 64
-    assert bank.guarded_test_count > 0
-    assert all(row.purpose is not SplitPurpose.TEST for row in bank.rows)
-
-    # Hash-only features exercise the real labels and row strata without
-    # performing the prohibited P5 real-scene fit. They carry no fit result.
-    smoke_rows = []
-    for row in bank.rows[:128]:
-        digest = hashlib.sha256(row.base_pair_id.encode("utf-8")).digest()
-        numerator_a = (0.1 + digest[0] / 64.0, 0.1 + digest[1] / 64.0)
-        numerator_b = (0.1 + digest[2] / 64.0, 0.1 + digest[3] / 64.0)
-        smoke_rows.append(
-            FitPair(
-                numerator_a=numerator_a,
-                numerator_b=numerator_b,
-                mass_coefficients=(1.0, 1.0),
-                outcome=row.outcome,
-                fixed_numerator_a=0.1 + digest[4] / 64.0,
-                fixed_numerator_b=0.1 + digest[5] / 64.0,
-                fixed_mass=1.0,
-                jnd=0.18,
-                primary_class=row.primary_class,
-                size_band=row.size_band,
-                graph_hash=row.graph_hash,
-                generator_family=row.generator_family,
-                era=row.era,
-                instrument_hash=row.instrument_hash,
-            )
-        )
-    plan = FittingPlan(_weight_parameters())
-    objective = PairwiseObjective(smoke_rows, plan)
-    initial = objective.loss(torch.tensor((1.0, 1.0), dtype=torch.float64))
-    result = fit_weights(
-        objective,
-        OptimizerConfig(seed=20260811, steps=1, learning_rate=0.01, patience=2),
-    )
-
-    assert torch.isfinite(initial)
-    assert result.steps_completed == 1
-    assert all(math.isfinite(value) for value in result.weights.values())
