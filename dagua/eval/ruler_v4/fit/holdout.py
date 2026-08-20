@@ -46,6 +46,11 @@ class HoldoutPartitions:
         Frozen A15 role-assignment identity binding the persistent record.
     expected_test_presentations : mapping[str, tuple[str, ...]]
         Complete scheduled presentation census for each guarded TEST role.
+
+    Notes
+    -----
+    Instances are intentionally not picklable. Their mapping proxies keep
+    guarded source references from becoming a serialization side channel.
     """
 
     fit: Tuple[JudgmentRow, ...]
