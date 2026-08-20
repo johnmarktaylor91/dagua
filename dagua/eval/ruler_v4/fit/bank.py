@@ -188,14 +188,50 @@ class JudgmentBank:
 
     Parameters
     ----------
-    rows : tuple[JudgmentRow, ...]
-        Stable presentation-sorted fitting inputs.
+    _rows : tuple[JudgmentRow, ...]
+        Stable presentation-sorted inputs. TEST rows are kept private and may
+        be released only through :class:`TestHoldoutGuard`.
     report : BankLoadReport
         Inclusion and exclusion audit.
     """
 
-    rows: Tuple[JudgmentRow, ...]
+    _rows: Tuple[JudgmentRow, ...]
     report: BankLoadReport
+
+    @property
+    def rows(self) -> Tuple[JudgmentRow, ...]:
+        """Return reusable rows without exposing once-only TEST labels.
+
+        Returns
+        -------
+        tuple[JudgmentRow, ...]
+            Fit, validation, and diagnostic rows only.
+        """
+
+        return tuple(row for row in self._rows if row.purpose is not SplitPurpose.TEST)
+
+    @property
+    def guarded_test_count(self) -> int:
+        """Return the hidden TEST-row count without exposing labels.
+
+        Returns
+        -------
+        int
+            Number of rows behind the once-only holdout guard.
+        """
+
+        return sum(row.purpose is SplitPurpose.TEST for row in self._rows)
+
+    def _partition_rows(self) -> Tuple[JudgmentRow, ...]:
+        """Return all rows exclusively to the holdout partition boundary.
+
+        Returns
+        -------
+        tuple[JudgmentRow, ...]
+            Internal rows including guarded TEST labels.
+        """
+
+        return self._rows
 
     def select(
         self,
@@ -224,8 +260,15 @@ class JudgmentBank:
         -------
         tuple[JudgmentRow, ...]
             Rows satisfying every declared selector.
+
+        Raises
+        ------
+        ValueError
+            If direct TEST selection is attempted outside the holdout guard.
         """
 
+        if purpose is SplitPurpose.TEST:
+            raise ValueError("A15 TEST rows require TestHoldoutGuard.consume()")
         return tuple(
             row
             for row in self.rows
@@ -521,4 +564,4 @@ def load_bank(
         excluded_unscheduled=counts["excluded_unscheduled"],
         excluded_era=counts["excluded_era"],
     )
-    return JudgmentBank(rows=ordered, report=report)
+    return JudgmentBank(_rows=ordered, report=report)
