@@ -483,6 +483,19 @@ def test_test_holdout_access_fails_closed_on_all_review_defeats(
         HoldoutGuard().consume(partition_holdouts(reloaded))
 
 
+def test_test_holdout_refuses_empty_partition_before_spending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The natural ``partition_holdouts(bank.rows)`` composition cannot burn TEST."""
+
+    monkeypatch.setattr(holdout_module, "_TEST_HOLDOUT_STATE_ROOT", tmp_path / "state")
+    bank, _, _, _ = _loaded_holdout_fixture(tmp_path)
+    empty_test = partition_holdouts(bank.rows)
+    with pytest.raises(ValueError, match="empty"):
+        HoldoutGuard().consume(empty_test)
+    assert not (tmp_path / "state").exists()
+
+
 def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
     """Public ingestion refuses direct and recursive quarantined-bank reads."""
 
@@ -537,6 +550,17 @@ def test_weight_fit_refuses_nonfit_and_replication_rows() -> None:
         fit_weights(PairwiseObjective((replace(row, purpose=SplitPurpose.VALIDATE),), plan), config)
     with pytest.raises(ValueError, match="replication"):
         fit_weights(PairwiseObjective((replace(row, is_replication=True),), plan), config)
+
+
+def test_objective_fences_observation_profiles() -> None:
+    """One likelihood cannot mix score rows from different observation profiles."""
+
+    row = _synthetic_recovery_rows(count=1)[0]
+    with pytest.raises(ValueError, match="profile"):
+        PairwiseObjective(
+            (row, replace(row, observation_profile="other-profile")),
+            FittingPlan(_weight_parameters()),
+        )
 
 
 def test_scene_rescorer_uses_score_type_m_and_caches(semantic_scene: Scene) -> None:
