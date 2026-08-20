@@ -12,6 +12,8 @@ from pathlib import Path
 from statistics import NormalDist
 from typing import Iterable, Mapping, Optional, Tuple
 
+from dagua.eval.ruler_v4.fit.bank import _FROZEN_A15_ROLE_HASH
+
 _ACCESS_LEDGER_ROOT = Path("/home/jtaylor/.claude/research/dagua/ruler_v4/p3/gate/ACCESS_LEDGER")
 _LOOK_OCCASIONS = ("post-M1", "post-M2", "post-M3", "stopping")
 _CALIBRATION_KEYS = frozenset({"within-family-calibration", "cross-family-calibration"})
@@ -124,8 +126,8 @@ class AccessLedger:
             Append-only JSONL path.
         """
 
-        if not role_hash:
-            raise ValueError("ledger release requires a frozen role hash")
+        if role_hash != _FROZEN_A15_ROLE_HASH:
+            raise ValueError("ledger release requires the frozen A15 role hash")
         return self._ledger_root / f"{role_hash}.jsonl"
 
     def _records(self, role_hash: str, ledger_key: str) -> Tuple[Mapping[str, object], ...]:

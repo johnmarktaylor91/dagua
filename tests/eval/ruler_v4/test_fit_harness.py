@@ -20,7 +20,6 @@ import torch
 
 import dagua.eval.ruler_v4.fit.access as access_module
 import dagua.eval.ruler_v4.fit.bank as bank_module
-import dagua.eval.ruler_v4.fit.holdout as holdout_module
 from dagua.eval.ruler_v4.fit import (
     W08_LEDGER_KEY,
     AccessLedger,
@@ -308,15 +307,23 @@ def _load_synthetic_bank(
     if role_hash == bank_module._FROZEN_A15_ROLE_HASH:
         raise AssertionError("synthetic digest seam cannot target the frozen campaign role hash")
     digest = hashlib.sha256(frozen_schedule_path.read_bytes()).hexdigest()
-    with patch.object(bank_module, "_TEST_ONLY_A16_DIGESTS_BY_ROLE_HASH", {role_hash: digest}):
-        return load_bank(
-            bank_inputs,
-            schedule_inputs,
-            family_map_path,
-            frozen_schedule_path,
-            era=era,
-            instrument_hash=instrument_hash,
-        )
+    graphs = family.get("graphs")
+    if not isinstance(graphs, dict):
+        raise AssertionError("synthetic family map requires graph metadata")
+    with patch.object(
+        bank_module,
+        "_load_a15_family_map",
+        return_value=(graphs, bank_module._FROZEN_A15_ROLE_HASH),
+    ):
+        with patch.object(bank_module, "_FROZEN_A16_SCHEDULE_DIGEST", digest):
+            return load_bank(
+                bank_inputs,
+                schedule_inputs,
+                family_map_path,
+                frozen_schedule_path,
+                era=era,
+                instrument_hash=instrument_hash,
+            )
 
 
 def _loaded_holdout_fixture(tmp_path: Path) -> tuple[object, Path, Path, Path]:
@@ -662,7 +669,7 @@ def test_test_holdout_access_fails_closed_on_all_review_defeats(
 ) -> None:
     """TEST labels stay opaque and content-bound across every review attack."""
 
-    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
     bank, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
     partitions = partition_holdouts(bank)
 
@@ -702,7 +709,7 @@ def test_test_holdout_refuses_empty_partition_before_spending(
 ) -> None:
     """The natural ``partition_holdouts(bank.rows)`` composition cannot burn TEST."""
 
-    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
     bank, _, _, _ = _loaded_holdout_fixture(tmp_path)
     empty_test = partition_holdouts(bank.rows)
     with pytest.raises(ValueError, match="empty"):
@@ -715,7 +722,7 @@ def test_holdout_default_ledger_root_is_frozen_campaign_config() -> None:
 
     expected = Path("/home/jtaylor/.claude/research/dagua/ruler_v4/p3/gate/ACCESS_LEDGER")
 
-    assert holdout_module._ACCESS_LEDGER_ROOT == expected
+    assert access_module._ACCESS_LEDGER_ROOT == expected
     assert HoldoutGuard()._ledger_root == expected
     assert expected.is_absolute()
 
@@ -727,6 +734,8 @@ def test_frozen_schedule_digest_is_pinned_against_real_role_hash_attack(tmp_path
     family = json.loads(family_path.read_text(encoding="utf-8"))
     crafted_digest = hashlib.sha256(schedule_path.read_bytes()).hexdigest()
 
+    with pytest.raises(ValueError, match="frozen campaign identity"):
+        load_bank((bank_path,), (schedule_path,), family_path, schedule_path)
     assert "frozen_schedule_digest" not in inspect.signature(load_bank).parameters
     with patch.object(
         bank_module,
@@ -747,7 +756,7 @@ def test_holdout_reconciles_replanned_ids_and_rejects_equal_size_content_attack(
 ) -> None:
     """Base-pair content joins disjoint plan/campaign ids and defeats count swaps."""
 
-    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
     _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
     frozen_schedule_path = tmp_path / "PRESENTATION_SCHEDULE.jsonl"
     frozen_schedule_path.write_bytes(schedule_path.read_bytes())
@@ -799,7 +808,7 @@ def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
 ) -> None:
     """Loader selectors cannot mint a fresh one-shot or spend a partial seal."""
 
-    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
     _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
     schedule_rows = [
         json.loads(line) for line in schedule_path.read_text(encoding="utf-8").splitlines()
@@ -929,7 +938,7 @@ def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(
     bank = _load_synthetic_bank((bank_path,), (schedule_path,), family_path, schedule_path)
     partitions = partition_holdouts(bank)
 
-    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
     assert bank.guarded_test_count == 1
     with pytest.raises(ValueError, match="LOOK-LEDGER"):
         bank.select(purpose=SplitPurpose.REUSABLE_HOLDOUT)
@@ -946,7 +955,7 @@ def test_sealed_roles_have_separate_labelled_in_tree_ledger_budgets(
     """Within/cross sealed roles each append one independently budgeted record."""
 
     ledger_root = tmp_path / "p3/gate/ACCESS_LEDGER"
-    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", ledger_root)
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", ledger_root)
     _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
     family = json.loads(family_path.read_text(encoding="utf-8"))
     family["graphs"]["within-test-graph"] = {
@@ -1022,7 +1031,7 @@ def test_calibration_labels_require_ordered_alpha_spent_looks(
     """Calibration metadata is unlimited while every label release spends one slot."""
 
     ledger_root = tmp_path / "ACCESS_LEDGER"
-    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", ledger_root)
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", ledger_root)
     _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
     family = json.loads(family_path.read_text(encoding="utf-8"))
     family["graphs"]["calibration-graph"] = {
@@ -1063,15 +1072,34 @@ def test_calibration_labels_require_ordered_alpha_spent_looks(
         "free_note": "gated",
         "side_bit": 0,
     }
+    abstain_schedule_row = {
+        **schedule_row,
+        "presentation_id": "presentation-calibration-abstain",
+        "session_id": "session-calibration-abstain",
+        "base_pair_id": "pair-calibration-abstain",
+    }
+    abstain_bank_row = {
+        **bank_row,
+        "presentation_id": "presentation-calibration-abstain",
+        "session_id": "session-calibration-abstain",
+        "base_pair_id": "pair-calibration-abstain",
+        "judge_id": "judge/CF@1",
+        "verdict": 0,
+        "tie": False,
+        "abstain": True,
+    }
     with schedule_path.open("a", encoding="utf-8") as handle:
         handle.write(f"{json.dumps(schedule_row)}\n")
+        handle.write(f"{json.dumps(abstain_schedule_row)}\n")
     with bank_path.open("a", encoding="utf-8") as handle:
         handle.write(f"{json.dumps(bank_row)}\n")
+        handle.write(f"{json.dumps(abstain_bank_row)}\n")
     bank = _load_synthetic_bank((bank_path,), (schedule_path,), family_path, schedule_path)
     partitions = partition_holdouts(bank)
 
     metadata = bank.metadata(purpose=SplitPurpose.VALIDATE)
-    assert len(metadata) == 1
+    assert len(metadata) == 2
+    assert bank.report.excluded_invalid == 0
     gated = {"verdict", "confidence", "free_note", "source_path", "blind_id_a"}
     assert not (gated & set(vars(metadata[0])))
     assert all(row.purpose is SplitPurpose.FIT for row in bank.rows)
@@ -1086,6 +1114,25 @@ def test_calibration_labels_require_ordered_alpha_spent_looks(
             "capacity unlock",
         )
 
+    filtered = partition_holdouts(
+        _load_synthetic_bank(
+            (bank_path,),
+            (schedule_path,),
+            family_path,
+            schedule_path,
+            era="CF@4",
+        )
+    )
+    with pytest.raises(ValueError, match="partial guarded role"):
+        CalibrationLookGuard().consume(
+            filtered,
+            "within-family-calibration",
+            "post-M1",
+            100,
+            "capacity unlock",
+        )
+    assert not ledger_root.exists()
+
     occasions = ("post-M1", "post-M2", "post-M3", "stopping")
     prior_cumulative = 0.0
     for index, occasion in enumerate(occasions, start=1):
@@ -1096,6 +1143,7 @@ def test_calibration_labels_require_ordered_alpha_spent_looks(
             index * 100,
             "stopping" if occasion == "stopping" else "capacity unlock",
         )
+        assert len(rows) == 1
         assert rows[0].verdict == -3
         assert reservation.slot_index == index
         assert reservation.information_fraction == pytest.approx(index * 100 / 8520)
@@ -1130,7 +1178,7 @@ def test_w08_look_schedule_is_separate_and_has_no_alpha(
     monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "ACCESS_LEDGER")
     ledger = AccessLedger()
     first = ledger.reserve_look(
-        "role-hash",
+        bank_module._FROZEN_A15_ROLE_HASH,
         W08_LEDGER_KEY,
         "post-M1",
         ("morph-1", "morph-2"),
@@ -1143,7 +1191,7 @@ def test_w08_look_schedule_is_separate_and_has_no_alpha(
     assert first.incremental_alpha is None
     with pytest.raises(ValueError, match="no alpha"):
         ledger.reserve_look(
-            "role-hash",
+            bank_module._FROZEN_A15_ROLE_HASH,
             W08_LEDGER_KEY,
             "post-M2",
             ("morph-1",),
@@ -1182,6 +1230,23 @@ def test_calibration_alpha_spend_matches_frozen_disclosure(
     assert cumulative[-1] == pytest.approx(0.031791, abs=5.0e-7)
     assert access_module._cumulative_alpha(0.7) == pytest.approx(0.019150, abs=5.0e-7)
     assert access_module._cumulative_alpha(1.0) == pytest.approx(0.05)
+
+
+def test_ledger_and_h_jnd_refuse_caller_minted_role_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every persistent budget is keyed only by the frozen A15 identity."""
+
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "ACCESS_LEDGER")
+    with pytest.raises(ValueError, match="frozen A15 role hash"):
+        AccessLedger().reserve_once("minted", "within-family-sealed", ("row",), "sealed")
+    with pytest.raises(ValueError, match="frozen A15 role hash"):
+        JNDFitConfig(
+            role_hash="minted",
+            top_composite_pair_counts={"band": 67},
+            rotation_envelopes={"class": 0.01},
+        )
+    assert not (tmp_path / "ACCESS_LEDGER").exists()
 
 
 def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
@@ -1275,7 +1340,7 @@ def test_frozen_recorded_bank_fixture_has_stable_loader_digest(tmp_path: Path) -
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     assert hashlib.sha256(encoded).hexdigest() == (
-        "7973bff3620a8a8b8d1f9127fc3f4ebfcd68c2ee89bb68699d2888ffa499b5f1"  # noqa: E501  # pragma: allowlist secret
+        "ea01976a9ad1308de1f7205325a2d101dab1455b2e1bc2b35c64031e7d3a4046"  # noqa: E501  # pragma: allowlist secret
     )
 
 
@@ -1390,7 +1455,7 @@ def test_jnd_heterogeneity_rejects_non_replication_rows() -> None:
             plan,
             {"w_structure": 0.6, "w_neighborhood": 1.6},
             JNDFitConfig(
-                role_hash="role-hash",
+                role_hash=bank_module._FROZEN_A15_ROLE_HASH,
                 top_composite_pair_counts={"synthetic": 67},
                 rotation_envelopes={"synthetic": 0.01},
             ),
@@ -1417,7 +1482,7 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
             plan,
             {"w_structure": 0.6, "w_neighborhood": 1.6},
             JNDFitConfig(
-                role_hash="role-hash",
+                role_hash=bank_module._FROZEN_A15_ROLE_HASH,
                 top_composite_pair_counts={"synthetic": 67},
                 rotation_envelopes={"synthetic": 0.01},
             ),
@@ -1447,7 +1512,7 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
             plan,
             {"w_structure": 0.6, "w_neighborhood": 1.6},
             JNDFitConfig(
-                role_hash="role-hash",
+                role_hash=bank_module._FROZEN_A15_ROLE_HASH,
                 top_composite_pair_counts={"synthetic": 67},
                 rotation_envelopes={"synthetic": 0.01},
             ),
@@ -1463,7 +1528,7 @@ def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
     rows = _jnd_success_rows()
     plan = FittingPlan(_weight_parameters())
     config = JNDFitConfig(
-        role_hash="role-hash",
+        role_hash=bank_module._FROZEN_A15_ROLE_HASH,
         top_composite_pair_counts={"band-1": 67, "band-2": 67},
         rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
     )
@@ -1498,7 +1563,7 @@ def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
     assert set(fit.tie_rates_by_class) == {"class-1", "class-2"}
     with pytest.raises(TypeError, match="minimum_cell_count"):
         JNDFitConfig(
-            role_hash="role-hash",
+            role_hash=bank_module._FROZEN_A15_ROLE_HASH,
             top_composite_pair_counts={"band-1": 67},
             rotation_envelopes={"class-1": 0.001},
             minimum_cell_count=20,
