@@ -234,8 +234,7 @@ class JudgmentBank:
     role_hash : str
         Frozen A15 role-assignment identity binding the TEST access record.
     expected_test_presentations : mapping[str, tuple[str, ...]]
-        Complete screened presentation census before loader selectors for each
-        guarded TEST role.
+        Frozen A16 presentation census for each guarded TEST role.
     expected_test_graphs : mapping[str, tuple[str, ...]]
         Frozen graph-hash census for each guarded TEST role.
     report : BankLoadReport
@@ -586,6 +585,58 @@ def _load_a15_family_map(
     return graphs, role_hash
 
 
+def _load_frozen_test_census(
+    path: PathLike,
+    expected_digest: str,
+    graph_map: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Tuple[str, ...]]:
+    """Load the sealed presentation census from its frozen schedule bytes.
+
+    Parameters
+    ----------
+    path : path-like
+        Frozen A16-materialized presentation schedule.
+    expected_digest : str
+        Frozen SHA-256 digest for the exact schedule bytes.
+    graph_map : mapping[str, mapping[str, Any]]
+        Verified frozen A15 graph-role census.
+
+    Returns
+    -------
+    mapping[str, tuple[str, ...]]
+        Presentation identities grouped by sealed role.
+
+    Raises
+    ------
+    ValueError
+        If the digest, schema, or A15/A16 role reconciliation disagrees.
+    """
+
+    payload = Path(path).read_bytes()
+    if hashlib.sha256(payload).hexdigest() != expected_digest:
+        raise ValueError("frozen presentation-schedule digest does not match")
+    census: dict[str, list[str]] = {role: [] for role in sorted(SEALED_TEST_ROLES)}
+    for line_number, line in enumerate(payload.decode("utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        raw = json.loads(line)
+        if not isinstance(raw, dict):
+            raise ValueError(f"{path}:{line_number}: expected a JSON object")
+        partition = str(raw.get("partition", ""))
+        graph_hash = str(raw.get("graph_hash", ""))
+        graph = graph_map.get(graph_hash)
+        if graph is None or str(graph.get("role", "")) != partition:
+            raise ValueError("frozen A15/A16 role census does not reconcile")
+        if partition in SEALED_TEST_ROLES:
+            presentation_id = str(raw.get("presentation_id", ""))
+            if not presentation_id:
+                raise ValueError("frozen sealed schedule row lacks presentation identity")
+            census[partition].append(presentation_id)
+    return MappingProxyType(
+        {role: tuple(sorted(presentations)) for role, presentations in census.items()}
+    )
+
+
 def _era(judge_id: object) -> str:
     """Extract the frozen judge configuration suffix.
 
@@ -608,6 +659,8 @@ def load_bank(
     bank_inputs: Iterable[PathLike],
     schedule_inputs: Iterable[PathLike],
     family_map_path: PathLike,
+    frozen_schedule_path: PathLike,
+    frozen_schedule_digest: str,
     era: Optional[str] = None,
     instrument_hash: Optional[str] = None,
 ) -> JudgmentBank:
@@ -626,6 +679,10 @@ def load_bank(
         Exact session manifests that scheduled those bank rows.
     family_map_path : path-like
         Frozen ``A15_FAMILY_MAP.json``.
+    frozen_schedule_path : path-like
+        Frozen A16-materialized presentation schedule used only for the sealed census.
+    frozen_schedule_digest : str
+        Frozen SHA-256 digest of ``frozen_schedule_path``.
     era : str or None
         Optional exact era selector.
     instrument_hash : str or None
@@ -645,9 +702,9 @@ def load_bank(
     paths = _bank_jsonl_paths(bank_inputs)
     schedule = load_schedule(schedule_inputs)
     graph_map, role_hash = _load_a15_family_map(family_map_path)
-    expected_test_presentations: dict[str, list[str]] = {
-        role: [] for role in sorted(SEALED_TEST_ROLES)
-    }
+    expected_test_presentations = _load_frozen_test_census(
+        frozen_schedule_path, frozen_schedule_digest, graph_map
+    )
     expected_test_graphs = {
         role: tuple(
             sorted(
@@ -660,6 +717,7 @@ def load_bank(
     }
     rows = []
     test_refs = []
+    scheduled_matches = 0
     counts = {
         "raw_rows": 0,
         "excluded_rejected_session": 0,
@@ -679,9 +737,12 @@ def load_bank(
                 continue
             key = str(raw.get("session_id", "")), str(raw.get("presentation_id", ""))
             scheduled = schedule.get(key)
+            if scheduled is None and key[0].startswith("main-"):
+                scheduled = schedule.get((key[0].removeprefix("main-"), key[1]))
             if scheduled is None:
                 counts["excluded_unscheduled"] += 1
                 continue
+            scheduled_matches += 1
             if int(raw.get("side_bit", -1)) not in (0, 1):
                 raise ValueError(f"bank side_bit outside {{0, 1}}: {key}")
             # The schedule already stores the rendered A/B order. ``side_bit``
@@ -719,8 +780,6 @@ def load_bank(
             confidence = int(raw.get("confidence", 0))
             if confidence not in (1, 2, 3):
                 raise ValueError(f"confidence outside A13 range: {confidence}")
-            if purpose is SplitPurpose.TEST:
-                expected_test_presentations[role].append(scheduled.presentation_id)
             if (era is not None and row_era != era) or (
                 instrument_hash is not None and row_instrument != instrument_hash
             ):
@@ -728,7 +787,7 @@ def load_bank(
                 continue
             row_fields = {
                 "presentation_id": scheduled.presentation_id,
-                "session_id": scheduled.session_id,
+                "session_id": key[0],
                 "base_pair_id": scheduled.base_pair_id,
                 "graph_hash": scheduled.graph_hash,
                 "blind_id_a": scheduled.blind_id_a,
@@ -759,6 +818,8 @@ def load_bank(
                         confidence=confidence,
                     )
                 )
+    if paths and scheduled_matches == 0:
+        raise ValueError("bank/schedule join matched zero rows")
     ordered = tuple(sorted(rows, key=lambda row: (row.session_id, row.presentation_id)))
     report = BankLoadReport(
         files=len(paths),
@@ -783,10 +844,7 @@ def load_bank(
         _rows=ordered,
         _test_refs=ordered_refs,
         role_hash=role_hash,
-        expected_test_presentations={
-            role: tuple(sorted(presentations))
-            for role, presentations in expected_test_presentations.items()
-        },
+        expected_test_presentations=expected_test_presentations,
         expected_test_graphs=expected_test_graphs,
         report=report,
     )
