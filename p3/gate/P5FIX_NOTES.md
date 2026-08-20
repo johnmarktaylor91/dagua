@@ -78,3 +78,33 @@ state, calibration replacement, and fixed-sample recovery behavior.
   requested `dagua/eval/ruler_v4/DISCREPANCIES.md`/`p3/gate` handoff artifacts.
 - Fable's 12 findings remain the marker's primary blocker/major count; Opus is
   folded and itemized separately because it arrived during the pass.
+
+## P5FIX2 Opus verification disposition
+
+The smallest-sufficient set in `P5VERIFY_OPUS.md` is closed in its required
+order. N1 keys access to the recomputed frozen `role_hash` and refuses partial
+scheduled-presentation releases; N3 separates the reusable entire-class
+holdout; N4 moves separate within/cross one-shot budgets into the campaign-tree
+ledger; N2 makes label re-reading conditional on the successful reservation;
+and N5 requires the original graded verdict. N6-N9 were also mechanically
+closed: ambiguous multi-facet floors are refused, seed provenance is described
+accurately, a frozen recorded-schema loader digest replaces mutable live-tree
+coverage, and intentional non-picklability is documented and tested.
+
+The B5 dispute remains **SPLIT**, following the verifier's citation ruling.
+`PREREG_V4_CALIBRATION.md` section 7 assigns `N_g = 4` to `mu`, `tau_class`,
+`tau_band`, and lapse, while `A18_INSERT_W13.md` section 3 guard 5 counts the two
+heterogeneity variance components as `+2` and says shipping cell bands adds no
+new dof. Those authorities reject a per-level ledger charge. However,
+`A18_INSERT_W13.md` section 1 makes that accounting conditional on a genuinely
+hierarchical model with estimated `tau_class` and `tau_band`, and
+`PREREG_V4_CALIBRATION.md` section 7's C-06 paragraph separately requires the
+published effective-complexity audit and its SHRINK-or-PARTIAL response rule.
+The invalid fixed-lambda estimator remains removed; missing C-06 publication is
+now `DISCREPANCIES.md` entry 54 rather than silently treated as discharged.
+
+The U11-route dispute also remains upheld. `V4_SPEC_r4.md` section 7.9 names a
+U11-route floor, but the frozen `REQUIRED_PRIOR_FLOOR_FACETS` authority contains
+only U12, U13, and U34. The harness continues to enforce that frozen table
+exactly and leaves the identity/value mismatch with the contract owner in entry
+51; inventing a new subterm floor here would be a methodology change.

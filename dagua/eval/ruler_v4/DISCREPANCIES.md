@@ -606,3 +606,12 @@ the production port; none of the entries below overrides a contract.
     fitting fences purpose/profile/instrument/era. OWNER:
     remove the fixture defaults when the ordered-model constructor in entry 45
     supplies a separate typed synthetic-row factory.
+54. `PREREG_V4_CALIBRATION.md` section 7 requires C-06's published
+    uncertain-prior-coefficient sensitivity/effective-complexity audit and its
+    SHRINK-or-PARTIAL response rule. `A18_INSERT_W13.md` section 1 requires a
+    genuinely hierarchical JND model with estimated `tau_class` and `tau_band`;
+    section 3 guard 5's `+2` allocation does not waive the audit. The invalid
+    fixed-lambda point-effects estimator remains removed, so no result silently
+    claims compliance. OWNER: the freeze-fit implementation must publish C-06
+    beside the ledgered JND `+2` and execute the frozen response if audited
+    complexity exceeds the allocation.
