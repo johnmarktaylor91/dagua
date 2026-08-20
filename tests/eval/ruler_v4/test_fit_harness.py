@@ -487,6 +487,55 @@ def test_jnd_heterogeneity_rejects_non_replication_rows() -> None:
         )
 
 
+def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
+    """Replication flags cannot substitute for repeated side-swapped pairs."""
+
+    plan = FittingPlan(_weight_parameters())
+    source = _synthetic_recovery_rows(count=2)
+    unswapped = tuple(
+        replace(
+            row,
+            is_replication=True,
+            base_pair_id=f"unique-{index}",
+            session_id=f"session-{index}",
+        )
+        for index, row in enumerate(source)
+    )
+    with pytest.raises(ValueError, match="cross-session replication"):
+        fit_jnd_heterogeneity(
+            unswapped,
+            plan,
+            {"w_structure": 0.6, "w_neighborhood": 1.6},
+            JNDFitConfig(steps=1),
+        )
+
+    swapped = (
+        replace(
+            source[0],
+            is_replication=True,
+            base_pair_id="shared",
+            session_id="session-a",
+            blind_id_a="drawing-a",
+            blind_id_b="drawing-b",
+        ),
+        replace(
+            source[1],
+            is_replication=True,
+            base_pair_id="shared",
+            session_id="session-b",
+            blind_id_a="drawing-b",
+            blind_id_b="drawing-a",
+        ),
+    )
+    result = fit_jnd_heterogeneity(
+        swapped,
+        plan,
+        {"w_structure": 0.6, "w_neighborhood": 1.6},
+        JNDFitConfig(steps=1),
+    )
+    assert result.cell_counts == {("synthetic", "synthetic"): 2}
+
+
 @pytest.mark.skipif(not _RESEARCH_ROOT.is_dir(), reason="frozen RULER workspace unavailable")
 def test_real_main_bank_loader_and_one_step_objective_smoke() -> None:
     """At least 64 accepted real sessions survive loading and one fit step."""
