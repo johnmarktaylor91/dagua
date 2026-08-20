@@ -192,8 +192,8 @@ class FitPair:
         Per-parameter applicable-mass coefficients.
     outcome : int
         ``-1`` for A, ``0`` for tie, and ``1`` for B.
-    graded_verdict : int or None
-        Original A13 verdict in ``[-3, 3]`` when the row came from the bank.
+    graded_verdict : int
+        Required original A13 verdict in ``[-3, 3]``.
     confidence : int or None
         Original A13 confidence in ``[1, 3]`` when banked.
     fixed_numerator_a, fixed_numerator_b : float
@@ -222,7 +222,7 @@ class FitPair:
     numerator_b: Tuple[float, ...]
     mass_coefficients: Tuple[float, ...]
     outcome: int
-    graded_verdict: Optional[int] = None
+    graded_verdict: int
     confidence: Optional[int] = None
     fixed_numerator_a: float = 0.0
     fixed_numerator_b: float = 0.0
@@ -274,9 +274,9 @@ class FitPair:
             raise ValueError("P-mean numerators and masses must be finite and nonnegative")
         if self.outcome not in (-1, 0, 1):
             raise ValueError("pair outcome must be -1, 0, or 1")
-        graded_verdict = self.outcome if self.graded_verdict is None else self.graded_verdict
-        if graded_verdict not in range(-3, 4):
+        if self.graded_verdict not in range(-3, 4):
             raise ValueError("graded verdict must lie in [-3, 3]")
+        graded_verdict = self.graded_verdict
         graded_outcome = 0 if graded_verdict == 0 else 1 if graded_verdict > 0 else -1
         if graded_outcome != self.outcome:
             raise ValueError("graded verdict sign disagrees with the fitting outcome")

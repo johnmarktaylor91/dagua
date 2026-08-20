@@ -601,7 +601,8 @@ the production port; none of the entries below overrides a contract.
     without exposing engine identities to the fitting module.
 53. `FitPair` retains synthetic defaults for JND/lapse and synthetic stratum ids
     so deterministic objective fixtures remain small. Every bank-to-rescoring
-    bridge call supplies these fields explicitly, real magnitude-2/3 rows are
-    refused, and weight fitting fences purpose/profile/instrument/era. OWNER:
+    bridge call supplies these fields explicitly, `graded_verdict` is required
+    even for synthetic rows, real magnitude-2/3 rows are refused, and weight
+    fitting fences purpose/profile/instrument/era. OWNER:
     remove the fixture defaults when the ordered-model constructor in entry 45
     supplies a separate typed synthetic-row factory.
