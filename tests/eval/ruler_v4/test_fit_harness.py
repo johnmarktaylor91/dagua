@@ -18,15 +18,21 @@ import numpy as np
 import pytest
 import torch
 
+import dagua.eval.ruler_v4.fit.access as access_module
 import dagua.eval.ruler_v4.fit.bank as bank_module
 import dagua.eval.ruler_v4.fit.holdout as holdout_module
 from dagua.eval.ruler_v4.fit import (
+    W08_LEDGER_KEY,
+    AccessLedger,
+    CalibrationLookConsumedError,
+    CalibrationLookGuard,
     FitPair,
     FittingPlan,
     JNDFitConfig,
     JudgmentRow,
     OptimizerConfig,
     PairwiseObjective,
+    ReusableJudgmentGuard,
     SceneRescorer,
     SplitPurpose,
     WeightParameter,
@@ -755,7 +761,9 @@ def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
         HoldoutGuard().consume(full, "cross-family-sealed")
 
 
-def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(tmp_path: Path) -> None:
+def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A15's reusable entire-class role remains outside the once-only guard."""
 
     _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
@@ -803,10 +811,15 @@ def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(tmp_path: Pa
     bank = _load_synthetic_bank((bank_path,), (schedule_path,), family_path, schedule_path)
     partitions = partition_holdouts(bank)
 
+    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", tmp_path / "state")
     assert bank.guarded_test_count == 1
-    assert bank.select(purpose=SplitPurpose.REUSABLE_HOLDOUT) == partitions.reusable_holdout
+    with pytest.raises(ValueError, match="LOOK-LEDGER"):
+        bank.select(purpose=SplitPurpose.REUSABLE_HOLDOUT)
     assert len(partitions.reusable_holdout) == 1
     assert partitions.reusable_holdout[0].role == "entire-class-holdout"
+    labelled = ReusableJudgmentGuard().consume(partitions, SplitPurpose.REUSABLE_HOLDOUT)
+    assert labelled[0].verdict == 1
+    assert not any((tmp_path / "state").glob(f"{partitions.role_hash}.cross-family-sealed.*.lock"))
 
 
 def test_sealed_roles_have_separate_labelled_in_tree_ledger_budgets(
@@ -875,14 +888,150 @@ def test_sealed_roles_have_separate_labelled_in_tree_ledger_budgets(
     assert [row.role for row in within] == ["within-family-sealed"]
     ledger_path = ledger_root / f"{partitions.role_hash}.jsonl"
     records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
-    assert [(record["role"], record["label"], record["budget"]) for record in records] == [
-        ("cross-family-sealed", "cross", 1),
-        ("within-family-sealed", "within", 1),
+    assert [(record["ledger_key"], record["purpose"], record["budget"]) for record in records] == [
+        ("cross-family-sealed", "sealed-test-cross", 1),
+        ("within-family-sealed", "sealed-test-within", 1),
     ]
     with pytest.raises(HoldoutConsumedError):
         HoldoutGuard().consume(partitions, "cross-family-sealed")
     with pytest.raises(HoldoutConsumedError):
         HoldoutGuard().consume(partitions, "within-family-sealed")
+
+
+def test_calibration_labels_require_ordered_alpha_spent_looks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Calibration metadata is unlimited while every label release spends one slot."""
+
+    ledger_root = tmp_path / "ACCESS_LEDGER"
+    monkeypatch.setattr(holdout_module, "_ACCESS_LEDGER_ROOT", ledger_root)
+    _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
+    family = json.loads(family_path.read_text(encoding="utf-8"))
+    family["graphs"]["calibration-graph"] = {
+        "role": "within-family-calibration",
+        "primary_class": "class",
+        "size_band": "band",
+        "generator_family": "family",
+    }
+    role_lines = "\n".join(
+        f"{graph_hash}\t{graph['role']}" for graph_hash, graph in sorted(family["graphs"].items())
+    )
+    family["role_hash"] = hashlib.sha256(role_lines.encode("utf-8")).hexdigest()
+    family_path.write_text(json.dumps(family), encoding="utf-8")
+    schedule_row = {
+        "presentation_id": "presentation-calibration",
+        "session_id": "session-calibration",
+        "base_pair_id": "pair-calibration",
+        "graph_hash": "calibration-graph",
+        "blind_id_A": "opaque-A",
+        "blind_id_B": "opaque-B",
+        "profile_opaque_id": "profile",
+        "budget_line": "PRIMARY",
+        "partition": "within-family-calibration",
+    }
+    bank_row = {
+        "presentation_id": "presentation-calibration",
+        "session_id": "session-calibration",
+        "base_pair_id": "pair-calibration",
+        "graph_hash": "calibration-graph",
+        "session_accepted": True,
+        "instrument_hash": "instrument",
+        "judge_id": "judge/CF@4",
+        "verdict": -3,
+        "tie": False,
+        "confidence": 3,
+        "reason_tags": ["crossing"],
+        "served_model_fingerprint": {"usage": {"tokens": 99}},
+        "free_note": "gated",
+        "side_bit": 0,
+    }
+    with schedule_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(schedule_row)}\n")
+    with bank_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(bank_row)}\n")
+    bank = _load_synthetic_bank((bank_path,), (schedule_path,), family_path, schedule_path)
+    partitions = partition_holdouts(bank)
+
+    metadata = bank.metadata(purpose=SplitPurpose.VALIDATE)
+    assert len(metadata) == 1
+    gated = {"verdict", "confidence", "free_note", "source_path", "blind_id_a"}
+    assert not (gated & set(vars(metadata[0])))
+    assert all(row.purpose is SplitPurpose.FIT for row in bank.rows)
+    with pytest.raises(ValueError, match="LOOK-LEDGER"):
+        bank.select(purpose=SplitPurpose.VALIDATE)
+    with pytest.raises(ValueError, match="expected 'post-M1'"):
+        CalibrationLookGuard().consume(
+            partitions,
+            "within-family-calibration",
+            "post-M2",
+            100,
+            "capacity unlock",
+        )
+
+    occasions = ("post-M1", "post-M2", "post-M3", "stopping")
+    prior_cumulative = 0.0
+    for index, occasion in enumerate(occasions, start=1):
+        rows, reservation = CalibrationLookGuard().consume(
+            partitions,
+            "within-family-calibration",
+            occasion,
+            index * 100,
+            "stopping" if occasion == "stopping" else "capacity unlock",
+        )
+        assert rows[0].verdict == -3
+        assert reservation.slot_index == index
+        assert reservation.information_fraction == pytest.approx(index * 100 / 8520)
+        assert reservation.incremental_alpha == pytest.approx(
+            float(reservation.cumulative_alpha) - prior_cumulative
+        )
+        prior_cumulative = float(reservation.cumulative_alpha)
+    with pytest.raises(CalibrationLookConsumedError, match="exhausted"):
+        CalibrationLookGuard().consume(
+            partitions,
+            "within-family-calibration",
+            "stopping",
+            500,
+            "stopping",
+        )
+
+    records = [
+        json.loads(line)
+        for line in (ledger_root / f"{partitions.role_hash}.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [record["occasion"] for record in records] == list(occasions)
+    assert all(record["row_set_digest"] and record["decision"] for record in records)
+
+
+def test_w08_look_schedule_is_separate_and_has_no_alpha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-08 uses its own four ordered slots without alpha arithmetic."""
+
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "ACCESS_LEDGER")
+    ledger = AccessLedger()
+    first = ledger.reserve_look(
+        "role-hash",
+        W08_LEDGER_KEY,
+        "post-M1",
+        ("morph-1", "morph-2"),
+        "off-distribution agreement report",
+    )
+
+    assert first.slot_index == 1
+    assert first.information_fraction is None
+    assert first.cumulative_alpha is None
+    assert first.incremental_alpha is None
+    with pytest.raises(ValueError, match="no alpha"):
+        ledger.reserve_look(
+            "role-hash",
+            W08_LEDGER_KEY,
+            "post-M2",
+            ("morph-1",),
+            "off-distribution agreement report",
+            informative_judgments=100,
+        )
 
 
 def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
@@ -976,7 +1125,7 @@ def test_frozen_recorded_bank_fixture_has_stable_loader_digest(tmp_path: Path) -
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     assert hashlib.sha256(encoded).hexdigest() == (
-        "86d66e6055f042238ca491af8aac24677272743d67e10b3ca47788b0965fecc3"  # noqa: E501  # pragma: allowlist secret
+        "7973bff3620a8a8b8d1f9127fc3f4ebfcd68c2ee89bb68699d2888ffa499b5f1"  # noqa: E501  # pragma: allowlist secret
     )
 
 

@@ -1,8 +1,16 @@
 """Preregistered P5 weight-fitting harness for RULER V4."""
 
+from dagua.eval.ruler_v4.fit.access import (
+    H_JND_LEDGER_KEY,
+    W08_LEDGER_KEY,
+    AccessBudgetConsumedError,
+    AccessLedger,
+    LookReservation,
+)
 from dagua.eval.ruler_v4.fit.bank import (
     BankLoadReport,
     JudgmentBank,
+    JudgmentMetadata,
     JudgmentRow,
     ScheduledPair,
     SplitPurpose,
@@ -22,7 +30,10 @@ from dagua.eval.ruler_v4.fit.diagnostics import (
     jnd_band_calibration,
 )
 from dagua.eval.ruler_v4.fit.holdout import (
+    CalibrationLookConsumedError,
+    CalibrationLookGuard,
     HoldoutPartitions,
+    ReusableJudgmentGuard,
     TestHoldoutConsumedError,
     TestHoldoutGuard,
     partition_holdouts,
@@ -43,7 +54,11 @@ from dagua.eval.ruler_v4.fit.rescoring import (
 )
 
 __all__ = [
+    "AccessBudgetConsumedError",
+    "AccessLedger",
     "BankLoadReport",
+    "CalibrationLookConsumedError",
+    "CalibrationLookGuard",
     "DrawingMeasurement",
     "EraRobustness",
     "EvaluationMetrics",
@@ -51,14 +66,18 @@ __all__ = [
     "FitResult",
     "FittingPlan",
     "HoldoutPartitions",
+    "H_JND_LEDGER_KEY",
     "JNDCellCalibration",
     "JNDFitConfig",
     "JNDHeterogeneityFit",
     "JudgmentBank",
+    "JudgmentMetadata",
     "JudgmentRow",
+    "LookReservation",
     "OptimizerConfig",
     "PairwiseObjective",
     "RescoredPair",
+    "ReusableJudgmentGuard",
     "SceneRescorer",
     "SceneResolver",
     "ScheduledPair",
@@ -66,6 +85,7 @@ __all__ = [
     "TestHoldoutConsumedError",
     "TestHoldoutGuard",
     "WeightParameter",
+    "W08_LEDGER_KEY",
     "era_robustness",
     "evaluate_objective",
     "facet_weight_paths",

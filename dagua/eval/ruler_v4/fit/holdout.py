@@ -2,28 +2,35 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Iterable, Mapping, Tuple, Union
 
+from dagua.eval.ruler_v4.fit.access import (
+    _ACCESS_LEDGER_ROOT,
+    AccessBudgetConsumedError,
+    AccessLedger,
+    LookReservation,
+)
 from dagua.eval.ruler_v4.fit.bank import (
     SEALED_TEST_ROLES,
     JudgmentBank,
+    JudgmentMetadata,
     JudgmentRow,
     SplitPurpose,
+    _metadata_from_fields,
     _read_jsonl_with_line_numbers,
     _SealedJudgmentRef,
 )
 
-_ACCESS_LEDGER_ROOT = Path("/home/jtaylor/.claude/research/dagua/ruler_v4/p3/gate/ACCESS_LEDGER")
-
 
 class TestHoldoutConsumedError(RuntimeError):
     """Signal that the once-only A15 test bank has already been touched."""
+
+
+class CalibrationLookConsumedError(RuntimeError):
+    """Signal that a calibration schedule has exhausted its four looks."""
 
 
 @dataclass(frozen=True)
@@ -34,12 +41,14 @@ class HoldoutPartitions:
     ----------
     fit : tuple[JudgmentRow, ...]
         A15 train-role rows.
-    validate : tuple[JudgmentRow, ...]
-        Within- and cross-family calibration rows.
-    diagnostic : tuple[JudgmentRow, ...]
-        Reusable adversarial diagnostic rows, never fitted.
-    reusable_holdout : tuple[JudgmentRow, ...]
-        Reusable entire-class holdout rows, never fitted.
+    validate : tuple[JudgmentMetadata, ...]
+        Whitelist-only within- and cross-family calibration metadata.
+    diagnostic : tuple[JudgmentMetadata, ...]
+        Whitelist-only adversarial diagnostic metadata.
+    reusable_holdout : tuple[JudgmentMetadata, ...]
+        Whitelist-only entire-class holdout metadata.
+    _gated_refs_by_purpose : mapping[SplitPurpose, tuple[_SealedJudgmentRef, ...]]
+        Opaque non-TEST locators grouped by frozen purpose.
     _test_refs_by_role : mapping[str, tuple[_SealedJudgmentRef, ...]]
         Opaque sealed-row locators grouped by frozen role.
     role_hash : str
@@ -56,9 +65,10 @@ class HoldoutPartitions:
     """
 
     fit: Tuple[JudgmentRow, ...]
-    validate: Tuple[JudgmentRow, ...]
-    reusable_holdout: Tuple[JudgmentRow, ...]
-    diagnostic: Tuple[JudgmentRow, ...]
+    validate: Tuple[JudgmentMetadata, ...]
+    reusable_holdout: Tuple[JudgmentMetadata, ...]
+    diagnostic: Tuple[JudgmentMetadata, ...]
+    _gated_refs_by_purpose: Mapping[SplitPurpose, Tuple[_SealedJudgmentRef, ...]]
     _test_refs_by_role: Mapping[str, Tuple[_SealedJudgmentRef, ...]]
     role_hash: str
     expected_test_base_pairs: Mapping[str, Tuple[str, ...]]
@@ -95,6 +105,7 @@ def partition_holdouts(
 
     if isinstance(rows, JudgmentBank):
         source_rows = rows.rows
+        metadata = rows.metadata()
         test_refs = rows._partition_test_refs()
         test_refs_by_role = {
             role: tuple(ref for ref in test_refs if ref.row_fields["role"] == role)
@@ -103,22 +114,36 @@ def partition_holdouts(
         role_hash = rows.role_hash
         expected_test_base_pairs = rows.expected_test_base_pairs
         expected_test_graphs = rows.expected_test_graphs
+        gated_refs_by_purpose = {
+            purpose: rows._partition_gated_refs(purpose)
+            for purpose in (
+                SplitPurpose.VALIDATE,
+                SplitPurpose.REUSABLE_HOLDOUT,
+                SplitPurpose.DIAGNOSTIC,
+            )
+        }
     else:
         source_rows = tuple(rows)
-        if any(row.purpose is SplitPurpose.TEST for row in source_rows):
-            raise ValueError("explicit TEST rows bypass bank label opacity")
+        if any(row.purpose is not SplitPurpose.FIT for row in source_rows):
+            raise ValueError("explicit non-FIT rows bypass LOOK-LEDGER label opacity")
+        metadata = tuple(_metadata_from_fields(vars(row)) for row in source_rows)
         test_refs_by_role = {}
+        gated_refs_by_purpose = {}
         role_hash = ""
         expected_test_base_pairs = {}
         expected_test_graphs = {}
     grouped = {purpose: [] for purpose in SplitPurpose}
     for row in source_rows:
         grouped[row.purpose].append(row)
+    metadata_grouped = {purpose: [] for purpose in SplitPurpose}
+    for row in metadata:
+        metadata_grouped[row.purpose].append(row)
     return HoldoutPartitions(
         fit=tuple(grouped[SplitPurpose.FIT]),
-        validate=tuple(grouped[SplitPurpose.VALIDATE]),
-        reusable_holdout=tuple(grouped[SplitPurpose.REUSABLE_HOLDOUT]),
-        diagnostic=tuple(grouped[SplitPurpose.DIAGNOSTIC]),
+        validate=tuple(metadata_grouped[SplitPurpose.VALIDATE]),
+        reusable_holdout=tuple(metadata_grouped[SplitPurpose.REUSABLE_HOLDOUT]),
+        diagnostic=tuple(metadata_grouped[SplitPurpose.DIAGNOSTIC]),
+        _gated_refs_by_purpose=MappingProxyType(gated_refs_by_purpose),
         _test_refs_by_role=MappingProxyType(test_refs_by_role),
         role_hash=role_hash,
         expected_test_base_pairs=expected_test_base_pairs,
@@ -132,9 +157,10 @@ class TestHoldoutGuard:
     def __init__(self) -> None:
         """Initialize a guard with the injected frozen campaign ledger root."""
 
-        self._ledger_root = _ACCESS_LEDGER_ROOT
-        self._path: Union[Path, None] = None
-        self._lock_path: Union[Path, None] = None
+        self._ledger = AccessLedger()
+        self._ledger._ledger_root = _ACCESS_LEDGER_ROOT
+        self._ledger_root = self._ledger._ledger_root
+        self._path: Union[object, None] = None
         self._reserved_role: Union[str, None] = None
         self._consumed_in_process = False
 
@@ -148,7 +174,7 @@ class TestHoldoutGuard:
             True after local consumption or when the record exists.
         """
 
-        return self._consumed_in_process or (self._path is not None and self._path.exists())
+        return self._consumed_in_process
 
     def _reveal_test_rows(
         self, refs: Tuple[_SealedJudgmentRef, ...], role: str
@@ -179,8 +205,6 @@ class TestHoldoutGuard:
             not self._consumed_in_process
             or self._reserved_role != role
             or any(ref.row_fields["role"] != role for ref in refs)
-            or self._lock_path is None
-            or not self._lock_path.exists()
         ):
             raise RuntimeError("sealed labels require a successful access reservation")
         by_path: dict[Path, dict[int, _SealedJudgmentRef]] = {}
@@ -272,53 +296,137 @@ class TestHoldoutGuard:
         expected_graphs = partitions.expected_test_graphs.get(role, ())
         if actual_graphs != expected_graphs:
             raise ValueError(f"A15 TEST role does not cover its frozen graph census: {role}")
-        path = self._ledger_root / f"{partitions.role_hash}.jsonl"
-        lock_path = self._ledger_root / f"{partitions.role_hash}.{role}.1.lock"
-        if self._path is not None and self._path != path:
-            raise ValueError("one guard instance cannot consume different TEST banks")
-        self._path = path
-        self._lock_path = lock_path
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256()
-        for ref in refs:
-            digest.update(str(ref.row_fields["presentation_id"]).encode("utf-8"))
-            digest.update(b"\0")
-        presentation_digest = digest.hexdigest()
         role_label = "within" if role == "within-family-sealed" else "cross"
-        payload = (
-            json.dumps(
-                {
-                    "state": "CONSUMED",
-                    "role_hash": partitions.role_hash,
-                    "role": role,
-                    "label": role_label,
-                    "budget": 1,
-                    "row_count": len(refs),
-                    "presentation_digest": presentation_digest,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n"
-        ).encode("utf-8")
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
         try:
-            lock_descriptor = os.open(self._lock_path, flags, 0o600)
-        except FileExistsError as error:
+            self._ledger.reserve_once(
+                partitions.role_hash,
+                role,
+                (str(ref.row_fields["presentation_id"]) for ref in refs),
+                purpose=f"sealed-test-{role_label}",
+            )
+        except AccessBudgetConsumedError as error:
             raise TestHoldoutConsumedError(
                 f"A15 TEST role has already been touched: {role}"
             ) from error
+        self._reserved_role = role
+        self._consumed_in_process = True
+        return self._reveal_test_rows(refs, role)
+
+
+class CalibrationLookGuard(TestHoldoutGuard):
+    """Release calibration labels only after reserving the next look."""
+
+    def __init__(self) -> None:
+        """Initialize against the injected shared campaign ledger."""
+
+        super().__init__()
+
+    def consume(
+        self,
+        partitions: HoldoutPartitions,
+        role: str,
+        occasion: str,
+        informative_judgments: int,
+        decision: str,
+    ) -> Tuple[Tuple[JudgmentRow, ...], LookReservation]:
+        """Record and release one complete calibration-role look.
+
+        Parameters
+        ----------
+        partitions : HoldoutPartitions
+            Opaque bank partitions bound to the frozen role hash.
+        role : str
+            Within- or cross-family calibration role.
+        occasion : str
+            Next frozen occasion label.
+        informative_judgments : int
+            Campaign informative count divided by the frozen 8,520 denominator.
+        decision : str
+            Capacity unlock, stopping, or named per-stratum bar informed.
+
+        Returns
+        -------
+        tuple[tuple[JudgmentRow, ...], LookReservation]
+            Labelled rows and their alpha-spent reservation.
+
+        Raises
+        ------
+        CalibrationLookConsumedError
+            If the schedule has exhausted its four slots.
+        ValueError
+            If the role, census, or occasion is invalid.
+        """
+
+        if role not in {"within-family-calibration", "cross-family-calibration"}:
+            raise ValueError(f"unknown calibration role: {role!r}")
+        refs = tuple(
+            ref
+            for ref in partitions._gated_refs_by_purpose.get(SplitPurpose.VALIDATE, ())
+            if ref.row_fields["role"] == role
+        )
+        if not refs:
+            raise ValueError(f"cannot consume an empty calibration role: {role}")
+        if not partitions.role_hash:
+            raise ValueError("calibration partition lacks a frozen role hash")
         try:
-            os.fsync(lock_descriptor)
-        finally:
-            os.close(lock_descriptor)
-        ledger_flags = os.O_CREAT | os.O_APPEND | os.O_WRONLY
-        descriptor = os.open(self._path, ledger_flags, 0o600)
-        try:
-            os.write(descriptor, payload)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+            reservation = self._ledger.reserve_look(
+                partitions.role_hash,
+                role,
+                occasion,
+                (str(ref.row_fields["presentation_id"]) for ref in refs),
+                decision,
+                informative_judgments,
+            )
+        except AccessBudgetConsumedError as error:
+            raise CalibrationLookConsumedError(str(error)) from error
+        self._reserved_role = role
+        self._consumed_in_process = True
+        rows = self._reveal_test_rows(refs, role)
+        return rows, reservation
+
+
+class ReusableJudgmentGuard(TestHoldoutGuard):
+    """Ledger uncapped entire-class and adversarial judged-label reads."""
+
+    def __init__(self) -> None:
+        """Initialize against the injected shared campaign ledger."""
+
+        super().__init__()
+
+    def consume(
+        self, partitions: HoldoutPartitions, purpose: SplitPurpose
+    ) -> Tuple[JudgmentRow, ...]:
+        """Record and release one uncapped non-fitting judged row set.
+
+        Parameters
+        ----------
+        partitions : HoldoutPartitions
+            Opaque bank partitions bound to the frozen role hash.
+        purpose : SplitPurpose
+            ``REUSABLE_HOLDOUT`` or ``DIAGNOSTIC``.
+
+        Returns
+        -------
+        tuple[JudgmentRow, ...]
+            Labelled rows after the read was ledgered.
+
+        Raises
+        ------
+        ValueError
+            If the purpose, role hash, or row set is invalid.
+        """
+
+        if purpose not in {SplitPurpose.REUSABLE_HOLDOUT, SplitPurpose.DIAGNOSTIC}:
+            raise ValueError("reusable guard accepts holdout or diagnostic purpose only")
+        refs = partitions._gated_refs_by_purpose.get(purpose, ())
+        if not refs or not partitions.role_hash:
+            raise ValueError("reusable labelled read requires a nonempty frozen partition")
+        self._ledger.record_unbudgeted(
+            partitions.role_hash,
+            purpose.value,
+            (str(ref.row_fields["presentation_id"]) for ref in refs),
+        )
+        role = str(refs[0].row_fields["role"])
         self._reserved_role = role
         self._consumed_in_process = True
         return self._reveal_test_rows(refs, role)
