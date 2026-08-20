@@ -684,6 +684,8 @@ def load_bank(
                 continue
             if int(raw.get("side_bit", -1)) not in (0, 1):
                 raise ValueError(f"bank side_bit outside {{0, 1}}: {key}")
+            # The schedule already stores the rendered A/B order. ``side_bit``
+            # is only canonical-orientation metadata and must not flip it again.
             if any(
                 (
                     str(raw.get("base_pair_id")) != scheduled.base_pair_id,

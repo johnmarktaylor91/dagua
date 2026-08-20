@@ -28,6 +28,7 @@ from dagua.eval.ruler_v4.fit import (
     fit_jnd_heterogeneity,
     fit_pairs_from_rescoring,
     fit_weights,
+    jnd_band_calibration,
     load_bank,
     partition_holdouts,
 )
@@ -370,6 +371,20 @@ def test_objective_refuses_unidentified_scale_and_flags_bound_weights() -> None:
         OptimizerConfig(steps=1),
     )
     assert result.at_bounds == {"w_fixed": "fixed"}
+
+
+def test_jnd_calibration_replaces_only_the_dataclass_band() -> None:
+    """Cell calibration preserves every provenance field while replacing JND."""
+
+    row = _synthetic_recovery_rows(count=1)[0]
+    results = jnd_band_calibration(
+        (row,),
+        FittingPlan(_weight_parameters()),
+        {"w_structure": 0.6, "w_neighborhood": 1.6},
+        {("synthetic", "synthetic"): 0.25},
+    )
+    assert len(results) == 1
+    assert results[0].jnd == 0.25
 
 
 def test_fitting_plan_refuses_off_ledger_dof_and_diag_facets() -> None:
