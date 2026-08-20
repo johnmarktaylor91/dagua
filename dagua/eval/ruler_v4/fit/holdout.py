@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Tuple, Union
 
-from dagua.eval.ruler_v4.fit.bank import JudgmentRow, SplitPurpose
+from dagua.eval.ruler_v4.fit.bank import JudgmentBank, JudgmentRow, SplitPurpose
 
 PathLike = Union[str, Path]
 
@@ -52,13 +52,15 @@ class HoldoutPartitions:
         return len(self._test)
 
 
-def partition_holdouts(rows: Iterable[JudgmentRow]) -> HoldoutPartitions:
+def partition_holdouts(
+    rows: Union[JudgmentBank, Iterable[JudgmentRow]],
+) -> HoldoutPartitions:
     """Partition judgments by their frozen A15 consumption purpose.
 
     Parameters
     ----------
-    rows : iterable[JudgmentRow]
-        Accepted scheduled bank rows.
+    rows : JudgmentBank or iterable[JudgmentRow]
+        A bank (required to partition its opaque TEST rows) or explicit rows.
 
     Returns
     -------
@@ -66,8 +68,9 @@ def partition_holdouts(rows: Iterable[JudgmentRow]) -> HoldoutPartitions:
         Stable purpose partitions with test labels kept private.
     """
 
+    source_rows = rows._partition_rows() if isinstance(rows, JudgmentBank) else rows
     grouped = {purpose: [] for purpose in SplitPurpose}
-    for row in rows:
+    for row in source_rows:
         grouped[row.purpose].append(row)
     return HoldoutPartitions(
         fit=tuple(grouped[SplitPurpose.FIT]),
