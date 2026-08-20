@@ -149,16 +149,17 @@ class FittingPlan:
             raise ValueError("prior floors are positive and limited to U12, U13, and U34")
         for parameter in weights:
             required = set(parameter.facet_ids) & REQUIRED_PRIOR_FLOOR_FACETS
+            if required and len(parameter.facet_ids) != 1:
+                raise ValueError(
+                    "prior-floor validation requires one fitted scalar per traceability facet"
+                )
             missing = sorted(required - set(floors))
             if missing:
                 raise ValueError(f"fitted traceability facets require prior floors: {missing}")
             for facet_id in set(parameter.facet_ids) & set(floors):
-                if len(parameter.facet_ids) == 1:
-                    effective_lower = float(parameter.lower) * math.fsum(
-                        parameter.subterm_coefficients.values()
-                    )
-                else:
-                    effective_lower = float(parameter.lower)
+                effective_lower = float(parameter.lower) * math.fsum(
+                    parameter.subterm_coefficients.values()
+                )
                 if effective_lower < floors[facet_id]:
                     raise ValueError(f"{facet_id} fitted bound falls below its prior floor")
         if not math.isfinite(self.prior_strength) or self.prior_strength < 0.0:
