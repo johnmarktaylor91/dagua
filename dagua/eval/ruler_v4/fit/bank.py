@@ -92,6 +92,8 @@ class JudgmentRow:
         Graded verdict in ``[-3, 3]``. Negative favors A; positive favors B.
     tie : bool
         Explicit A13 tie indicator.
+    confidence : int
+        A13 confidence response in ``[1, 3]``.
     is_replication : bool
         Whether the row belongs to the cross-session replication line.
     role : str
@@ -115,6 +117,7 @@ class JudgmentRow:
     observation_profile: str
     verdict: int
     tie: bool
+    confidence: int
     is_replication: bool
     role: str
     purpose: SplitPurpose
@@ -493,7 +496,19 @@ def _reveal_test_rows(refs: Tuple[_SealedJudgmentRef, ...]) -> Tuple[JudgmentRow
             tie = bool(raw.get("tie", verdict == 0))
             if verdict < -3 or verdict > 3:
                 raise ValueError(f"verdict outside A13 range: {verdict}")
-            rows.append(JudgmentRow(**ref.row_fields, verdict=verdict, tie=tie))
+            confidence = int(raw.get("confidence", 0))
+            if confidence not in (1, 2, 3):
+                raise ValueError(f"confidence outside A13 range: {confidence}")
+            if tie != (verdict == 0):
+                raise ValueError("guarded TEST verdict/tie fields are inconsistent")
+            rows.append(
+                JudgmentRow(
+                    **ref.row_fields,
+                    verdict=verdict,
+                    tie=tie,
+                    confidence=confidence,
+                )
+            )
         if found != set(expected):
             raise ValueError(f"guarded TEST source rows missing from {path}")
     return tuple(sorted(rows, key=lambda row: (row.session_id, row.presentation_id)))
@@ -522,7 +537,7 @@ def load_schedule(inputs: Iterable[PathLike]) -> Mapping[Tuple[str, str], Schedu
     for path in _jsonl_paths(inputs):
         for raw in _read_jsonl(path):
             if "presentation_id" not in raw or "blind_id_A" not in raw:
-                continue
+                raise ValueError(f"{path}: schedule row lacks presentation identities")
             try:
                 row = ScheduledPair(
                     presentation_id=str(raw["presentation_id"]),
@@ -667,11 +682,12 @@ def load_bank(
             if scheduled is None:
                 counts["excluded_unscheduled"] += 1
                 continue
+            if int(raw.get("side_bit", -1)) not in (0, 1):
+                raise ValueError(f"bank side_bit outside {{0, 1}}: {key}")
             if any(
                 (
                     str(raw.get("base_pair_id")) != scheduled.base_pair_id,
                     str(raw.get("graph_hash")) != scheduled.graph_hash,
-                    int(raw.get("side_bit", 0)) not in (0, 1),
                 )
             ):
                 raise ValueError(f"bank/schedule identity mismatch: {key}")
@@ -697,6 +713,15 @@ def load_bank(
             verdict = int(raw.get("verdict", 0))
             if verdict < -3 or verdict > 3:
                 raise ValueError(f"verdict outside A13 range: {verdict}")
+            tie = bool(raw.get("tie", verdict == 0))
+            if verdict == 0 and not tie:
+                counts["excluded_invalid"] += 1
+                continue
+            if tie != (verdict == 0):
+                raise ValueError("A13 verdict and tie fields are inconsistent")
+            confidence = int(raw.get("confidence", 0))
+            if confidence not in (1, 2, 3):
+                raise ValueError(f"confidence outside A13 range: {confidence}")
             row_fields = {
                 "presentation_id": scheduled.presentation_id,
                 "session_id": scheduled.session_id,
@@ -730,7 +755,8 @@ def load_bank(
                     JudgmentRow(
                         **row_fields,
                         verdict=verdict,
-                        tie=bool(raw.get("tie", verdict == 0)),
+                        tie=tie,
+                        confidence=confidence,
                     )
                 )
     ordered = tuple(sorted(rows, key=lambda row: (row.session_id, row.presentation_id)))
