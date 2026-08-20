@@ -244,8 +244,11 @@ def _information_diagnostics(
         dtype=objective.dtype,
         requires_grad=True,
     )
+    # Excluding the prior prevents regularization from hiding a likelihood-rank
+    # deficiency that this mandatory publication exists to expose.
     information = torch.autograd.functional.hessian(
-        lambda candidate: objective.loss(candidate) * len(objective.pairs), vector
+        lambda candidate: objective.negative_log_likelihood(candidate) * len(objective.pairs),
+        vector,
     )
     matrix = information.detach().numpy()
     rank = int(np.linalg.matrix_rank(matrix))
