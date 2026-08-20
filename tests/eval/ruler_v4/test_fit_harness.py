@@ -743,11 +743,14 @@ def test_frozen_recorded_bank_fixture_has_stable_loader_digest(tmp_path: Path) -
             role: list(presentations)
             for role, presentations in bank.expected_test_presentations.items()
         },
+        "expected_test_graphs": {
+            role: list(graph_hashes) for role, graph_hashes in bank.expected_test_graphs.items()
+        },
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     assert hashlib.sha256(encoded).hexdigest() == (
-        "2381e57a823cbeee2ca472b61e5590c6a300ff7e118008ff13a1878fa2b34168"  # noqa: E501  # pragma: allowlist secret
+        "bcbfa97d77ed5fe731ffc65068ef4598d4da8e8bbcbf3c8888ce8f661b5e3591"  # noqa: E501  # pragma: allowlist secret
     )
 
 
