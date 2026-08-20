@@ -21,6 +21,7 @@ from dagua.eval.ruler_v4.weight_table import (
 )
 
 _MIN_PROBABILITY = 1.0e-12
+_FROZEN_PRIOR_STRENGTH = 2.0
 
 
 @dataclass(frozen=True)
@@ -102,13 +103,13 @@ class FittingPlan:
     prior_floors : mapping[str, float]
         Frozen positive floors for any traceability facets present in ``weights``.
     prior_strength : float
-        Nonnegative log-prior shrinkage multiplier.
+        Frozen inverse prior variance on the ``log_4`` scale.
     """
 
     weights: Tuple[WeightParameter, ...]
     other_fitted_parameter_buckets: Mapping[str, str] = field(default_factory=dict)
     prior_floors: Mapping[str, float] = field(default_factory=dict)
-    prior_strength: float = 0.0
+    prior_strength: float = field(default=_FROZEN_PRIOR_STRENGTH, init=False)
 
     def __post_init__(self) -> None:
         """Freeze declarations and refuse off-ledger degrees of freedom.
@@ -162,8 +163,6 @@ class FittingPlan:
                 )
                 if effective_lower < floors[facet_id]:
                     raise ValueError(f"{facet_id} fitted bound falls below its prior floor")
-        if not math.isfinite(self.prior_strength) or self.prior_strength < 0.0:
-            raise ValueError("prior strength must be finite and nonnegative")
         object.__setattr__(self, "weights", weights)
         object.__setattr__(self, "other_fitted_parameter_buckets", MappingProxyType(others))
         object.__setattr__(self, "prior_floors", MappingProxyType(floors))
@@ -183,7 +182,7 @@ class FittingPlan:
 
 @dataclass(frozen=True)
 class FitPair:
-    """Hold one P-mean pair and its three-way judgment label.
+    """Hold one P-mean pair and its complete ordered-probit label.
 
     Parameters
     ----------
@@ -206,7 +205,7 @@ class FitPair:
     jnd : float
         Positive tie half-band on the score-difference scale.
     lapse_rate : float
-        Uniform three-outcome lapse mixture in ``[0, 1)``.
+        Uniform seven-category lapse mixture in ``[0, 1)``.
     primary_class, size_band, graph_hash, generator_family, era, instrument_hash : str
         Frozen diagnostic strata.
     observation_profile : str
@@ -217,6 +216,8 @@ class FitPair:
         Whether the judgment belongs to the cross-session replication line.
     base_pair_id, session_id, blind_id_a, blind_id_b : str
         Replication and displayed-order provenance.
+    synthetic : bool
+        Whether the row was constructed by the typed synthetic fixture factory.
     """
 
     numerator_a: Tuple[float, ...]
@@ -224,26 +225,27 @@ class FitPair:
     mass_coefficients: Tuple[float, ...]
     outcome: int
     graded_verdict: int
-    confidence: Optional[int] = None
-    fixed_numerator_a: float = 0.0
-    fixed_numerator_b: float = 0.0
-    fixed_mass: float = 0.0
-    composition_power: float = 1.0
-    jnd: float = 0.1
-    lapse_rate: float = 0.0
-    primary_class: str = "synthetic"
-    size_band: str = "synthetic"
-    graph_hash: str = "synthetic"
-    generator_family: str = "synthetic"
-    era: str = "synthetic"
-    instrument_hash: str = "synthetic"
-    observation_profile: str = "synthetic"
-    purpose: SplitPurpose = SplitPurpose.FIT
-    is_replication: bool = False
-    base_pair_id: str = "synthetic"
-    session_id: str = "synthetic"
-    blind_id_a: str = "synthetic-a"
-    blind_id_b: str = "synthetic-b"
+    confidence: Optional[int]
+    fixed_numerator_a: float
+    fixed_numerator_b: float
+    fixed_mass: float
+    composition_power: float
+    jnd: float
+    lapse_rate: float
+    primary_class: str
+    size_band: str
+    graph_hash: str
+    generator_family: str
+    era: str
+    instrument_hash: str
+    observation_profile: str
+    purpose: SplitPurpose
+    is_replication: bool
+    base_pair_id: str
+    session_id: str
+    blind_id_a: str
+    blind_id_b: str
+    synthetic: bool
 
     def __post_init__(self) -> None:
         """Validate feature dimensions and likelihood constants.
@@ -291,6 +293,8 @@ class FitPair:
             raise ValueError("lapse rate must lie in [0, 1)")
         if not isinstance(self.purpose, SplitPurpose):
             raise ValueError("pair purpose must be a SplitPurpose")
+        if not isinstance(self.synthetic, bool):
+            raise ValueError("pair synthetic provenance must be boolean")
         if not all(
             (
                 self.observation_profile,
@@ -305,6 +309,93 @@ class FitPair:
         object.__setattr__(self, "numerator_b", numerator_b)
         object.__setattr__(self, "mass_coefficients", masses)
         object.__setattr__(self, "graded_verdict", graded_verdict)
+
+
+def synthetic_fit_pair(
+    numerator_a: Tuple[float, ...],
+    numerator_b: Tuple[float, ...],
+    mass_coefficients: Tuple[float, ...],
+    graded_verdict: int,
+    *,
+    confidence: Optional[int] = None,
+    fixed_numerator_a: float = 0.0,
+    fixed_numerator_b: float = 0.0,
+    fixed_mass: float = 0.0,
+    composition_power: float = 1.0,
+    jnd: float = 0.1,
+    lapse_rate: float = 0.0,
+    primary_class: str = "synthetic",
+    size_band: str = "synthetic",
+    graph_hash: str = "synthetic",
+    generator_family: str = "synthetic",
+    era: str = "synthetic",
+    instrument_hash: str = "synthetic",
+    observation_profile: str = "synthetic",
+    is_replication: bool = False,
+    base_pair_id: str = "synthetic",
+    session_id: str = "synthetic",
+    blind_id_a: str = "synthetic-a",
+    blind_id_b: str = "synthetic-b",
+) -> FitPair:
+    """Build one explicitly synthetic ordered-response row.
+
+    Parameters
+    ----------
+    numerator_a, numerator_b, mass_coefficients : tuple[float, ...]
+        Synthetic P-mean feature vectors.
+    graded_verdict : int
+        Original seven-point response in ``[-3, 3]``; its sign supplies the
+        three-way reporting projection.
+    confidence : int or None, optional
+        Diagnostic-only A13 confidence.
+    fixed_numerator_a, fixed_numerator_b, fixed_mass : float, optional
+        Synthetic non-fitted P-mean contributions.
+    composition_power, jnd, lapse_rate : float, optional
+        Synthetic likelihood constants.
+    primary_class, size_band, graph_hash, generator_family : str, optional
+        Synthetic diagnostic strata.
+    era, instrument_hash, observation_profile : str, optional
+        Synthetic non-poolable likelihood identity.
+    is_replication : bool, default=False
+        Whether this fixture row exercises replication behavior.
+    base_pair_id, session_id, blind_id_a, blind_id_b : str, optional
+        Synthetic replication provenance.
+
+    Returns
+    -------
+    FitPair
+        Fully populated synthetic-only objective row.
+    """
+
+    outcome = 0 if graded_verdict == 0 else 1 if graded_verdict > 0 else -1
+    return FitPair(
+        numerator_a=numerator_a,
+        numerator_b=numerator_b,
+        mass_coefficients=mass_coefficients,
+        outcome=outcome,
+        graded_verdict=graded_verdict,
+        confidence=confidence,
+        fixed_numerator_a=fixed_numerator_a,
+        fixed_numerator_b=fixed_numerator_b,
+        fixed_mass=fixed_mass,
+        composition_power=composition_power,
+        jnd=jnd,
+        lapse_rate=lapse_rate,
+        primary_class=primary_class,
+        size_band=size_band,
+        graph_hash=graph_hash,
+        generator_family=generator_family,
+        era=era,
+        instrument_hash=instrument_hash,
+        observation_profile=observation_profile,
+        purpose=SplitPurpose.FIT,
+        is_replication=is_replication,
+        base_pair_id=base_pair_id,
+        session_id=session_id,
+        blind_id_a=blind_id_a,
+        blind_id_b=blind_id_b,
+        synthetic=True,
+    )
 
 
 def fit_pairs_from_rescoring(
@@ -472,13 +563,14 @@ def fit_pairs_from_rescoring(
                 session_id=pair.judgment.session_id,
                 blind_id_a=pair.judgment.blind_id_a,
                 blind_id_b=pair.judgment.blind_id_b,
+                synthetic=False,
             )
         )
     return tuple(result)
 
 
 class PairwiseObjective:
-    """Evaluate ordered-logit JND likelihood with log-prior shrinkage.
+    """Evaluate the frozen seven-category ordered-probit likelihood.
 
     Parameters
     ----------
@@ -517,11 +609,8 @@ class PairwiseObjective:
         rows = tuple(pairs)
         if not rows:
             raise ValueError("pairwise objective requires at least one row")
-        if any(abs(int(row.graded_verdict)) > 1 for row in rows):
-            raise ValueError(
-                "graded A13 verdicts require the pending ordered-probit model; "
-                "three-way collapse is refused"
-            )
+        if any(row.purpose is not SplitPurpose.FIT for row in rows):
+            raise ValueError("a non-train row reached the FIT-ORD likelihood")
         if all(
             row.fixed_mass == 0.0 and row.fixed_numerator_a == 0.0 and row.fixed_numerator_b == 0.0
             for row in rows
@@ -533,9 +622,7 @@ class PairwiseObjective:
         dimension = len(plan.weights)
         if dimension == 0 or any(len(row.numerator_a) != dimension for row in rows):
             raise ValueError("pair dimensions must match the fitting plan")
-        strata = {
-            (row.instrument_hash, row.era, row.observation_profile, row.purpose) for row in rows
-        }
+        strata = {(row.instrument_hash, row.era, row.observation_profile) for row in rows}
         if len(strata) != 1:
             raise ValueError("one likelihood may not cross instrument/era/profile/purpose strata")
         self.pairs = rows
@@ -550,7 +637,9 @@ class PairwiseObjective:
         self._power = torch.tensor([row.composition_power for row in rows], dtype=dtype)
         self._jnd = torch.tensor([row.jnd for row in rows], dtype=dtype)
         self._lapse = torch.tensor([row.lapse_rate for row in rows], dtype=dtype)
-        self._outcomes = torch.tensor([row.outcome for row in rows], dtype=torch.int64)
+        self._verdict_indices = torch.tensor(
+            [row.graded_verdict + 3 for row in rows], dtype=torch.int64
+        )
         self._priors = torch.tensor([parameter.prior for parameter in plan.weights], dtype=dtype)
 
     def score_differences(self, weights: torch.Tensor) -> torch.Tensor:
@@ -577,7 +666,34 @@ class PairwiseObjective:
         return score_a - score_b
 
     def outcome_probabilities(self, weights: torch.Tensor) -> torch.Tensor:
-        """Return ordered-logit A/tie/B probabilities under JND semantics.
+        """Return ordered-probit probabilities for verdicts ``-3`` through ``+3``.
+
+        Parameters
+        ----------
+        weights : torch.Tensor
+            Positive fitted weights with shape ``[P]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Probability matrix with shape ``[J, 7]`` in verdict order.
+        """
+
+        difference = self.score_differences(weights)
+        cutpoints = self._jnd.unsqueeze(1) * torch.tensor(
+            (-3.0, -2.0, -1.0, 1.0, 2.0, 3.0), dtype=self.dtype
+        ).unsqueeze(0)
+        cdf = 0.5 * (1.0 + torch.erf((cutpoints - difference.unsqueeze(1)) / math.sqrt(2.0)))
+        zeros = torch.zeros((len(self.pairs), 1), dtype=self.dtype)
+        ones = torch.ones((len(self.pairs), 1), dtype=self.dtype)
+        boundaries = torch.cat((zeros, cdf, ones), dim=1)
+        probabilities = boundaries[:, 1:] - boundaries[:, :-1]
+        probabilities = (1.0 - self._lapse.unsqueeze(1)) * probabilities
+        probabilities = probabilities + self._lapse.unsqueeze(1) / 7.0
+        return torch.clamp(probabilities, min=_MIN_PROBABILITY, max=1.0)
+
+    def directional_probabilities(self, weights: torch.Tensor) -> torch.Tensor:
+        """Project ordered probabilities onto the A/tie/B reporting scale.
 
         Parameters
         ----------
@@ -590,19 +706,14 @@ class PairwiseObjective:
             Probability matrix with shape ``[J, 3]`` in A/tie/B order.
         """
 
-        difference = self.score_differences(weights)
-        lower = torch.sigmoid(-self._jnd - difference)
-        upper = torch.sigmoid(self._jnd - difference)
-        probability_a = lower
-        probability_tie = upper - lower
-        probability_b = 1.0 - upper
-        probabilities = torch.stack((probability_a, probability_tie, probability_b), dim=1)
-        probabilities = (1.0 - self._lapse.unsqueeze(1)) * probabilities
-        probabilities = probabilities + self._lapse.unsqueeze(1) / 3.0
-        return torch.clamp(probabilities, min=_MIN_PROBABILITY, max=1.0)
+        ordered = self.outcome_probabilities(weights)
+        return torch.stack(
+            (ordered[:, :3].sum(dim=1), ordered[:, 3], ordered[:, 4:].sum(dim=1)),
+            dim=1,
+        )
 
     def negative_log_likelihood(self, weights: torch.Tensor) -> torch.Tensor:
-        """Return mean ordered-logit negative log likelihood.
+        """Return mean ordered-probit negative log likelihood.
 
         Parameters
         ----------
@@ -616,8 +727,7 @@ class PairwiseObjective:
         """
 
         probabilities = self.outcome_probabilities(weights)
-        indices = self._outcomes + 1
-        selected = probabilities.gather(1, indices.unsqueeze(1)).squeeze(1)
+        selected = probabilities.gather(1, self._verdict_indices.unsqueeze(1)).squeeze(1)
         return -torch.log(selected).mean()
 
     def loss(self, weights: torch.Tensor) -> torch.Tensor:
@@ -635,7 +745,54 @@ class PairwiseObjective:
         """
 
         nll = self.negative_log_likelihood(weights)
-        if self.plan.prior_strength == 0.0:
-            return nll
         shrinkage = torch.square(torch.log(weights / self._priors) / math.log(4.0)).sum()
         return nll + self.plan.prior_strength * shrinkage / len(self.pairs)
+
+
+@dataclass(frozen=True)
+class FitOrdLines:
+    """Separate the train likelihood from its replication-only JND profile.
+
+    Parameters
+    ----------
+    train : tuple[FitPair, ...]
+        All informative and replication train-role presentations contributing
+        to outer weights and lapse.
+    replication : tuple[FitPair, ...]
+        Train-role cross-session replication presentations contributing to the
+        JND block.
+    """
+
+    train: Tuple[FitPair, ...]
+    replication: Tuple[FitPair, ...]
+
+
+def partition_fit_ord_lines(pairs: Sequence[FitPair]) -> FitOrdLines:
+    """Validate and partition FIT-ORD's two non-transferable consumption lines.
+
+    Parameters
+    ----------
+    pairs : sequence[FitPair]
+        Candidate ordered-response rows.
+
+    Returns
+    -------
+    FitOrdLines
+        Complete train line and its replication-only JND subset.
+
+    Raises
+    ------
+    ValueError
+        If the input is empty, contains a non-train row, or has no replication
+        line for the profiled JND block.
+    """
+
+    rows = tuple(pairs)
+    if not rows:
+        raise ValueError("FIT-ORD requires nonempty train-role rows")
+    if any(pair.purpose is not SplitPurpose.FIT for pair in rows):
+        raise ValueError("a non-train row reached FIT-ORD")
+    replication = tuple(pair for pair in rows if pair.is_replication)
+    if not replication:
+        raise ValueError("FIT-ORD requires a train-role replication line")
+    return FitOrdLines(train=rows, replication=replication)

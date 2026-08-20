@@ -551,14 +551,11 @@ the production port; none of the entries below overrides a contract.
     production caller uses registered-ruler dispatch for v4 yet). OWNER:
     registry-seam hardening, to land before any external caller is
     pointed at `ruler="ruler_v4"` (pre-P5 wiring).
-45. P5FIX does not select a latent judgment mechanism. `V4_SPEC_r4.md` section
-    7.6 requires the graded seven-point response to feed ordered-probit JND,
-    while section 4.2 still labels the latent-space mechanism "P2 synthesis
-    pending". The bank and `FitPair` now retain verdict magnitude and confidence,
-    and `PairwiseObjective` refuses magnitude-2/3 rows rather than silently
-    collapsing them into the three-outcome logit fixture. OWNER: contract owner
-    must freeze the ordered thresholds/link and its dof declaration before a
-    real P5 weight fit is enabled.
+45. CLOSED by ADDENDUM-27 FIT-ORD. `PairwiseObjective` consumes the graded
+    seven-point response with unit-variance ordered probit, symmetric
+    `1:2:3` JND cutpoints, and a seven-category uniform lapse. Verdict magnitude
+    drives likelihood selection; the A/tie/B collapse survives only as a
+    reporting projection, and confidence remains diagnostic-only.
 46. The former JND-HET point estimator was not W-13's hierarchical model:
     `PREREG_V4_CALIBRATION.md` section 3 requires fitted `tau_class` and
     `tau_band`, split-half stability, every cell CI, and graph-cluster/bootstrap
@@ -608,13 +605,9 @@ the production port; none of the entries below overrides a contract.
     quarantined blind-id truth map. The JND model is fail-closed independently.
     OWNER: authorized freeze-fit orchestration must attest blind-map separation
     without exposing engine identities to the fitting module.
-53. `FitPair` retains synthetic defaults for JND/lapse and synthetic stratum ids
-    so deterministic objective fixtures remain small. Every bank-to-rescoring
-    bridge call supplies these fields explicitly, `graded_verdict` is required
-    even for synthetic rows, real magnitude-2/3 rows are refused, and weight
-    fitting fences purpose/profile/instrument/era. OWNER:
-    remove the fixture defaults when the ordered-model constructor in entry 45
-    supplies a separate typed synthetic-row factory.
+53. CLOSED by ADDENDUM-27 FIT-ORD. `FitPair` has no synthetic JND, lapse, or
+    stratum defaults; real bridge construction supplies every field explicitly,
+    and `synthetic_fit_pair` is the separate typed fixture factory.
 54. `PREREG_V4_CALIBRATION.md` section 7 requires C-06's published
     uncertain-prior-coefficient sensitivity/effective-complexity audit and its
     SHRINK-or-PARTIAL response rule. `A18_INSERT_W13.md` section 1 requires a
@@ -632,3 +625,11 @@ the production port; none of the entries below overrides a contract.
     therefore enforces content subset and completeness in base-pair space while
     retaining the independent graph census check. OWNER: the next protocol
     addendum should record this already-enforced reconciliation explicitly.
+56. ADDENDUM-27 FIT-ORD(e) says the pilot's coarser per-stratum lapse estimate
+    enters as a prior, never a plug-in, but freezes neither a prior family nor
+    its strength/effective sample size. Those choices change the fitted lapse
+    and outer weights. The seven-category likelihood is implemented, but the
+    low-level optimizer refuses every real row rather than silently treating a
+    caller-supplied lapse as fixed or inventing a prior. OWNER: freeze the lapse
+    prior family and strength before the first real profiled FIT-ORD fit; synthetic
+    discriminating fixtures remain executable.
