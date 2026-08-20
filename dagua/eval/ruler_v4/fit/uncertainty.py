@@ -563,7 +563,7 @@ def _validate_replication_rows(rows: Tuple[FitPair, ...]) -> Mapping[Tuple[str, 
         cross-session displayed side swap.
     """
 
-    if not rows or any(not pair.is_replication for pair in rows):
+    if not rows:
         raise ValueError("JND-HET accepts cross-session replication rows only")
     if any(pair.purpose.value != "fit" for pair in rows):
         raise ValueError("JND-HET accepts train-role rows only")
@@ -572,19 +572,26 @@ def _validate_replication_rows(rows: Tuple[FitPair, ...]) -> Mapping[Tuple[str, 
         raise ValueError("JND-HET cannot cross instrument, era, or profile strata")
     by_base_pair: DefaultDict[str, list[FitPair]] = defaultdict(list)
     for pair in rows:
-        by_base_pair[pair.base_pair_id].append(pair)
+        by_base_pair[pair.replicate_group_id].append(pair)
     counts: DefaultDict[Tuple[str, str], int] = defaultdict(int)
-    for base_pair_id, presentations in by_base_pair.items():
+    for replicate_group_id, presentations in by_base_pair.items():
         sessions = {pair.session_id for pair in presentations}
         displayed_orders = {(pair.blind_id_a, pair.blind_id_b) for pair in presentations}
         drawing_sets = {frozenset(order) for order in displayed_orders}
         cells = {(pair.primary_class, pair.size_band) for pair in presentations}
+        base_pair_ids = {pair.base_pair_id for pair in presentations}
         if len(sessions) < 2:
-            raise ValueError(f"JND-HET base pair {base_pair_id} lacks cross-session replication")
+            raise ValueError(
+                f"JND-HET replicate group {replicate_group_id} lacks cross-session replication"
+            )
         if len(drawing_sets) != 1 or len(displayed_orders) < 2:
-            raise ValueError(f"JND-HET base pair {base_pair_id} lacks a displayed side swap")
+            raise ValueError(
+                f"JND-HET replicate group {replicate_group_id} lacks a displayed side swap"
+            )
+        if len(base_pair_ids) != 1:
+            raise ValueError(f"JND-HET replicate group {replicate_group_id} crosses base pairs")
         if len(cells) != 1:
-            raise ValueError(f"JND-HET base pair {base_pair_id} crosses cells")
+            raise ValueError(f"JND-HET replicate group {replicate_group_id} crosses cells")
         counts[next(iter(cells))] += 1
     return MappingProxyType(dict(counts))
 
@@ -1265,7 +1272,8 @@ def fit_jnd_heterogeneity(
         role_hash=config.role_hash,
         replication_row_ids=tuple(
             sorted(
-                f"{row.base_pair_id}\0{row.session_id}\0{row.blind_id_a}\0{row.blind_id_b}"
+                f"{row.replicate_group_id}\0{row.base_pair_id}\0{row.session_id}\0"
+                f"{row.blind_id_a}\0{row.blind_id_b}"
                 for row in rows
             )
         ),
