@@ -129,17 +129,10 @@ def partition_holdouts(
 class TestHoldoutGuard:
     """Persist content-bound A15 TEST access with exclusive creation."""
 
-    def __init__(self, ledger_root: Union[str, Path, None] = None) -> None:
-        """Initialize a guard with the injected frozen campaign ledger root.
+    def __init__(self) -> None:
+        """Initialize a guard with the injected frozen campaign ledger root."""
 
-        Parameters
-        ----------
-        ledger_root : str, pathlib.Path, or None
-            Frozen campaign ledger root. ``None`` uses the production config;
-            tests inject an isolated temporary root through this seam.
-        """
-
-        self._ledger_root = _ACCESS_LEDGER_ROOT if ledger_root is None else Path(ledger_root)
+        self._ledger_root = _ACCESS_LEDGER_ROOT
         self._path: Union[Path, None] = None
         self._lock_path: Union[Path, None] = None
         self._reserved_role: Union[str, None] = None

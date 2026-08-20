@@ -497,7 +497,8 @@ def test_test_holdout_access_fails_closed_on_all_review_defeats(
     with pytest.raises(TypeError):
         pickle.dumps(partitions)
     assert HoldoutGuard()._ledger_root == tmp_path / "state"
-    assert HoldoutGuard(tmp_path / "injected-state")._ledger_root == tmp_path / "injected-state"
+    with pytest.raises(TypeError):
+        HoldoutGuard(tmp_path / "alternate-root")
     assert not hasattr(bank_module, "_reveal_test_rows")
     refs = partitions._test_refs_by_role["cross-family-sealed"]
     with pytest.raises(RuntimeError, match="reservation"):
