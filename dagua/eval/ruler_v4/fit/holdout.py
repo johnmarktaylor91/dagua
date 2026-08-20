@@ -19,7 +19,7 @@ from dagua.eval.ruler_v4.fit.bank import (
     _SealedJudgmentRef,
 )
 
-_ACCESS_LEDGER_ROOT = Path(__file__).resolve().parents[4] / "p3/gate/ACCESS_LEDGER"
+_ACCESS_LEDGER_ROOT = Path("/home/jtaylor/.claude/research/dagua/ruler_v4/p3/gate/ACCESS_LEDGER")
 
 
 class TestHoldoutConsumedError(RuntimeError):
@@ -129,9 +129,17 @@ def partition_holdouts(
 class TestHoldoutGuard:
     """Persist content-bound A15 TEST access with exclusive creation."""
 
-    def __init__(self) -> None:
-        """Initialize a guard without accepting a caller-chosen record path."""
+    def __init__(self, ledger_root: Union[str, Path, None] = None) -> None:
+        """Initialize a guard with the injected frozen campaign ledger root.
 
+        Parameters
+        ----------
+        ledger_root : str, pathlib.Path, or None
+            Frozen campaign ledger root. ``None`` uses the production config;
+            tests inject an isolated temporary root through this seam.
+        """
+
+        self._ledger_root = _ACCESS_LEDGER_ROOT if ledger_root is None else Path(ledger_root)
         self._path: Union[Path, None] = None
         self._lock_path: Union[Path, None] = None
         self._consumed_in_process = False
@@ -251,8 +259,8 @@ class TestHoldoutGuard:
         expected_graphs = partitions.expected_test_graphs.get(role, ())
         if actual_graphs != expected_graphs:
             raise ValueError(f"A15 TEST role does not cover its frozen graph census: {role}")
-        path = _ACCESS_LEDGER_ROOT / f"{partitions.role_hash}.jsonl"
-        lock_path = _ACCESS_LEDGER_ROOT / f"{partitions.role_hash}.{role}.1.lock"
+        path = self._ledger_root / f"{partitions.role_hash}.jsonl"
+        lock_path = self._ledger_root / f"{partitions.role_hash}.{role}.1.lock"
         if self._path is not None and self._path != path:
             raise ValueError("one guard instance cannot consume different TEST banks")
         self._path = path

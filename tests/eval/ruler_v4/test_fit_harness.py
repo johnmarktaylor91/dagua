@@ -495,8 +495,8 @@ def test_test_holdout_access_fails_closed_on_all_review_defeats(
         pickle.dumps(bank)
     with pytest.raises(TypeError):
         pickle.dumps(partitions)
-    with pytest.raises(TypeError):
-        HoldoutGuard(tmp_path / "alternate-record.json")
+    assert HoldoutGuard()._ledger_root == tmp_path / "state"
+    assert HoldoutGuard(tmp_path / "injected-state")._ledger_root == tmp_path / "injected-state"
     assert not hasattr(bank_module, "_reveal_test_rows")
     refs = partitions._test_refs_by_role["cross-family-sealed"]
     with pytest.raises(RuntimeError, match="reservation"):
@@ -532,6 +532,16 @@ def test_test_holdout_refuses_empty_partition_before_spending(
     with pytest.raises(ValueError, match="empty"):
         HoldoutGuard().consume(empty_test, "cross-family-sealed")
     assert not (tmp_path / "state").exists()
+
+
+def test_holdout_default_ledger_root_is_frozen_campaign_config() -> None:
+    """Checkout location cannot mint an independent sealed-role budget."""
+
+    expected = Path("/home/jtaylor/.claude/research/dagua/ruler_v4/p3/gate/ACCESS_LEDGER")
+
+    assert holdout_module._ACCESS_LEDGER_ROOT == expected
+    assert HoldoutGuard()._ledger_root == expected
+    assert expected.is_absolute()
 
 
 def test_test_holdout_identity_is_role_hash_keyed_and_refuses_partial_release(
