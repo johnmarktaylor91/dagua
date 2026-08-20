@@ -1,0 +1,4 @@
+N1-N5=5/5_fixed
+RESIDUALS=4/4_fixed
+TESTS=ruff_pass;mypy_cli_pass;P5_repros_64_pass;tests_eval_493_pass;layout_gate_385_pass_1_skip_1_out_of_scope_baseline_fail_reproduced
+HEAD_SHA=8dbaaaf0
