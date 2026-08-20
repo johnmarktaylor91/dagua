@@ -190,6 +190,8 @@ class FitPair:
         Uniform three-outcome lapse mixture in ``[0, 1)``.
     primary_class, size_band, graph_hash, generator_family, era, instrument_hash : str
         Frozen diagnostic strata.
+    is_replication : bool
+        Whether the judgment belongs to the cross-session replication line.
     """
 
     numerator_a: Tuple[float, ...]
@@ -208,6 +210,7 @@ class FitPair:
     generator_family: str = "synthetic"
     era: str = "synthetic"
     instrument_hash: str = "synthetic"
+    is_replication: bool = False
 
     def __post_init__(self) -> None:
         """Validate feature dimensions and likelihood constants.
@@ -360,6 +363,7 @@ def fit_pairs_from_rescoring(
                 generator_family=pair.judgment.generator_family,
                 era=pair.judgment.era,
                 instrument_hash=pair.judgment.instrument_hash,
+                is_replication=pair.judgment.is_replication,
             )
         )
     return tuple(result)
