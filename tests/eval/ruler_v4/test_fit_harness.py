@@ -396,6 +396,30 @@ def test_test_holdout_access_fails_closed_on_all_review_defeats(
         HoldoutGuard().consume(partition_holdouts(reloaded))
 
 
+def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
+    """Public ingestion refuses direct and recursive quarantined-bank reads."""
+
+    bank_root = tmp_path / "p3/bank"
+    pilot = bank_root / "pilot"
+    sealed = bank_root / "sealed"
+    main = bank_root / "main"
+    pilot.mkdir(parents=True)
+    sealed.mkdir()
+    main.mkdir()
+    (pilot / "judgments.jsonl").write_text("{}\n", encoding="utf-8")
+    schedule = tmp_path / "schedule.jsonl"
+    family = tmp_path / "family.json"
+    schedule.write_text("", encoding="utf-8")
+    family.write_text('{"graphs": {}}', encoding="utf-8")
+
+    with pytest.raises(PermissionError, match="quarantined"):
+        load_bank((pilot,), (schedule,), family)
+    with pytest.raises(PermissionError, match="quarantined"):
+        load_bank((sealed,), (schedule,), family)
+    with pytest.raises(PermissionError, match="recursive quarantined"):
+        load_bank((bank_root,), (schedule,), family)
+
+
 def test_weight_fit_refuses_nonfit_and_replication_rows() -> None:
     """Purpose and replication provenance are enforced at the fit boundary."""
 

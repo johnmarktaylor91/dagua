@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping, Optional, Tuple, Union
 
 PathLike = Union[str, Path]
 _NON_FITTING_BUDGET_LINES = frozenset({"CONTROLS", "MULTI-CONFIG"})
+_PROHIBITED_BANK_SUBTREES = frozenset({"pilot", "sealed"})
 
 
 class SplitPurpose(str, Enum):
@@ -344,6 +345,57 @@ def _jsonl_paths(inputs: Iterable[PathLike]) -> Tuple[Path, ...]:
     return tuple(sorted(paths))
 
 
+def _is_prohibited_bank_path(path: Path) -> bool:
+    """Return whether a path resolves below ``bank/pilot`` or ``bank/sealed``.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Resolved input or discovered JSONL path.
+
+    Returns
+    -------
+    bool
+        True only for one of the quarantined bank subtrees.
+    """
+
+    parts = path.resolve().parts
+    return any(
+        parts[index] == "bank" and parts[index + 1] in _PROHIBITED_BANK_SUBTREES
+        for index in range(len(parts) - 1)
+    )
+
+
+def _bank_jsonl_paths(inputs: Iterable[PathLike]) -> Tuple[Path, ...]:
+    """Resolve bank inputs while denying pilot and sealed subtrees.
+
+    Parameters
+    ----------
+    inputs : iterable[path-like]
+        Bank JSONL files or containing directories.
+
+    Returns
+    -------
+    tuple[pathlib.Path, ...]
+        Stable authorized bank paths.
+
+    Raises
+    ------
+    PermissionError
+        If an input or recursively discovered file is quarantined.
+    """
+
+    roots = tuple(Path(value).resolve() for value in inputs)
+    prohibited_roots = [path for path in roots if _is_prohibited_bank_path(path)]
+    if prohibited_roots:
+        raise PermissionError(f"quarantined bank input denied: {prohibited_roots[0]}")
+    paths = _jsonl_paths(roots)
+    prohibited_paths = [path for path in paths if _is_prohibited_bank_path(path)]
+    if prohibited_paths:
+        raise PermissionError(f"recursive quarantined bank input denied: {prohibited_paths[0]}")
+    return paths
+
+
 def _read_jsonl(path: Path) -> Iterable[Mapping[str, Any]]:
     """Yield decoded object rows from one JSONL file.
 
@@ -587,7 +639,7 @@ def load_bank(
         If a scheduled join disagrees with the bank or an A15 role is unknown.
     """
 
-    paths = _jsonl_paths(bank_inputs)
+    paths = _bank_jsonl_paths(bank_inputs)
     schedule = load_schedule(schedule_inputs)
     graph_map = _load_a15_graphs(family_map_path)
     rows = []
