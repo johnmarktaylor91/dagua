@@ -556,14 +556,13 @@ the production port; none of the entries below overrides a contract.
     `1:2:3` JND cutpoints, and a seven-category uniform lapse. Verdict magnitude
     drives likelihood selection; the A/tie/B collapse survives only as a
     reporting projection, and confidence remains diagnostic-only.
-46. The former JND-HET point estimator was not W-13's hierarchical model:
-    `PREREG_V4_CALIBRATION.md` section 3 requires fitted `tau_class` and
-    `tau_band`, split-half stability, every cell CI, and graph-cluster/bootstrap
-    CIs for spread; `A18_INSERT_W13.md` also refers to a "preregistered minimum"
-    without assigning its numeric value. P5FIX removes the fixed-L2 substitute,
-    requires the minimum explicitly, validates true cross-session side swaps,
-    and then fails closed. OWNER: freeze-fit methodology must supply the missing
-    minimum and complete variance-component/bootstrap procedure.
+46. CLOSED by ADDENDUM-27 W-13-EST for the estimator and uncertainty procedure.
+    The harness estimates integrated `tau_class` / `tau_band` components,
+    freezes the 25-pair and `Q_band=67` gates, publishes supported and
+    unestimated cells, profile intervals, separate 2,000-resample graph-cluster
+    and generator-family spread intervals with drop rates, and validates true
+    cross-session side swaps. Real activation remains fail-closed only for the
+    newly docketed graph-half assignment gap in entry 57.
 47. CLOSED by ADDENDUM-27 LOOK-LEDGER (a)-(d). A15 section 5.7's calibration
     reads now route through separate within/cross four-look schedules with frozen
     occasion order, the 8,520 information denominator, cumulative and incremental
@@ -579,11 +578,11 @@ the production port; none of the entries below overrides a contract.
     plan with the delivered 370-session campaign in stable `base_pair_id` space.
     The content-bound (a)-(d) access path is implemented before any calibration
     use for stopping or capacity selection.
-48. Outer-weight split-half CIs and JND/strict-win uncertainty publications are
-    not implemented by P5FIX. The real graded likelihood and W-13 paths are both
-    fail-closed, so these omissions cannot silently produce a freeze artifact.
-    OWNER: the same freeze-fit implementation that resolves entries 45-46 must
-    publish the uncertainty objects required by V4 spec sections 4.3 and 7.8.
+48. CLOSED by ADDENDUM-27 W-13-EST. Outer weights now carry 95% intervals from
+    profile likelihood on the fitted objective plus observed-information rank
+    and condition number; the graph-half gate freezes failing weights at their
+    priors. The JND result type requires cell/component intervals, two separate
+    spread intervals, bootstrap drop rates, and the one-shot branch inputs.
 49. `era_robustness` is a reporting helper, not authority to ingest pilot data.
     The authorized main bank currently contains CF@4 only, so CF@1-vs-CF@4
     deltas remain absent. `load_bank` now denies `bank/pilot` and `bank/sealed`
@@ -608,15 +607,10 @@ the production port; none of the entries below overrides a contract.
 53. CLOSED by ADDENDUM-27 FIT-ORD. `FitPair` has no synthetic JND, lapse, or
     stratum defaults; real bridge construction supplies every field explicitly,
     and `synthetic_fit_pair` is the separate typed fixture factory.
-54. `PREREG_V4_CALIBRATION.md` section 7 requires C-06's published
-    uncertain-prior-coefficient sensitivity/effective-complexity audit and its
-    SHRINK-or-PARTIAL response rule. `A18_INSERT_W13.md` section 1 requires a
-    genuinely hierarchical JND model with estimated `tau_class` and `tau_band`;
-    section 3 guard 5's `+2` allocation does not waive the audit. The invalid
-    fixed-lambda point-effects estimator remains removed, so no result silently
-    claims compliance. OWNER: the freeze-fit implementation must publish C-06
-    beside the ledgered JND `+2` and execute the frozen response if audited
-    complexity exceeds the allocation.
+54. CLOSED by ADDENDUM-27 W-13-EST(f). The JND result publishes the smoother
+    trace beside the ledgered +2 and names every component frozen at its null
+    prior by the C-06 SHRINK response; no fixed-lambda point-effects substitute
+    remains.
 55. The frozen A16 schedule's 341-session presentation-id space is disjoint from
     the delivered 370-session campaign after replanning re-minted presentation
     and session ids. The sealed roles reconcile exactly in the stable,
@@ -633,3 +627,11 @@ the production port; none of the entries below overrides a contract.
     caller-supplied lapse as fixed or inventing a prior. OWNER: freeze the lapse
     prior family and strength before the first real profiled FIT-ORD fit; synthetic
     discriminating fixtures remain executable.
+57. ADDENDUM-27 W-13-EST(e) requires graph-disjoint halves "under the frozen A15
+    salt", but A15 freezes two salts for role assignment and no artifact freezes
+    a graph-to-half algorithm (hash bit, alternating order, or balancing rule).
+    Those choices produce different half estimates and can change which
+    components/weights freeze. The complete estimator is executable on typed
+    synthetic fixtures with an explicitly fixture-only salted split, while every
+    real W-13 call fails closed. OWNER: freeze the graph-half assignment algorithm
+    before the first real fit.

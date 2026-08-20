@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -119,104 +118,6 @@ class EraRobustness:
         if not values:
             raise ValueError("era robustness requires at least one stratum")
         object.__setattr__(self, "by_stratum", MappingProxyType(values))
-
-
-@dataclass(frozen=True)
-class JNDFitConfig:
-    """Configure the replication support gate for the pending JND-HET fit.
-
-    Parameters
-    ----------
-    minimum_cell_count : int
-        Explicit preregistered minimum replication rows per cell.
-    seed : int, default=20260811
-        Reserved deterministic bootstrap/optimizer seed.
-    steps : int, default=1000
-        Adam updates.
-    learning_rate : float, default=0.03
-        Adam learning rate.
-    initial_jnd : float, default=0.1
-        Positive pooled starting band.
-    """
-
-    minimum_cell_count: int
-    seed: int = 20260811
-    steps: int = 1000
-    learning_rate: float = 0.03
-    initial_jnd: float = 0.1
-
-    def __post_init__(self) -> None:
-        """Validate JND optimizer settings.
-
-        Raises
-        ------
-        ValueError
-            If a setting is invalid.
-        """
-
-        if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
-            raise ValueError("JND seed must be a nonnegative integer")
-        if isinstance(self.steps, bool) or not isinstance(self.steps, int) or self.steps <= 0:
-            raise ValueError("JND steps must be a positive integer")
-        if not math.isfinite(self.learning_rate) or self.learning_rate <= 0.0:
-            raise ValueError("JND learning rate must be finite and positive")
-        if self.minimum_cell_count <= 0:
-            raise ValueError("JND cell minimum must be positive")
-        if not math.isfinite(self.initial_jnd) or self.initial_jnd <= 0.0:
-            raise ValueError("initial JND must be finite and positive")
-
-
-@dataclass(frozen=True)
-class JNDHeterogeneityFit:
-    """Publish the replication-only log-additive JND-HET fit.
-
-    Parameters
-    ----------
-    mu : float
-        Pooled log JND.
-    tau_class, tau_band : float
-        RMS shrinkage spreads of fitted class and band effects.
-    class_effects, band_effects : mapping[str, float]
-        Centered log-JND effects.
-    cell_jnd : mapping[tuple[str, str], float]
-        Estimated supported-cell JNDs.
-    cell_counts : mapping[tuple[str, str], int]
-        Cross-session replication counts.
-    unestimated_cells : tuple[tuple[str, str], ...]
-        Cells below the preregistered minimum.
-    spread : float
-        ``p90(cell JND) / p10(cell JND)``.
-    loss_path : tuple[float, ...]
-        Deterministic optimization path.
-    """
-
-    mu: float
-    tau_class: float
-    tau_band: float
-    class_effects: Mapping[str, float]
-    band_effects: Mapping[str, float]
-    cell_jnd: Mapping[Tuple[str, str], float]
-    cell_counts: Mapping[Tuple[str, str], int]
-    unestimated_cells: Tuple[Tuple[str, str], ...]
-    spread: float
-    loss_path: Tuple[float, ...]
-
-    def __post_init__(self) -> None:
-        """Freeze JND fit mappings.
-
-        Raises
-        ------
-        ValueError
-            If no supported cell was estimated.
-        """
-
-        cells = dict(self.cell_jnd)
-        if not cells:
-            raise ValueError("JND-HET fit estimated no supported cells")
-        object.__setattr__(self, "class_effects", MappingProxyType(dict(self.class_effects)))
-        object.__setattr__(self, "band_effects", MappingProxyType(dict(self.band_effects)))
-        object.__setattr__(self, "cell_jnd", MappingProxyType(cells))
-        object.__setattr__(self, "cell_counts", MappingProxyType(dict(self.cell_counts)))
 
 
 def evaluate_objective(
@@ -447,70 +348,4 @@ def era_robustness(
         cf1_cf4_log_loss_delta=(
             None if loss_cf1 is None or loss_cf4 is None else loss_cf4 - loss_cf1
         ),
-    )
-
-
-def fit_jnd_heterogeneity(
-    pairs: Sequence[FitPair],
-    plan: FittingPlan,
-    weights: Mapping[str, float],
-    config: JNDFitConfig,
-) -> JNDHeterogeneityFit:
-    """Validate JND-HET inputs and refuse the unresolved frozen-model gap.
-
-    W-13 requires fitted variance components, split-half stability, cell CIs,
-    and graph-cluster/bootstrap CIs for spread. The frozen artifacts do not pin
-    ``minimum_cell_count`` and the prior implementation substituted fixed L2
-    point effects. This boundary therefore validates provenance and support,
-    then fails closed until the contract owner supplies the missing constant
-    and hierarchical uncertainty procedure.
-
-    Parameters
-    ----------
-    pairs : sequence[FitPair]
-        Cross-session replication rows from one instrument/era stratum.
-    plan : FittingPlan
-        Fitted outer-weight plan.
-    weights : mapping[str, float]
-        Frozen/fitted outer weights used to compute score differences.
-    config : JNDFitConfig
-        Deterministic JND-HET settings.
-
-    Returns
-    -------
-    JNDHeterogeneityFit
-        This return is reserved for the completed W-13 implementation.
-
-    Raises
-    ------
-    ValueError
-        If non-replication rows enter, no cell is supported, or strata cross.
-    NotImplementedError
-        Always after input validation, pending the complete W-13 model.
-    """
-
-    rows = tuple(pairs)
-    if not rows or any(not pair.is_replication for pair in rows):
-        raise ValueError("JND-HET accepts cross-session replication rows only")
-    by_base_pair: DefaultDict[str, list[FitPair]] = defaultdict(list)
-    for pair in rows:
-        by_base_pair[pair.base_pair_id].append(pair)
-    for base_pair_id, presentations in by_base_pair.items():
-        sessions = {pair.session_id for pair in presentations}
-        displayed_orders = {(pair.blind_id_a, pair.blind_id_b) for pair in presentations}
-        drawing_sets = {frozenset(order) for order in displayed_orders}
-        if len(sessions) < 2:
-            raise ValueError(f"JND-HET base pair {base_pair_id} lacks cross-session replication")
-        if len(drawing_sets) != 1 or len(displayed_orders) < 2:
-            raise ValueError(f"JND-HET base pair {base_pair_id} lacks a displayed side swap")
-    counts: DefaultDict[Tuple[str, str], int] = defaultdict(int)
-    for pair in rows:
-        counts[(pair.primary_class, pair.size_band)] += 1
-    supported = {cell for cell, count in counts.items() if count >= config.minimum_cell_count}
-    if not supported:
-        raise ValueError("no JND-HET cell meets the replication minimum")
-    del plan, weights
-    raise NotImplementedError(
-        "W-13 JND-HET requires fitted tau components, split-half stability, "
-        "cell CIs, and graph-cluster/bootstrap spread CIs"
     )

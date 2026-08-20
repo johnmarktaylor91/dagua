@@ -36,6 +36,8 @@ from dagua.eval.ruler_v4.fit import (
     SceneRescorer,
     SplitPurpose,
     WeightParameter,
+    apply_outer_weight_split_half,
+    evaluate_h_jnd_branch,
     fit_jnd_heterogeneity,
     fit_pairs_from_rescoring,
     fit_weights,
@@ -216,6 +218,55 @@ def _judgment(purpose: SplitPurpose, suffix: str = "0") -> JudgmentRow:
     )
 
 
+def _jnd_success_rows() -> tuple[FitPair, ...]:
+    """Build four supported cells of true cross-session side swaps.
+
+    Returns
+    -------
+    tuple[FitPair, ...]
+        Two presentations for each of 25 base pairs in four cells.
+    """
+
+    source = _synthetic_recovery_rows(count=100)
+    rows = []
+    cells = (
+        ("class-1", "band-1"),
+        ("class-1", "band-2"),
+        ("class-2", "band-1"),
+        ("class-2", "band-2"),
+    )
+    for cell_index, cell in enumerate(cells):
+        for pair_index in range(25):
+            original = source[cell_index * 25 + pair_index]
+            verdict = original.graded_verdict
+            first = replace(
+                original,
+                primary_class=cell[0],
+                size_band=cell[1],
+                graph_hash=f"graph-{pair_index % 10}",
+                generator_family=f"family-{pair_index % 4}",
+                is_replication=True,
+                base_pair_id=f"pair-{cell_index}-{pair_index}",
+                session_id=f"session-a-{cell_index}-{pair_index}",
+                blind_id_a="drawing-a",
+                blind_id_b="drawing-b",
+            )
+            second = replace(
+                first,
+                numerator_a=first.numerator_b,
+                numerator_b=first.numerator_a,
+                fixed_numerator_a=first.fixed_numerator_b,
+                fixed_numerator_b=first.fixed_numerator_a,
+                outcome=-first.outcome,
+                graded_verdict=-verdict,
+                session_id=f"session-b-{cell_index}-{pair_index}",
+                blind_id_a="drawing-b",
+                blind_id_b="drawing-a",
+            )
+            rows.extend((first, second))
+    return tuple(rows)
+
+
 def _load_synthetic_bank(
     bank_inputs: tuple[Path, ...],
     schedule_inputs: tuple[Path, ...],
@@ -366,6 +417,29 @@ def test_synthetic_judgments_recover_known_weights_deterministically() -> None:
     assert first.weights["w_structure"] == pytest.approx(0.6431144, abs=1.0e-6)
     assert first.weights["w_neighborhood"] == pytest.approx(1.5997255, abs=1.0e-6)
     assert first.losses[-1] < first.losses[0]
+    assert first.information_rank == 2
+    assert first.condition_number >= 1.0
+    assert all(
+        interval[0] <= first.weights[name] <= interval[1]
+        for name, interval in first.intervals.items()
+    )
+    narrow = replace(
+        first,
+        intervals={name: (value - 0.01, value + 0.01) for name, value in first.weights.items()},
+    )
+    half_one = replace(
+        first,
+        weights={"w_structure": 0.4, "w_neighborhood": 1.0},
+        intervals={"w_structure": (0.25, 4.0), "w_neighborhood": (0.25, 4.0)},
+    )
+    half_two = replace(
+        first,
+        weights={"w_structure": 2.0, "w_neighborhood": 1.01},
+        intervals={"w_structure": (0.25, 4.0), "w_neighborhood": (0.25, 4.0)},
+    )
+    stability = apply_outer_weight_split_half(narrow, half_one, half_two, plan)
+    assert stability.frozen_at_prior == ("w_structure",)
+    assert stability.weights["w_structure"] == 1.0
 
 
 def test_weight_fit_preserves_host_rng_and_determinism_state() -> None:
@@ -1283,7 +1357,11 @@ def test_jnd_heterogeneity_rejects_non_replication_rows() -> None:
             rows,
             plan,
             {"w_structure": 0.6, "w_neighborhood": 1.6},
-            JNDFitConfig(minimum_cell_count=2, steps=1),
+            JNDFitConfig(
+                role_hash="role-hash",
+                top_composite_pair_counts={"synthetic": 67},
+                rotation_envelopes={"synthetic": 0.01},
+            ),
         )
 
 
@@ -1306,7 +1384,11 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
             unswapped,
             plan,
             {"w_structure": 0.6, "w_neighborhood": 1.6},
-            JNDFitConfig(minimum_cell_count=2, steps=1),
+            JNDFitConfig(
+                role_hash="role-hash",
+                top_composite_pair_counts={"synthetic": 67},
+                rotation_envelopes={"synthetic": 0.01},
+            ),
         )
 
     swapped = (
@@ -1327,10 +1409,72 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
             blind_id_b="drawing-a",
         ),
     )
-    with pytest.raises(NotImplementedError, match="split-half stability"):
+    with pytest.raises(ValueError, match="25-pair minimum"):
         fit_jnd_heterogeneity(
             swapped,
             plan,
             {"w_structure": 0.6, "w_neighborhood": 1.6},
-            JNDFitConfig(minimum_cell_count=2, steps=1),
+            JNDFitConfig(
+                role_hash="role-hash",
+                top_composite_pair_counts={"synthetic": 67},
+                rotation_envelopes={"synthetic": 0.01},
+            ),
         )
+
+
+def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-13 returns every mandatory publication and ledgers its branch once."""
+
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "ACCESS_LEDGER")
+    rows = _jnd_success_rows()
+    plan = FittingPlan(_weight_parameters())
+    config = JNDFitConfig(
+        role_hash="role-hash",
+        top_composite_pair_counts={"band-1": 67, "band-2": 67},
+        rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
+    )
+    with pytest.raises(NotImplementedError, match="graph-to-half"):
+        fit_jnd_heterogeneity(
+            tuple(replace(row, synthetic=False) for row in rows),
+            plan,
+            {"w_structure": 0.6, "w_neighborhood": 1.6},
+            config,
+        )
+    fit = fit_jnd_heterogeneity(
+        rows,
+        plan,
+        {"w_structure": 0.6, "w_neighborhood": 1.6},
+        config,
+    )
+
+    assert config.minimum_cell_count == 25
+    assert config.q_band == 67
+    assert config.bootstrap_replicates == 2000
+    assert set(fit.cell_counts.values()) == {25}
+    assert set(fit.cell_jnd) == set(fit.cell_jnd_ci)
+    assert fit.tau_class_ci.log_scale[0] <= fit.tau_class_ci.log_scale[1]
+    assert fit.tau_band_ci.ratio_scale[0] <= fit.tau_band_ci.ratio_scale[1]
+    assert fit.spread_ci_graph_clusters[0] <= fit.spread_ci_graph_clusters[1]
+    assert fit.spread_ci_generator_families[0] <= fit.spread_ci_generator_families[1]
+    assert 0.0 <= fit.bootstrap_drop_rate.graph_clusters <= 1.0
+    assert 0.0 <= fit.bootstrap_drop_rate.generator_families <= 1.0
+    assert fit.effective_dof >= 0.0
+    assert fit.loss_path
+    assert not fit.uncalibrated_classes
+    assert set(fit.tie_rates_by_class) == {"class-1", "class-2"}
+    with pytest.raises(TypeError, match="minimum_cell_count"):
+        JNDFitConfig(
+            role_hash="role-hash",
+            top_composite_pair_counts={"band-1": 67},
+            rotation_envelopes={"class-1": 0.001},
+            minimum_cell_count=20,
+        )
+
+    branch = evaluate_h_jnd_branch(fit)
+    r_pool = fit.pooled_jnd_ci[1] / fit.pooled_jnd_ci[0]
+    expected = "class-conditional" if fit.spread_ci_graph_clusters[0] > r_pool else "pooled"
+    assert branch.shipped_band == expected
+    with pytest.raises(RuntimeError, match="once-only"):
+        evaluate_h_jnd_branch(fit)
