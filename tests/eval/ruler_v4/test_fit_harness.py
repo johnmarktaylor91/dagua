@@ -287,6 +287,19 @@ def test_synthetic_judgments_recover_known_weights_deterministically() -> None:
     assert first.losses[-1] < first.losses[0]
 
 
+def test_prior_penalty_scales_as_one_dataset_prior_not_per_row() -> None:
+    """A fixed prior contribution vanishes relative to growing evidence."""
+
+    rows = _synthetic_recovery_rows(count=8)
+    plan = FittingPlan(_weight_parameters(), prior_strength=0.1)
+    objective = PairwiseObjective(rows, plan)
+    weights = torch.tensor((0.5, 2.0), dtype=torch.float64)
+    penalty = objective.loss(weights) - objective.negative_log_likelihood(weights)
+    expected_sum = sum((math.log(value) / math.log(4.0)) ** 2 for value in (0.5, 2.0))
+
+    assert float(penalty) == pytest.approx(0.1 * expected_sum / len(rows))
+
+
 def test_fitting_plan_refuses_off_ledger_dof_and_diag_facets() -> None:
     """The plan refuses bucket overflow, reserved buckets, and DIAG weights."""
 
