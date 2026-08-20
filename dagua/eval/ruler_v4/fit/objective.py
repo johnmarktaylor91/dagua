@@ -192,6 +192,10 @@ class FitPair:
         Per-parameter applicable-mass coefficients.
     outcome : int
         ``-1`` for A, ``0`` for tie, and ``1`` for B.
+    graded_verdict : int or None
+        Original A13 verdict in ``[-3, 3]`` when the row came from the bank.
+    confidence : int or None
+        Original A13 confidence in ``[1, 3]`` when banked.
     fixed_numerator_a, fixed_numerator_b : float
         Contributions of non-fitted positive-mass sub-terms.
     fixed_mass : float
@@ -218,6 +222,8 @@ class FitPair:
     numerator_b: Tuple[float, ...]
     mass_coefficients: Tuple[float, ...]
     outcome: int
+    graded_verdict: Optional[int] = None
+    confidence: Optional[int] = None
     fixed_numerator_a: float = 0.0
     fixed_numerator_b: float = 0.0
     fixed_mass: float = 0.0
@@ -268,6 +274,14 @@ class FitPair:
             raise ValueError("P-mean numerators and masses must be finite and nonnegative")
         if self.outcome not in (-1, 0, 1):
             raise ValueError("pair outcome must be -1, 0, or 1")
+        graded_verdict = self.outcome if self.graded_verdict is None else self.graded_verdict
+        if graded_verdict not in range(-3, 4):
+            raise ValueError("graded verdict must lie in [-3, 3]")
+        graded_outcome = 0 if graded_verdict == 0 else 1 if graded_verdict > 0 else -1
+        if graded_outcome != self.outcome:
+            raise ValueError("graded verdict sign disagrees with the fitting outcome")
+        if self.confidence is not None and self.confidence not in (1, 2, 3):
+            raise ValueError("A13 confidence must lie in [1, 3]")
         if not math.isfinite(self.composition_power) or self.composition_power < 1.0:
             raise ValueError("composition power must be finite and at least one")
         if not math.isfinite(self.jnd) or self.jnd <= 0.0:
@@ -289,6 +303,7 @@ class FitPair:
         object.__setattr__(self, "numerator_a", numerator_a)
         object.__setattr__(self, "numerator_b", numerator_b)
         object.__setattr__(self, "mass_coefficients", masses)
+        object.__setattr__(self, "graded_verdict", graded_verdict)
 
 
 def fit_pairs_from_rescoring(
@@ -429,6 +444,8 @@ def fit_pairs_from_rescoring(
                 numerator_b=tuple(numerator_b),
                 mass_coefficients=tuple(masses),
                 outcome=pair.judgment.outcome,
+                graded_verdict=pair.judgment.verdict,
+                confidence=pair.judgment.confidence,
                 fixed_numerator_a=math.fsum(
                     entry.weight * a[entry.subterm_id] ** composition_power
                     for entry in fixed_entries
@@ -499,6 +516,11 @@ class PairwiseObjective:
         rows = tuple(pairs)
         if not rows:
             raise ValueError("pairwise objective requires at least one row")
+        if any(abs(int(row.graded_verdict)) > 1 for row in rows):
+            raise ValueError(
+                "graded A13 verdicts require the pending ordered-probit model; "
+                "three-way collapse is refused"
+            )
         dimension = len(plan.weights)
         if dimension == 0 or any(len(row.numerator_a) != dimension for row in rows):
             raise ValueError("pair dimensions must match the fitting plan")
