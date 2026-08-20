@@ -521,6 +521,14 @@ class PairwiseObjective:
                 "graded A13 verdicts require the pending ordered-probit model; "
                 "three-way collapse is refused"
             )
+        if all(
+            row.fixed_mass == 0.0 and row.fixed_numerator_a == 0.0 and row.fixed_numerator_b == 0.0
+            for row in rows
+        ):
+            raise ValueError(
+                "fitted P-mean is scale-invariant without fixed mass; "
+                "absolute weights are not identifiable"
+            )
         dimension = len(plan.weights)
         if dimension == 0 or any(len(row.numerator_a) != dimension for row in rows):
             raise ValueError("pair dimensions must match the fitting plan")
