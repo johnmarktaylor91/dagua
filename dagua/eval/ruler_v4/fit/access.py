@@ -18,7 +18,7 @@ _CALIBRATION_KEYS = frozenset({"within-family-calibration", "cross-family-calibr
 W08_LEDGER_KEY = "w08-off-distribution"
 H_JND_LEDGER_KEY = "test-h-jnd-branch"
 _PLANNED_PRESENTATIONS = 8520
-_Z_ALPHA_OVER_TWO = NormalDist().inv_cdf(0.025)
+_Z_ALPHA_OVER_TWO = NormalDist().inv_cdf(0.975)
 
 
 class AccessBudgetConsumedError(RuntimeError):
