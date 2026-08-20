@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 import torch
 
+import dagua.eval.ruler_v4.fit.bank as bank_module
 import dagua.eval.ruler_v4.fit.holdout as holdout_module
 from dagua.eval.ruler_v4.fit import (
     FitPair,
@@ -472,6 +473,10 @@ def test_test_holdout_access_fails_closed_on_all_review_defeats(
         pickle.dumps(partitions)
     with pytest.raises(TypeError):
         HoldoutGuard(tmp_path / "alternate-record.json")
+    assert not hasattr(bank_module, "_reveal_test_rows")
+    refs = partitions._test_refs_by_role["cross-family-sealed"]
+    with pytest.raises(RuntimeError, match="reservation"):
+        HoldoutGuard()._reveal_test_rows(refs)
 
     first = HoldoutGuard()
     consumed = first.consume(partitions, "cross-family-sealed")

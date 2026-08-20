@@ -471,63 +471,6 @@ def _read_jsonl_with_line_numbers(path: Path) -> Iterable[Tuple[int, Mapping[str
             yield line_number, value
 
 
-def _reveal_test_rows(refs: Tuple[_SealedJudgmentRef, ...]) -> Tuple[JudgmentRow, ...]:
-    """Re-read guarded TEST labels from their exact bank locations.
-
-    Parameters
-    ----------
-    refs : tuple[_SealedJudgmentRef, ...]
-        Opaque references released by a :class:`JudgmentBank`.
-
-    Returns
-    -------
-    tuple[JudgmentRow, ...]
-        Materialized TEST rows in stable presentation order.
-
-    Raises
-    ------
-    ValueError
-        If a source row moved, changed identity, or has invalid labels.
-    """
-
-    by_path: dict[Path, dict[int, _SealedJudgmentRef]] = {}
-    for ref in refs:
-        by_path.setdefault(Path(ref.source_path), {})[ref.source_line] = ref
-    rows = []
-    for path, expected in sorted(by_path.items(), key=lambda item: str(item[0])):
-        found = set()
-        for line_number, raw in _read_jsonl_with_line_numbers(path):
-            ref = expected.get(line_number)
-            if ref is None:
-                continue
-            found.add(line_number)
-            if (
-                str(raw.get("session_id", "")) != ref.row_fields["session_id"]
-                or str(raw.get("presentation_id", "")) != ref.row_fields["presentation_id"]
-            ):
-                raise ValueError("guarded TEST source identity changed")
-            verdict = int(raw.get("verdict", 0))
-            tie = bool(raw.get("tie", verdict == 0))
-            if verdict < -3 or verdict > 3:
-                raise ValueError(f"verdict outside A13 range: {verdict}")
-            confidence = int(raw.get("confidence", 0))
-            if confidence not in (1, 2, 3):
-                raise ValueError(f"confidence outside A13 range: {confidence}")
-            if tie != (verdict == 0):
-                raise ValueError("guarded TEST verdict/tie fields are inconsistent")
-            rows.append(
-                JudgmentRow(
-                    **ref.row_fields,
-                    verdict=verdict,
-                    tie=tie,
-                    confidence=confidence,
-                )
-            )
-        if found != set(expected):
-            raise ValueError(f"guarded TEST source rows missing from {path}")
-    return tuple(sorted(rows, key=lambda row: (row.session_id, row.presentation_id)))
-
-
 def load_schedule(inputs: Iterable[PathLike]) -> Mapping[Tuple[str, str], ScheduledPair]:
     """Load the exact session schedule used to authorize bank rows.
 
