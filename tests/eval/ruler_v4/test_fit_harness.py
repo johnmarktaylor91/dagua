@@ -7,7 +7,7 @@ import json
 import math
 import pickle
 import random
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Dict
 
@@ -714,6 +714,39 @@ def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
         load_bank((sealed,), (schedule,), family)
     with pytest.raises(PermissionError, match="recursive quarantined"):
         load_bank((bank_root,), (schedule,), family)
+
+
+def test_frozen_recorded_bank_fixture_has_stable_loader_digest(tmp_path: Path) -> None:
+    """A recorded main-bank schema fixture pins loader reconciliation output."""
+
+    bank, _, _, _ = _loaded_holdout_fixture(tmp_path)
+    payload = {
+        "report": asdict(bank.report),
+        "role_hash": bank.role_hash,
+        "rows": [
+            (
+                row.presentation_id,
+                row.session_id,
+                row.graph_hash,
+                row.role,
+                row.purpose.value,
+                row.verdict,
+                row.tie,
+                row.confidence,
+            )
+            for row in bank.rows
+        ],
+        "guarded_test_count": bank.guarded_test_count,
+        "expected_test_presentations": {
+            role: list(presentations)
+            for role, presentations in bank.expected_test_presentations.items()
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    assert hashlib.sha256(encoded).hexdigest() == (
+        "2381e57a823cbeee2ca472b61e5590c6a300ff7e118008ff13a1878fa2b34168"  # noqa: E501  # pragma: allowlist secret
+    )
 
 
 def test_bank_loader_validates_a13_labels_and_schedule_schema(tmp_path: Path) -> None:
