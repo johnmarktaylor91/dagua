@@ -15,7 +15,7 @@ from dagua.eval.ruler_v4.fit.bank import (
     JudgmentBank,
     JudgmentRow,
     SplitPurpose,
-    _reveal_test_rows,
+    _read_jsonl_with_line_numbers,
     _SealedJudgmentRef,
 )
 
@@ -137,6 +137,66 @@ class TestHoldoutGuard:
 
         return self._consumed_in_process or (self._path is not None and self._path.exists())
 
+    def _reveal_test_rows(self, refs: Tuple[_SealedJudgmentRef, ...]) -> Tuple[JudgmentRow, ...]:
+        """Re-read sealed labels only after this guard reserves a ledger slot.
+
+        Parameters
+        ----------
+        refs : tuple[_SealedJudgmentRef, ...]
+            Opaque source references for the role whose slot was reserved.
+
+        Returns
+        -------
+        tuple[JudgmentRow, ...]
+            Materialized sealed rows in stable presentation order.
+
+        Raises
+        ------
+        RuntimeError
+            If called before this guard successfully writes its access record.
+        ValueError
+            If a source row moved, changed identity, or has invalid labels.
+        """
+
+        if not self._consumed_in_process or self._lock_path is None or not self._lock_path.exists():
+            raise RuntimeError("sealed labels require a successful access reservation")
+        by_path: dict[Path, dict[int, _SealedJudgmentRef]] = {}
+        for ref in refs:
+            by_path.setdefault(Path(ref.source_path), {})[ref.source_line] = ref
+        rows = []
+        for path, expected in sorted(by_path.items(), key=lambda item: str(item[0])):
+            found = set()
+            for line_number, raw in _read_jsonl_with_line_numbers(path):
+                ref = expected.get(line_number)
+                if ref is None:
+                    continue
+                found.add(line_number)
+                if (
+                    str(raw.get("session_id", "")) != ref.row_fields["session_id"]
+                    or str(raw.get("presentation_id", "")) != ref.row_fields["presentation_id"]
+                ):
+                    raise ValueError("guarded TEST source identity changed")
+                verdict = int(raw.get("verdict", 0))
+                tie = bool(raw.get("tie", verdict == 0))
+                if verdict < -3 or verdict > 3:
+                    raise ValueError(f"verdict outside A13 range: {verdict}")
+                confidence = int(raw.get("confidence", 0))
+                if confidence not in (1, 2, 3):
+                    raise ValueError(f"confidence outside A13 range: {confidence}")
+                if tie != (verdict == 0):
+                    raise ValueError("guarded TEST verdict/tie fields are inconsistent")
+                rows.append(
+                    JudgmentRow(
+                        **ref.row_fields,
+                        verdict=verdict,
+                        tie=tie,
+                        confidence=confidence,
+                    )
+                )
+            if found != set(expected):
+                raise ValueError(f"guarded TEST source rows missing from {path}")
+        return tuple(sorted(rows, key=lambda row: (row.session_id, row.presentation_id)))
+
     def consume(self, partitions: HoldoutPartitions, role: str) -> Tuple[JudgmentRow, ...]:
         """Touch and return one labelled A15 sealed role exactly once.
 
@@ -224,4 +284,4 @@ class TestHoldoutGuard:
         finally:
             os.close(descriptor)
         self._consumed_in_process = True
-        return _reveal_test_rows(refs)
+        return self._reveal_test_rows(refs)
