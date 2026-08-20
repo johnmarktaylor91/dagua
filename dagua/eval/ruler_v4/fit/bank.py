@@ -44,6 +44,9 @@ _ROLE_PURPOSE = MappingProxyType(
         "adversarial": SplitPurpose.DIAGNOSTIC,
     }
 )
+CENSUS_BOUND_ROLES = frozenset(
+    role for role, purpose in _ROLE_PURPOSE.items() if purpose is not SplitPurpose.FIT
+)
 
 
 @dataclass(frozen=True)
@@ -757,15 +760,17 @@ def _load_a15_family_map(
     computed = hashlib.sha256("\n".join(role_lines).encode("utf-8")).hexdigest()
     if computed != role_hash:
         raise ValueError("A15 family-map role hash does not match its graph census")
+    if role_hash != _FROZEN_A15_ROLE_HASH:
+        raise ValueError("A15 family-map role hash is not the frozen campaign identity")
     return graphs, role_hash
 
 
-def _load_frozen_test_census(
+def _load_frozen_role_census(
     path: PathLike,
     role_hash: str,
     graph_map: Mapping[str, Mapping[str, Any]],
 ) -> Mapping[str, Tuple[str, ...]]:
-    """Load the sealed base-pair census from pinned frozen schedule bytes.
+    """Load every guarded-role base-pair census from pinned schedule bytes.
 
     Parameters
     ----------
@@ -779,7 +784,7 @@ def _load_frozen_test_census(
     Returns
     -------
     mapping[str, tuple[str, ...]]
-        Base-pair identities grouped by sealed role.
+        Base-pair identities grouped by non-training role.
 
     Raises
     ------
@@ -793,7 +798,7 @@ def _load_frozen_test_census(
     payload = Path(path).read_bytes()
     if hashlib.sha256(payload).hexdigest() != expected_digest:
         raise ValueError("frozen presentation-schedule digest does not match")
-    census: dict[str, list[str]] = {role: [] for role in sorted(SEALED_TEST_ROLES)}
+    census: dict[str, list[str]] = {role: [] for role in sorted(CENSUS_BOUND_ROLES)}
     for line_number, line in enumerate(payload.decode("utf-8").splitlines(), start=1):
         if not line.strip():
             continue
@@ -805,10 +810,10 @@ def _load_frozen_test_census(
         graph = graph_map.get(graph_hash)
         if graph is None or str(graph.get("role", "")) != partition:
             raise ValueError("frozen A15/A16 role census does not reconcile")
-        if partition in SEALED_TEST_ROLES:
+        if partition in CENSUS_BOUND_ROLES:
             base_pair_id = str(raw.get("base_pair_id", ""))
             if not base_pair_id:
-                raise ValueError("frozen sealed schedule row lacks base-pair identity")
+                raise ValueError("frozen guarded schedule row lacks base-pair identity")
             census[partition].append(base_pair_id)
     return MappingProxyType(
         {role: tuple(sorted(set(base_pairs))) for role, base_pairs in census.items()}
@@ -877,7 +882,7 @@ def load_bank(
     paths = _bank_jsonl_paths(bank_inputs)
     schedule = load_schedule(schedule_inputs)
     graph_map, role_hash = _load_a15_family_map(family_map_path)
-    expected_test_base_pairs = _load_frozen_test_census(frozen_schedule_path, role_hash, graph_map)
+    expected_test_base_pairs = _load_frozen_role_census(frozen_schedule_path, role_hash, graph_map)
     expected_test_graphs = {
         role: tuple(
             sorted(
@@ -886,7 +891,7 @@ def load_bank(
                 if str(graph.get("role", "")) == role
             )
         )
-        for role in sorted(SEALED_TEST_ROLES)
+        for role in sorted(CENSUS_BOUND_ROLES)
     }
     rows = []
     calibration_refs = []
@@ -907,9 +912,6 @@ def load_bank(
             counts["raw_rows"] += 1
             if raw.get("session_accepted") is not True:
                 counts["excluded_rejected_session"] += 1
-                continue
-            if raw.get("malformed") is True or raw.get("abstain") is True:
-                counts["excluded_invalid"] += 1
                 continue
             key = str(raw.get("session_id", "")), str(raw.get("presentation_id", ""))
             scheduled = schedule.get(key)
@@ -944,18 +946,6 @@ def load_bank(
             purpose = _ROLE_PURPOSE.get(role)
             if purpose is None:
                 raise ValueError(f"unknown frozen A15 role: {role!r}")
-            verdict = int(raw.get("verdict", 0))
-            if verdict < -3 or verdict > 3:
-                raise ValueError(f"verdict outside A13 range: {verdict}")
-            tie = bool(raw.get("tie", verdict == 0))
-            if verdict == 0 and not tie:
-                counts["excluded_invalid"] += 1
-                continue
-            if tie != (verdict == 0):
-                raise ValueError("A13 verdict and tie fields are inconsistent")
-            confidence = int(raw.get("confidence", 0))
-            if confidence not in (1, 2, 3):
-                raise ValueError(f"confidence outside A13 range: {confidence}")
             if (era is not None and row_era != era) or (
                 instrument_hash is not None and row_instrument != instrument_hash
             ):
@@ -980,6 +970,21 @@ def load_bank(
                 "source_path": str(path),
             }
             if purpose is SplitPurpose.FIT:
+                if raw.get("malformed") is True or raw.get("abstain") is True:
+                    counts["excluded_invalid"] += 1
+                    continue
+                verdict = int(raw.get("verdict", 0))
+                if verdict < -3 or verdict > 3:
+                    raise ValueError(f"verdict outside A13 range: {verdict}")
+                tie = bool(raw.get("tie", verdict == 0))
+                if verdict == 0 and not tie:
+                    counts["excluded_invalid"] += 1
+                    continue
+                if tie != (verdict == 0):
+                    raise ValueError("A13 verdict and tie fields are inconsistent")
+                confidence = int(raw.get("confidence", 0))
+                if confidence not in (1, 2, 3):
+                    raise ValueError(f"confidence outside A13 range: {confidence}")
                 rows.append(
                     JudgmentRow(
                         **row_fields,

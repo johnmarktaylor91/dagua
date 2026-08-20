@@ -8,7 +8,6 @@ from types import MappingProxyType
 from typing import Iterable, Mapping, Tuple, Union
 
 from dagua.eval.ruler_v4.fit.access import (
-    _ACCESS_LEDGER_ROOT,
     AccessBudgetConsumedError,
     AccessLedger,
     LookReservation,
@@ -155,10 +154,9 @@ class TestHoldoutGuard:
     """Persist content-bound A15 TEST access with exclusive creation."""
 
     def __init__(self) -> None:
-        """Initialize a guard with the injected frozen campaign ledger root."""
+        """Initialize a guard with the single frozen campaign ledger root."""
 
         self._ledger = AccessLedger()
-        self._ledger._ledger_root = _ACCESS_LEDGER_ROOT
         self._ledger_root = self._ledger._ledger_root
         self._path: Union[object, None] = None
         self._reserved_role: Union[str, None] = None
@@ -223,8 +221,12 @@ class TestHoldoutGuard:
                     or str(raw.get("presentation_id", "")) != ref.row_fields["presentation_id"]
                 ):
                     raise ValueError("guarded TEST source identity changed")
+                if raw.get("malformed") is True or raw.get("abstain") is True:
+                    continue
                 verdict = int(raw.get("verdict", 0))
                 tie = bool(raw.get("tie", verdict == 0))
+                if verdict == 0 and not tie:
+                    continue
                 if verdict < -3 or verdict > 3:
                     raise ValueError(f"verdict outside A13 range: {verdict}")
                 confidence = int(raw.get("confidence", 0))
@@ -243,6 +245,49 @@ class TestHoldoutGuard:
             if found != set(expected):
                 raise ValueError(f"guarded TEST source rows missing from {path}")
         return tuple(sorted(rows, key=lambda row: (row.session_id, row.presentation_id)))
+
+    def _validate_complete_role_census(
+        self,
+        partitions: HoldoutPartitions,
+        refs: Tuple[_SealedJudgmentRef, ...],
+        role: str,
+    ) -> None:
+        """Require one guarded release to match its frozen role census.
+
+        Parameters
+        ----------
+        partitions : HoldoutPartitions
+            Partitions carrying the artifact-derived census.
+        refs : tuple[_SealedJudgmentRef, ...]
+            Actual opaque rows proposed for release.
+        role : str
+            Frozen role being released.
+
+        Raises
+        ------
+        ValueError
+            If the role hash, base-pair set, or graph census is incomplete.
+        """
+
+        if not partitions.role_hash:
+            raise ValueError(f"{role} partition lacks a frozen role hash")
+        actual_base_pairs = {str(ref.row_fields["base_pair_id"]) for ref in refs}
+        expected_base_pairs = set(partitions.expected_test_base_pairs.get(role, ()))
+        extras = actual_base_pairs - expected_base_pairs
+        if extras:
+            raise ValueError(
+                f"guarded row set is not a subset of its frozen role census: {role}; "
+                f"extras={len(extras)}"
+            )
+        missing = expected_base_pairs - actual_base_pairs
+        if missing:
+            raise ValueError(
+                f"cannot consume a partial guarded role: {role}; missing={len(missing)}"
+            )
+        actual_graphs = tuple(sorted({str(ref.row_fields["graph_hash"]) for ref in refs}))
+        expected_graphs = partitions.expected_test_graphs.get(role, ())
+        if actual_graphs != expected_graphs:
+            raise ValueError(f"guarded role does not cover its frozen graph census: {role}")
 
     def consume(self, partitions: HoldoutPartitions, role: str) -> Tuple[JudgmentRow, ...]:
         """Touch and return one labelled A15 sealed role exactly once.
@@ -277,25 +322,7 @@ class TestHoldoutGuard:
         refs = partitions._test_refs_by_role.get(role, ())
         if not refs:
             raise ValueError(f"cannot consume an empty A15 TEST role: {role}")
-        if not partitions.role_hash:
-            raise ValueError("A15 TEST partition lacks a frozen role hash")
-        actual_base_pairs = {str(ref.row_fields["base_pair_id"]) for ref in refs}
-        expected_base_pairs = set(partitions.expected_test_base_pairs.get(role, ()))
-        extras = actual_base_pairs - expected_base_pairs
-        if extras:
-            raise ValueError(
-                f"A15 TEST row set is not a subset of its frozen role census: {role}; "
-                f"extras={len(extras)}"
-            )
-        missing = expected_base_pairs - actual_base_pairs
-        if missing:
-            raise ValueError(
-                f"cannot consume a partial A15 TEST role: {role}; missing={len(missing)}"
-            )
-        actual_graphs = tuple(sorted({str(ref.row_fields["graph_hash"]) for ref in refs}))
-        expected_graphs = partitions.expected_test_graphs.get(role, ())
-        if actual_graphs != expected_graphs:
-            raise ValueError(f"A15 TEST role does not cover its frozen graph census: {role}")
+        self._validate_complete_role_census(partitions, refs, role)
         role_label = "within" if role == "within-family-sealed" else "cross"
         try:
             self._ledger.reserve_once(
@@ -366,8 +393,7 @@ class CalibrationLookGuard(TestHoldoutGuard):
         )
         if not refs:
             raise ValueError(f"cannot consume an empty calibration role: {role}")
-        if not partitions.role_hash:
-            raise ValueError("calibration partition lacks a frozen role hash")
+        self._validate_complete_role_census(partitions, refs, role)
         try:
             reservation = self._ledger.reserve_look(
                 partitions.role_hash,
@@ -421,12 +447,16 @@ class ReusableJudgmentGuard(TestHoldoutGuard):
         refs = partitions._gated_refs_by_purpose.get(purpose, ())
         if not refs or not partitions.role_hash:
             raise ValueError("reusable labelled read requires a nonempty frozen partition")
+        roles = {str(ref.row_fields["role"]) for ref in refs}
+        if len(roles) != 1:
+            raise ValueError("one reusable labelled read may release exactly one frozen role")
+        role = next(iter(roles))
+        self._validate_complete_role_census(partitions, refs, role)
         self._ledger.record_unbudgeted(
             partitions.role_hash,
             purpose.value,
             (str(ref.row_fields["presentation_id"]) for ref in refs),
         )
-        role = str(refs[0].row_fields["role"])
         self._reserved_role = role
         self._consumed_in_process = True
         return self._reveal_test_rows(refs, role)
