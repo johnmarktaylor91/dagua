@@ -13,6 +13,7 @@ from typing import Any, Iterable, Mapping, Optional, Tuple, Union
 PathLike = Union[str, Path]
 _NON_FITTING_BUDGET_LINES = frozenset({"CONTROLS", "MULTI-CONFIG"})
 _PROHIBITED_BANK_SUBTREES = frozenset({"pilot", "sealed"})
+SEALED_TEST_ROLES = frozenset({"within-family-sealed", "cross-family-sealed"})
 
 
 class SplitPurpose(str, Enum):
@@ -232,8 +233,8 @@ class JudgmentBank:
         Stable opaque TEST source references without verdict or tie fields.
     role_hash : str
         Frozen A15 role-assignment identity binding the TEST access record.
-    expected_test_presentations : tuple[str, ...]
-        Complete scheduled presentation census for guarded TEST roles.
+    expected_test_presentations : mapping[str, tuple[str, ...]]
+        Complete scheduled presentation census for each guarded TEST role.
     report : BankLoadReport
         Inclusion and exclusion audit.
     """
@@ -241,8 +242,17 @@ class JudgmentBank:
     _rows: Tuple[JudgmentRow, ...]
     _test_refs: Tuple[_SealedJudgmentRef, ...]
     role_hash: str
-    expected_test_presentations: Tuple[str, ...]
+    expected_test_presentations: Mapping[str, Tuple[str, ...]]
     report: BankLoadReport
+
+    def __post_init__(self) -> None:
+        """Freeze the per-role guarded presentation census."""
+
+        census = {
+            role: tuple(presentations)
+            for role, presentations in self.expected_test_presentations.items()
+        }
+        object.__setattr__(self, "expected_test_presentations", MappingProxyType(census))
 
     @property
     def rows(self) -> Tuple[JudgmentRow, ...]:
@@ -679,17 +689,19 @@ def load_bank(
     paths = _bank_jsonl_paths(bank_inputs)
     schedule = load_schedule(schedule_inputs)
     graph_map, role_hash = _load_a15_family_map(family_map_path)
-    expected_test_presentations = tuple(
-        sorted(
-            scheduled.presentation_id
-            for scheduled in schedule.values()
-            if scheduled.control_type is None
-            and scheduled.budget_line not in _NON_FITTING_BUDGET_LINES
-            and scheduled.graph_hash in graph_map
-            and _ROLE_PURPOSE.get(str(graph_map[scheduled.graph_hash].get("role", "")))
-            is SplitPurpose.TEST
+    expected_test_presentations = {
+        role: tuple(
+            sorted(
+                scheduled.presentation_id
+                for scheduled in schedule.values()
+                if scheduled.control_type is None
+                and scheduled.budget_line not in _NON_FITTING_BUDGET_LINES
+                and scheduled.graph_hash in graph_map
+                and str(graph_map[scheduled.graph_hash].get("role", "")) == role
+            )
         )
-    )
+        for role in sorted(SEALED_TEST_ROLES)
+    }
     rows = []
     test_refs = []
     counts = {
