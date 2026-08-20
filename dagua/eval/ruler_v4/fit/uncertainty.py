@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from dagua.eval.ruler_v4.fit.access import H_JND_LEDGER_KEY, AccessLedger
+from dagua.eval.ruler_v4.fit.bank import _FROZEN_A15_ROLE_HASH
 from dagua.eval.ruler_v4.fit.objective import FitPair, FittingPlan, PairwiseObjective
 
 _MINIMUM_CELL_COUNT = 25
@@ -66,7 +67,7 @@ class JNDFitConfig:
 
         counts = dict(self.top_composite_pair_counts)
         envelopes = {key: float(value) for key, value in self.rotation_envelopes.items()}
-        if not self.role_hash:
+        if self.role_hash != _FROZEN_A15_ROLE_HASH:
             raise ValueError("JND fit requires the frozen A15 role hash")
         if any(
             not key or isinstance(value, bool) or not isinstance(value, int) or value < 0
