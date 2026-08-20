@@ -405,3 +405,22 @@ class AccessLedger:
         }
         self._append(role_hash, ledger_key, 1, payload, bounded=True)
         return digest
+
+    def budget_usage(self, role_hash: str) -> Mapping[str, int]:
+        """Return persistent bounded-budget consumption without reading labels.
+
+        Parameters
+        ----------
+        role_hash : str
+            Frozen A15 role identity.
+
+        Returns
+        -------
+        mapping[str, int]
+            Consumed slots for every four-look and once-only budget.
+        """
+
+        keys = tuple(sorted(_CALIBRATION_KEYS | {W08_LEDGER_KEY, H_JND_LEDGER_KEY})) + tuple(
+            sorted(("within-family-sealed", "cross-family-sealed"))
+        )
+        return {key: len(self._records(role_hash, key)) for key in keys}

@@ -28,6 +28,15 @@ from dagua.eval.ruler_v4.fit.diagnostics import (
     jnd_band_calibration,
     ordered_response_calibration,
 )
+from dagua.eval.ruler_v4.fit.driver import (
+    FitConvergenceError,
+    FitDriverConfig,
+    FitDriverIteration,
+    FitStartConditionError,
+    Freeze1FitResult,
+    RealFitStartConditions,
+    run_freeze1_fit,
+)
 from dagua.eval.ruler_v4.fit.holdout import (
     CalibrationLookConsumedError,
     CalibrationLookGuard,
@@ -65,11 +74,13 @@ from dagua.eval.ruler_v4.fit.uncertainty import (
     HJNDBranchResult,
     JNDFitConfig,
     JNDHeterogeneityFit,
+    JNDProfileFit,
     KJNDDisclosure,
     SplitHalfStability,
     VarianceComponentCI,
     evaluate_h_jnd_branch,
     fit_jnd_heterogeneity,
+    profile_jnd_block,
 )
 
 __all__ = [
@@ -83,8 +94,13 @@ __all__ = [
     "EraRobustness",
     "EvaluationMetrics",
     "FitPair",
+    "FitConvergenceError",
+    "FitDriverConfig",
+    "FitDriverIteration",
     "FitOrdLines",
     "FitResult",
+    "FitStartConditionError",
+    "Freeze1FitResult",
     "FittingPlan",
     "HoldoutPartitions",
     "H_JND_LEDGER_KEY",
@@ -92,6 +108,7 @@ __all__ = [
     "JNDCellCalibration",
     "JNDFitConfig",
     "JNDHeterogeneityFit",
+    "JNDProfileFit",
     "KJNDDisclosure",
     "JudgmentBank",
     "JudgmentMetadata",
@@ -102,6 +119,7 @@ __all__ = [
     "OuterWeightStability",
     "PairwiseObjective",
     "RescoredPair",
+    "RealFitStartConditions",
     "ReusableJudgmentGuard",
     "SceneRescorer",
     "SceneResolver",
@@ -126,6 +144,8 @@ __all__ = [
     "load_schedule",
     "partition_holdouts",
     "partition_fit_ord_lines",
+    "profile_jnd_block",
     "ordered_response_calibration",
     "synthetic_fit_pair",
+    "run_freeze1_fit",
 ]

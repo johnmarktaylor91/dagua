@@ -27,12 +27,15 @@ from dagua.eval.ruler_v4.fit import (
     AccessLedger,
     CalibrationLookConsumedError,
     CalibrationLookGuard,
+    FitDriverConfig,
     FitPair,
+    FitStartConditionError,
     FittingPlan,
     JNDFitConfig,
     JudgmentRow,
     OptimizerConfig,
     PairwiseObjective,
+    RealFitStartConditions,
     ReusableJudgmentGuard,
     SceneRescorer,
     SplitPurpose,
@@ -47,6 +50,7 @@ from dagua.eval.ruler_v4.fit import (
     ordered_response_calibration,
     partition_fit_ord_lines,
     partition_holdouts,
+    run_freeze1_fit,
     synthetic_fit_pair,
 )
 from dagua.eval.ruler_v4.fit import (
@@ -1686,3 +1690,103 @@ def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
     assert branch.pooled_ratio == pytest.approx(1.1)
     with pytest.raises(RuntimeError, match="once-only"):
         evaluate_h_jnd_branch(branch_fit)
+
+
+def test_freeze1_driver_fails_closed_for_holdouts_and_real_rows(tmp_path: Path) -> None:
+    """The orchestration boundary refuses holdouts and never activates real fitting."""
+
+    rows = _jnd_success_rows()
+    plan = FittingPlan(_weight_parameters())
+    config = JNDFitConfig(
+        role_hash=bank_module._FROZEN_A15_ROLE_HASH,
+        top_composite_pair_counts={"band-1": 67, "band-2": 67},
+        rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
+    )
+    with pytest.raises(ValueError, match="train-role"):
+        run_freeze1_fit(
+            (replace(rows[0], purpose=SplitPurpose.VALIDATE),),
+            plan,
+            config,
+            tmp_path / "holdout-run",
+        )
+    real_rows = tuple(replace(row, synthetic=False) for row in rows)
+    with pytest.raises(FitStartConditionError, match="campaign completion"):
+        run_freeze1_fit(real_rows, plan, config, tmp_path / "premature-real-run")
+    ready = RealFitStartConditions(
+        campaign_complete=True,
+        protocol_start_authorized=True,
+        lapse_prior_frozen=True,
+        graph_half_assignment_frozen=True,
+        blind_map_attested=True,
+    )
+    with pytest.raises(NotImplementedError, match="activation remains disabled"):
+        run_freeze1_fit(
+            real_rows,
+            plan,
+            config,
+            tmp_path / "gated-real-run",
+            real_start_conditions=ready,
+        )
+    with pytest.raises(TypeError, match="joint_tolerance"):
+        FitDriverConfig(joint_tolerance=1.0e-6)  # type: ignore[call-arg]
+    assert not (tmp_path / "holdout-run").exists()
+    assert not (tmp_path / "premature-real-run").exists()
+    assert not (tmp_path / "gated-real-run").exists()
+
+
+def test_freeze1_driver_runs_synthetic_fit_with_ledgered_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Synthetic FREEZE-1 runs end to end with fixed-point and budget evidence."""
+
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "ACCESS_LEDGER")
+    rows = _jnd_success_rows()
+    plan = FittingPlan(_weight_parameters())
+    config = JNDFitConfig(
+        role_hash=bank_module._FROZEN_A15_ROLE_HASH,
+        top_composite_pair_counts={"band-1": 67, "band-2": 67},
+        rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
+    )
+    run_dir = tmp_path / "freeze1-run"
+
+    result = run_freeze1_fit(rows, plan, config, run_dir)
+
+    assert result.trajectory
+    assert result.trajectory[0].joint_improvement is None
+    assert result.trajectory[-1].joint_improvement is not None
+    assert result.trajectory[-1].joint_improvement <= 1.0e-10
+    assert all(
+        math.isfinite(iteration.joint_objective)
+        and iteration.weight_lapse_improvement >= 0.0
+        and (iteration.jnd_improvement is None or iteration.jnd_improvement >= 0.0)
+        and (iteration.joint_improvement is None or iteration.joint_improvement >= 0.0)
+        for iteration in result.trajectory
+    )
+    assert 0.0 <= result.lapse_rate <= 0.25
+    assert result.access_budget_before["test-h-jnd-branch"] == 0
+    assert result.access_budget_after["test-h-jnd-branch"] == 1
+    assert not result.jnd_fit.uncalibrated_classes
+    assert {path.name for path in run_dir.iterdir()} == {
+        "manifest.json",
+        "result.json",
+        "status.json",
+        "trajectory.jsonl",
+    }
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    publication = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+    trajectory = [
+        json.loads(line)
+        for line in (run_dir / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert manifest["seed"] == 20260811
+    assert manifest["joint_tolerance"] == 1.0e-10
+    assert manifest["synthetic_only"] is True
+    assert manifest["row_count"] == len(rows)
+    assert manifest["replication_row_count"] == len(rows)
+    assert publication["access_budget_after"]["test-h-jnd-branch"] == 1
+    assert publication["iterations"] == len(result.trajectory) == len(trajectory)
+    assert status == {"state": "COMPLETE"}
+    with pytest.raises(FileExistsError):
+        run_freeze1_fit(rows, plan, config, run_dir)
+    assert AccessLedger().budget_usage(bank_module._FROZEN_A15_ROLE_HASH)["test-h-jnd-branch"] == 1

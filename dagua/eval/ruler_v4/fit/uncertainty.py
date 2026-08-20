@@ -284,6 +284,52 @@ class HJNDBranchResult:
 
 
 @dataclass(frozen=True)
+class JNDProfileFit:
+    """Publish the lightweight JND block used by FIT-ORD fixed-point steps.
+
+    Parameters
+    ----------
+    mu, tau_class, tau_band : float
+        Post-response hierarchical point estimates.
+    jnd_by_cell : mapping[tuple[str, str], float]
+        Supported cell estimates and explicit pooled fallbacks.
+    cell_counts : mapping[tuple[str, str], int]
+        Distinct cross-session replication groups by cell.
+    unestimated_cells : tuple[tuple[str, str], ...]
+        Cells below the frozen support minimum.
+    marginal_loss : float
+        Profiled replication-line marginal negative log likelihood.
+    block_improvement : float or None
+        Marginal-objective decrease from the prior fixed-point profile.
+    effective_dof : float
+        Pre-response C-06 smoother trace.
+    split_half_frozen, c06_shrink_actions : tuple[str, ...]
+        Separately attributed mandatory shrink responses.
+    loss_path : tuple[float, ...]
+        Deterministic marginal optimizer evaluations.
+    """
+
+    mu: float
+    tau_class: float
+    tau_band: float
+    jnd_by_cell: Mapping[Tuple[str, str], float]
+    cell_counts: Mapping[Tuple[str, str], int]
+    unestimated_cells: Tuple[Tuple[str, str], ...]
+    marginal_loss: float
+    block_improvement: Optional[float]
+    effective_dof: float
+    split_half_frozen: Tuple[str, ...]
+    c06_shrink_actions: Tuple[str, ...]
+    loss_path: Tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        """Freeze profile publication mappings."""
+
+        object.__setattr__(self, "jnd_by_cell", MappingProxyType(dict(self.jnd_by_cell)))
+        object.__setattr__(self, "cell_counts", MappingProxyType(dict(self.cell_counts)))
+
+
+@dataclass(frozen=True)
 class _CellObservation:
     """Hold one cell's local Laplace observation on the log-JND scale."""
 
@@ -419,6 +465,7 @@ def _meta_fit(
     observations: Mapping[Tuple[str, str], _CellObservation],
     eligible_bands: frozenset[str],
     frozen_components: frozenset[str] = frozenset(),
+    precise: bool = False,
 ) -> _MetaFit:
     """Fit integrated class/band variance components by marginal likelihood.
 
@@ -430,6 +477,8 @@ def _meta_fit(
         Bands meeting the frozen top-composite quota.
     frozen_components : frozenset[str], optional
         Variance components fixed at their null prior.
+    precise : bool, default=False
+        Whether to use a high-precision derivative-free polish for fixed points.
 
     Returns
     -------
@@ -512,7 +561,13 @@ def _meta_fit(
         [float(np.average(values, weights=1.0 / variances))] + [math.log(0.1)] * len(active)
     )
     bounds = [(_LOG_JND_BOUNDS[0], _LOG_JND_BOUNDS[1])] + [_LOG_TAU_BOUNDS] * len(active)
-    result = minimize(evaluate, initial, method="L-BFGS-B", bounds=bounds)
+    result = minimize(
+        evaluate,
+        initial,
+        method="Powell" if precise else "L-BFGS-B",
+        bounds=bounds,
+        options=({"ftol": 1.0e-14, "xtol": 1.0e-14, "maxiter": 1000} if precise else None),
+    )
     if not result.success and not math.isfinite(float(result.fun)):
         raise RuntimeError(f"JND marginal-likelihood fit failed: {result.message}")
     mu, tau_class, tau_band = unpack(result.x)
@@ -591,6 +646,122 @@ def _apply_c06_shrink(
         actions.append(offender)
         current = _meta_fit(observations, eligible_bands, frozenset(frozen))
     return current, tuple(actions)
+
+
+def _prefer_lower_boundary_fit(
+    observations: Mapping[Tuple[str, str], _CellObservation],
+    eligible_bands: frozenset[str],
+    fitted: _MetaFit,
+    precise: bool = False,
+) -> _MetaFit:
+    """Select an exact null component when its boundary likelihood is lower.
+
+    Parameters
+    ----------
+    observations : mapping[tuple[str, str], _CellObservation]
+        Cell Laplace observations.
+    eligible_bands : frozenset[str]
+        Bands entering the random band component.
+    fitted : _MetaFit
+        Interior numerical optimizer result.
+    precise : bool, default=False
+        Whether boundary candidates receive the fixed-point precision polish.
+
+    Returns
+    -------
+    _MetaFit
+        Lower-loss boundary result or the original interior result.
+
+    Notes
+    -----
+    L-BFGS-B operates on ``log(tau)`` and can stop just above the null boundary.
+    The explicit likelihood comparison makes ``tau = 0`` reachable without a
+    score-visible tolerance: a boundary is selected only when its objective is
+    no larger than the interior candidate's objective.
+    """
+
+    current = fitted
+    boundary_components = set()
+    original_active = fitted.active_components
+    for component in original_active:
+        candidate = _meta_fit(
+            observations,
+            eligible_bands,
+            frozenset(boundary_components | {component}),
+            precise=precise,
+        )
+        if candidate.loss <= current.loss:
+            current = candidate
+            boundary_components.add(component)
+    if not boundary_components:
+        return fitted
+    taus = {"tau_class": current.tau_class, "tau_band": current.tau_band}
+    parameter_vector = np.asarray(
+        [current.mu]
+        + [
+            _LOG_TAU_BOUNDS[0] if component in boundary_components else math.log(taus[component])
+            for component in original_active
+        ],
+        dtype=np.float64,
+    )
+    return _MetaFit(
+        mu=current.mu,
+        tau_class=current.tau_class,
+        tau_band=current.tau_band,
+        class_effects=current.class_effects,
+        band_effects=current.band_effects,
+        cell_logs=current.cell_logs,
+        loss=current.loss,
+        loss_path=fitted.loss_path + current.loss_path,
+        effective_dof_class=current.effective_dof_class,
+        effective_dof_band=current.effective_dof_band,
+        parameter_vector=parameter_vector,
+        active_components=original_active,
+    )
+
+
+def _profile_marginal_loss(
+    observations: Mapping[Tuple[str, str], _CellObservation],
+    eligible_bands: frozenset[str],
+    profile: JNDProfileFit,
+) -> float:
+    """Evaluate a prior fixed-point profile on current cell observations.
+
+    Parameters
+    ----------
+    observations : mapping[tuple[str, str], _CellObservation]
+        Current cell Laplace observations.
+    eligible_bands : frozenset[str]
+        Bands entering the random band component.
+    profile : JNDProfileFit
+        Previous fixed-point JND parameters.
+
+    Returns
+    -------
+    float
+        Summed Gaussian marginal negative log likelihood.
+    """
+
+    cells = tuple(sorted(observations))
+    classes = tuple(sorted({cell[0] for cell in cells}))
+    bands = tuple(sorted({cell[1] for cell in cells if cell[1] in eligible_bands}))
+    values = np.asarray([observations[cell].estimate for cell in cells])
+    variances = np.asarray([observations[cell].variance for cell in cells])
+    class_design = np.asarray([[float(cell[0] == value) for value in classes] for cell in cells])
+    band_design = np.asarray([[float(cell[1] == value) for value in bands] for cell in cells])
+    covariance = np.diag(variances)
+    covariance += profile.tau_class**2 * (class_design @ class_design.T)
+    if bands:
+        covariance += profile.tau_band**2 * (band_design @ band_design.T)
+    sign, log_determinant = np.linalg.slogdet(covariance)
+    if sign <= 0:
+        return math.inf
+    residual = values - profile.mu
+    return 0.5 * (
+        log_determinant
+        + float(residual @ np.linalg.solve(covariance, residual))
+        + len(values) * math.log(2.0 * math.pi)
+    )
 
 
 def _validate_replication_rows(rows: Tuple[FitPair, ...]) -> Mapping[Tuple[str, str], int]:
@@ -797,7 +968,7 @@ def _meta_profile_intervals(
             method="L-BFGS-B",
             bounds=[bounds[position] for position in free],
         )
-        if not result.success:
+        if not result.success and not math.isfinite(float(result.fun)):
             raise RuntimeError(f"JND profile optimization failed: {result.message}")
         return float(result.fun) - target
 
@@ -1178,6 +1349,122 @@ def _tie_rates(
         )
         result[primary_class] = float(pooled), float(cell)
     return MappingProxyType(result)
+
+
+def profile_jnd_block(
+    pairs: Sequence[FitPair],
+    plan: FittingPlan,
+    weights: Mapping[str, float],
+    config: JNDFitConfig,
+    previous_profile: Optional[JNDProfileFit] = None,
+) -> JNDProfileFit:
+    """Profile the post-guard JND block without final bootstrap publications.
+
+    Parameters
+    ----------
+    pairs : sequence[FitPair]
+        Synthetic train-role cross-session replication presentations.
+    plan : FittingPlan
+        Frozen outer-weight plan.
+    weights : mapping[str, float]
+        Current fixed-point outer weights.
+    config : JNDFitConfig
+        Frozen support, quota, seed, and role identity.
+    previous_profile : JNDProfileFit or None
+        Prior fixed-point profile used only to account the block decrease.
+
+    Returns
+    -------
+    JNDProfileFit
+        Point estimates and response accounting needed by the FIT-ORD driver.
+
+    Raises
+    ------
+    NotImplementedError
+        If a real row reaches the synthetic-only activation boundary.
+    ValueError
+        If replication provenance or support is incomplete.
+    """
+
+    rows = tuple(pairs)
+    if any(not pair.synthetic for pair in rows):
+        raise NotImplementedError("real JND profiling remains behind the freeze-fit start gate")
+    counts = _validate_replication_rows(rows)
+    bands = {pair.size_band for pair in rows}
+    classes = {pair.primary_class for pair in rows}
+    missing_band_counts = sorted(bands - set(config.top_composite_pair_counts))
+    missing_envelopes = sorted(classes - set(config.rotation_envelopes))
+    if missing_band_counts:
+        raise ValueError(f"top-composite counts missing for bands: {missing_band_counts}")
+    if missing_envelopes:
+        raise ValueError(f"rotation envelopes missing for classes: {missing_envelopes}")
+    supported = frozenset(
+        cell for cell, count in counts.items() if count >= config.minimum_cell_count
+    )
+    if not supported:
+        raise ValueError("no JND-HET cell meets the frozen 25-pair minimum")
+    eligible_bands = frozenset(
+        band for band, count in config.top_composite_pair_counts.items() if count >= config.q_band
+    )
+    vector = torch.tensor([weights[name] for name in plan.parameter_names], dtype=torch.float64)
+    differences = PairwiseObjective(rows, plan).score_differences(vector).detach().numpy()
+    observations = _cell_observations(rows, differences)
+    initial_fit = _prefer_lower_boundary_fit(
+        observations,
+        eligible_bands,
+        _meta_fit(observations, eligible_bands, precise=True),
+        precise=True,
+    )
+    _, tau_class_ci, tau_band_ci = _meta_profile_intervals(
+        observations, eligible_bands, initial_fit
+    )
+    half_one, half_two = _split_half_fit(rows, differences, eligible_bands)
+    split_frozen = {
+        component
+        for component, interval in (
+            ("tau_class", tau_class_ci.ratio_scale),
+            ("tau_band", tau_band_ci.ratio_scale),
+        )
+        if abs(getattr(half_one, component) - getattr(half_two, component))
+        > interval[1] - interval[0]
+    }
+    stability_fit = (
+        initial_fit
+        if not split_frozen
+        else _meta_fit(observations, eligible_bands, frozenset(split_frozen))
+    )
+    fitted, c06_actions = _apply_c06_shrink(
+        observations,
+        eligible_bands,
+        stability_fit,
+        frozenset(split_frozen),
+    )
+    previous_loss = (
+        None
+        if previous_profile is None
+        else _profile_marginal_loss(observations, eligible_bands, previous_profile)
+    )
+    pooled_jnd = math.exp(fitted.mu)
+    jnd_by_cell = {
+        cell: math.exp(fitted.cell_logs[cell]) if cell in supported else pooled_jnd
+        for cell in sorted(counts)
+    }
+    return JNDProfileFit(
+        mu=fitted.mu,
+        tau_class=fitted.tau_class,
+        tau_band=fitted.tau_band,
+        jnd_by_cell=jnd_by_cell,
+        cell_counts=counts,
+        unestimated_cells=tuple(sorted(set(counts) - supported)),
+        marginal_loss=fitted.loss,
+        block_improvement=(
+            None if previous_loss is None else max(previous_loss - fitted.loss, 0.0)
+        ),
+        effective_dof=initial_fit.effective_dof_class + initial_fit.effective_dof_band,
+        split_half_frozen=tuple(sorted(split_frozen)),
+        c06_shrink_actions=c06_actions,
+        loss_path=initial_fit.loss_path + (() if fitted is initial_fit else fitted.loss_path),
+    )
 
 
 def fit_jnd_heterogeneity(
