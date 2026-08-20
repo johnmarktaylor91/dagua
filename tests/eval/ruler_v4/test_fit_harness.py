@@ -143,6 +143,7 @@ def _synthetic_recovery_rows(count: int = 1500) -> tuple[FitPair, ...]:
                 numerator_b=tuple(numerator_b),
                 mass_coefficients=(1.0, 1.0),
                 outcome=outcome,
+                graded_verdict=outcome,
                 fixed_numerator_a=fixed_a,
                 fixed_numerator_b=fixed_b,
                 fixed_mass=1.0,
@@ -338,6 +339,13 @@ def test_prior_penalty_scales_as_one_dataset_prior_not_per_row() -> None:
 def test_objective_refuses_silent_graded_verdict_collapse() -> None:
     """A 7-point A13 response cannot silently enter the three-way model."""
 
+    with pytest.raises(TypeError, match="graded_verdict"):
+        FitPair(
+            numerator_a=(1.0,),
+            numerator_b=(2.0,),
+            mass_coefficients=(1.0,),
+            outcome=1,
+        )
     row = replace(_synthetic_recovery_rows(count=1)[0], outcome=1, graded_verdict=3)
     with pytest.raises(ValueError, match="ordered-probit"):
         PairwiseObjective((row,), FittingPlan(_weight_parameters()))
@@ -351,6 +359,7 @@ def test_objective_refuses_unidentified_scale_and_flags_bound_weights() -> None:
         numerator_b=(2.0, 1.0),
         mass_coefficients=(1.0, 1.0),
         outcome=1,
+        graded_verdict=1,
     )
     with pytest.raises(ValueError, match="not identifiable"):
         PairwiseObjective((unidentified,), FittingPlan(_weight_parameters()))
@@ -369,6 +378,7 @@ def test_objective_refuses_unidentified_scale_and_flags_bound_weights() -> None:
         numerator_b=(2.0,),
         mass_coefficients=(1.0,),
         outcome=1,
+        graded_verdict=1,
         fixed_numerator_a=1.0,
         fixed_numerator_b=1.0,
         fixed_mass=1.0,
