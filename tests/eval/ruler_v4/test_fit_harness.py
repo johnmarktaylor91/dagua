@@ -489,6 +489,8 @@ def test_test_holdout_access_fails_closed_on_all_review_defeats(
     assert not hasattr(partitions, "_test")
     assert "verdict=3" not in repr(bank)
     with pytest.raises(TypeError):
+        pickle.dumps(bank)
+    with pytest.raises(TypeError):
         pickle.dumps(partitions)
     with pytest.raises(TypeError):
         HoldoutGuard(tmp_path / "alternate-record.json")
