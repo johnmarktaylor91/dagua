@@ -569,10 +569,16 @@ the production port; none of the entries below overrides a contract.
     minimum and complete variance-component/bootstrap procedure.
 47. A15 section 5.7 allows at most four calibration looks under A18 alpha
     spending, but no canonical inspection-ledger location or alpha-spending API
-    is present in the P5 harness inputs. TEST access is content-bound and
-    once-only; VALIDATE remains readable for diagnostic tooling. OWNER: campaign
-    activation must add a content-bound four-look ledger before calibration is
-    used for stopping or capacity selection.
+    is present in the P5 harness inputs. VALIDATE judged fields are still readable
+    in code; the frozen protocol requires them to route through the four-look
+    ledger and a metadata-only accessor to serve the unlimited half. LOOK-LEDGER
+    (e) also requires the ledger root to remain the injected absolute campaign
+    home, never checkout-derived; (f) requires the sealed census to remain sourced
+    only from the verified A15 role hash and frozen A16 schedule digest, with a
+    partial release failing closed. The shipped seal implements these (e)/(f)
+    boundaries; the (a)-(d) calibration path remains open. OWNER: campaign
+    activation must add the content-bound four-look ledger and metadata accessor
+    before calibration is used for stopping or capacity selection.
 48. Outer-weight split-half CIs and JND/strict-win uncertainty publications are
     not implemented by P5FIX. The real graded likelihood and W-13 paths are both
     fail-closed, so these omissions cannot silently produce a freeze artifact.
