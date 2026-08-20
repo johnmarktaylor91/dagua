@@ -142,6 +142,7 @@ class TestHoldoutGuard:
         self._ledger_root = _ACCESS_LEDGER_ROOT if ledger_root is None else Path(ledger_root)
         self._path: Union[Path, None] = None
         self._lock_path: Union[Path, None] = None
+        self._reserved_role: Union[str, None] = None
         self._consumed_in_process = False
 
     @property
@@ -156,13 +157,17 @@ class TestHoldoutGuard:
 
         return self._consumed_in_process or (self._path is not None and self._path.exists())
 
-    def _reveal_test_rows(self, refs: Tuple[_SealedJudgmentRef, ...]) -> Tuple[JudgmentRow, ...]:
+    def _reveal_test_rows(
+        self, refs: Tuple[_SealedJudgmentRef, ...], role: str
+    ) -> Tuple[JudgmentRow, ...]:
         """Re-read sealed labels only after this guard reserves a ledger slot.
 
         Parameters
         ----------
         refs : tuple[_SealedJudgmentRef, ...]
             Opaque source references for the role whose slot was reserved.
+        role : str
+            Frozen sealed role reserved by this guard.
 
         Returns
         -------
@@ -177,7 +182,13 @@ class TestHoldoutGuard:
             If a source row moved, changed identity, or has invalid labels.
         """
 
-        if not self._consumed_in_process or self._lock_path is None or not self._lock_path.exists():
+        if (
+            not self._consumed_in_process
+            or self._reserved_role != role
+            or any(ref.row_fields["role"] != role for ref in refs)
+            or self._lock_path is None
+            or not self._lock_path.exists()
+        ):
             raise RuntimeError("sealed labels require a successful access reservation")
         by_path: dict[Path, dict[int, _SealedJudgmentRef]] = {}
         for ref in refs:
@@ -306,5 +317,6 @@ class TestHoldoutGuard:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        self._reserved_role = role
         self._consumed_in_process = True
-        return self._reveal_test_rows(refs)
+        return self._reveal_test_rows(refs, role)
