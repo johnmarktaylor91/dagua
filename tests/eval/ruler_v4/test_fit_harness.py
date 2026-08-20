@@ -20,6 +20,7 @@ import torch
 
 import dagua.eval.ruler_v4.fit.access as access_module
 import dagua.eval.ruler_v4.fit.bank as bank_module
+import dagua.eval.ruler_v4.fit.optimize as optimize_module
 from dagua.eval.ruler_v4.fit import (
     W08_LEDGER_KEY,
     AccessLedger,
@@ -580,6 +581,28 @@ def test_objective_refuses_unidentified_scale_and_flags_bound_weights() -> None:
         OptimizerConfig(steps=1),
     )
     assert result.at_bounds == {"w_fixed": "fixed"}
+
+
+def test_observed_information_excludes_the_weight_prior() -> None:
+    """A collinear likelihood remains rank deficient in the publication."""
+
+    rows = tuple(
+        replace(
+            row,
+            numerator_a=(row.numerator_a[0], row.numerator_a[0]),
+            numerator_b=(row.numerator_b[0], row.numerator_b[0]),
+            mass_coefficients=(1.0, 1.0),
+        )
+        for row in _synthetic_recovery_rows(count=40)
+    )
+    objective = PairwiseObjective(rows, FittingPlan(_weight_parameters()))
+
+    rank, condition_number = optimize_module._information_diagnostics(
+        objective, {"w_structure": 1.0, "w_neighborhood": 1.0}
+    )
+
+    assert rank == 1
+    assert condition_number > 1.0e12
 
 
 def test_jnd_calibration_replaces_only_the_dataclass_band() -> None:
