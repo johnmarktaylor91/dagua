@@ -13,6 +13,13 @@ from typing import Any, Iterable, Mapping, Optional, Tuple, Union
 PathLike = Union[str, Path]
 _NON_FITTING_BUDGET_LINES = frozenset({"CONTROLS", "MULTI-CONFIG"})
 _PROHIBITED_BANK_SUBTREES = frozenset({"pilot", "sealed"})
+_FROZEN_A15_ROLE_HASH = (
+    "efe09188d2f1680a6ca55857e1db0c5d7a9201c2e66600d4fdbec057514c0b02"  # pragma: allowlist secret
+)
+_FROZEN_A16_SCHEDULE_DIGEST = (
+    "deb598b397523d17e8bd1d39d996de9965257414c72507daf3fe046865276020"  # pragma: allowlist secret
+)
+_TEST_ONLY_A16_DIGESTS_BY_ROLE_HASH: Mapping[str, str] = MappingProxyType({})
 SEALED_TEST_ROLES = frozenset({"within-family-sealed", "cross-family-sealed"})
 
 
@@ -233,8 +240,8 @@ class JudgmentBank:
         Stable opaque TEST source references without verdict or tie fields.
     role_hash : str
         Frozen A15 role-assignment identity binding the TEST access record.
-    expected_test_presentations : mapping[str, tuple[str, ...]]
-        Frozen A16 presentation census for each guarded TEST role.
+    expected_test_base_pairs : mapping[str, tuple[str, ...]]
+        Frozen A16 base-pair census for each guarded TEST role.
     expected_test_graphs : mapping[str, tuple[str, ...]]
         Frozen graph-hash census for each guarded TEST role.
     report : BankLoadReport
@@ -249,21 +256,20 @@ class JudgmentBank:
     _rows: Tuple[JudgmentRow, ...]
     _test_refs: Tuple[_SealedJudgmentRef, ...]
     role_hash: str
-    expected_test_presentations: Mapping[str, Tuple[str, ...]]
+    expected_test_base_pairs: Mapping[str, Tuple[str, ...]]
     expected_test_graphs: Mapping[str, Tuple[str, ...]]
     report: BankLoadReport
 
     def __post_init__(self) -> None:
-        """Freeze the per-role guarded presentation census."""
+        """Freeze the per-role guarded base-pair census."""
 
         census = {
-            role: tuple(presentations)
-            for role, presentations in self.expected_test_presentations.items()
+            role: tuple(base_pairs) for role, base_pairs in self.expected_test_base_pairs.items()
         }
         graph_census = {
             role: tuple(graph_hashes) for role, graph_hashes in self.expected_test_graphs.items()
         }
-        object.__setattr__(self, "expected_test_presentations", MappingProxyType(census))
+        object.__setattr__(self, "expected_test_base_pairs", MappingProxyType(census))
         object.__setattr__(self, "expected_test_graphs", MappingProxyType(graph_census))
 
     @property
@@ -587,24 +593,24 @@ def _load_a15_family_map(
 
 def _load_frozen_test_census(
     path: PathLike,
-    expected_digest: str,
+    role_hash: str,
     graph_map: Mapping[str, Mapping[str, Any]],
 ) -> Mapping[str, Tuple[str, ...]]:
-    """Load the sealed presentation census from its frozen schedule bytes.
+    """Load the sealed base-pair census from pinned frozen schedule bytes.
 
     Parameters
     ----------
     path : path-like
         Frozen A16-materialized presentation schedule.
-    expected_digest : str
-        Frozen SHA-256 digest for the exact schedule bytes.
+    role_hash : str
+        Verified A15 role hash selecting the pinned or synthetic-test digest.
     graph_map : mapping[str, mapping[str, Any]]
         Verified frozen A15 graph-role census.
 
     Returns
     -------
     mapping[str, tuple[str, ...]]
-        Presentation identities grouped by sealed role.
+        Base-pair identities grouped by sealed role.
 
     Raises
     ------
@@ -612,6 +618,9 @@ def _load_frozen_test_census(
         If the digest, schema, or A15/A16 role reconciliation disagrees.
     """
 
+    expected_digest = _FROZEN_A16_SCHEDULE_DIGEST
+    if role_hash != _FROZEN_A15_ROLE_HASH:
+        expected_digest = _TEST_ONLY_A16_DIGESTS_BY_ROLE_HASH.get(role_hash, expected_digest)
     payload = Path(path).read_bytes()
     if hashlib.sha256(payload).hexdigest() != expected_digest:
         raise ValueError("frozen presentation-schedule digest does not match")
@@ -628,12 +637,12 @@ def _load_frozen_test_census(
         if graph is None or str(graph.get("role", "")) != partition:
             raise ValueError("frozen A15/A16 role census does not reconcile")
         if partition in SEALED_TEST_ROLES:
-            presentation_id = str(raw.get("presentation_id", ""))
-            if not presentation_id:
-                raise ValueError("frozen sealed schedule row lacks presentation identity")
-            census[partition].append(presentation_id)
+            base_pair_id = str(raw.get("base_pair_id", ""))
+            if not base_pair_id:
+                raise ValueError("frozen sealed schedule row lacks base-pair identity")
+            census[partition].append(base_pair_id)
     return MappingProxyType(
-        {role: tuple(sorted(presentations)) for role, presentations in census.items()}
+        {role: tuple(sorted(set(base_pairs))) for role, base_pairs in census.items()}
     )
 
 
@@ -660,7 +669,6 @@ def load_bank(
     schedule_inputs: Iterable[PathLike],
     family_map_path: PathLike,
     frozen_schedule_path: PathLike,
-    frozen_schedule_digest: str,
     era: Optional[str] = None,
     instrument_hash: Optional[str] = None,
 ) -> JudgmentBank:
@@ -681,8 +689,6 @@ def load_bank(
         Frozen ``A15_FAMILY_MAP.json``.
     frozen_schedule_path : path-like
         Frozen A16-materialized presentation schedule used only for the sealed census.
-    frozen_schedule_digest : str
-        Frozen SHA-256 digest of ``frozen_schedule_path``.
     era : str or None
         Optional exact era selector.
     instrument_hash : str or None
@@ -702,9 +708,7 @@ def load_bank(
     paths = _bank_jsonl_paths(bank_inputs)
     schedule = load_schedule(schedule_inputs)
     graph_map, role_hash = _load_a15_family_map(family_map_path)
-    expected_test_presentations = _load_frozen_test_census(
-        frozen_schedule_path, frozen_schedule_digest, graph_map
-    )
+    expected_test_base_pairs = _load_frozen_test_census(frozen_schedule_path, role_hash, graph_map)
     expected_test_graphs = {
         role: tuple(
             sorted(
@@ -844,7 +848,7 @@ def load_bank(
         _rows=ordered,
         _test_refs=ordered_refs,
         role_hash=role_hash,
-        expected_test_presentations=expected_test_presentations,
+        expected_test_base_pairs=expected_test_base_pairs,
         expected_test_graphs=expected_test_graphs,
         report=report,
     )
