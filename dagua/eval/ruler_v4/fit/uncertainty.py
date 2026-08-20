@@ -174,6 +174,8 @@ class JNDHeterogeneityFit:
         Conditional log-JND effects.
     cell_jnd, cell_jnd_ci : mapping[tuple[str, str], object]
         Supported-cell estimates and 95% profile intervals.
+    jnd_by_cell : mapping[tuple[str, str], float]
+        Consumable supported estimates plus explicit pooled fallbacks.
     cell_counts : mapping[tuple[str, str], int]
         Distinct qualifying replicated base-pair counts.
     unestimated_cells : tuple[tuple[str, str], ...]
@@ -188,6 +190,8 @@ class JNDHeterogeneityFit:
         Pre-response C-06 smoother trace reported beside the ledgered +2.
     shrink_actions : tuple[str, ...]
         Components frozen at zero by stability or C-06.
+    c06_shrink_actions : tuple[str, ...]
+        Components frozen specifically by iterative C-06 re-audits.
     k_jnd_disclosures : tuple[KJNDDisclosure, ...]
         Cells exceeding three times the pooled JND.
     split_half : SplitHalfStability
@@ -215,6 +219,7 @@ class JNDHeterogeneityFit:
     band_effects: Mapping[str, float]
     cell_jnd: Mapping[Tuple[str, str], float]
     cell_jnd_ci: Mapping[Tuple[str, str], Tuple[float, float]]
+    jnd_by_cell: Mapping[Tuple[str, str], float]
     cell_counts: Mapping[Tuple[str, str], int]
     unestimated_cells: Tuple[Tuple[str, str], ...]
     spread: float
@@ -223,6 +228,7 @@ class JNDHeterogeneityFit:
     bootstrap_drop_rate: BootstrapDropRate
     effective_dof: float
     shrink_actions: Tuple[str, ...]
+    c06_shrink_actions: Tuple[str, ...]
     k_jnd_disclosures: Tuple[KJNDDisclosure, ...]
     split_half: SplitHalfStability
     uncalibrated_classes: Tuple[str, ...]
@@ -248,6 +254,7 @@ class JNDHeterogeneityFit:
             "band_effects",
             "cell_jnd",
             "cell_jnd_ci",
+            "jnd_by_cell",
             "cell_counts",
             "tie_rates_by_class",
         ):
@@ -506,7 +513,7 @@ def _meta_fit(
     )
     bounds = [(_LOG_JND_BOUNDS[0], _LOG_JND_BOUNDS[1])] + [_LOG_TAU_BOUNDS] * len(active)
     result = minimize(evaluate, initial, method="L-BFGS-B", bounds=bounds)
-    if not result.success:
+    if not result.success and not math.isfinite(float(result.fun)):
         raise RuntimeError(f"JND marginal-likelihood fit failed: {result.message}")
     mu, tau_class, tau_band = unpack(result.x)
     covariance = np.diag(variances)
@@ -541,6 +548,49 @@ def _meta_fit(
         parameter_vector=np.asarray(result.x),
         active_components=active,
     )
+
+
+def _apply_c06_shrink(
+    observations: Mapping[Tuple[str, str], _CellObservation],
+    eligible_bands: frozenset[str],
+    fitted: _MetaFit,
+    already_frozen: frozenset[str],
+) -> Tuple[_MetaFit, Tuple[str, ...]]:
+    """Freeze one largest effective-dof contributor and re-audit iteratively.
+
+    Parameters
+    ----------
+    observations : mapping[tuple[str, str], _CellObservation]
+        Cell Laplace observations for the published fit.
+    eligible_bands : frozenset[str]
+        Bands entering the random band component.
+    fitted : _MetaFit
+        Fit after any split-half stability response.
+    already_frozen : frozenset[str]
+        Components already frozen by the split-half gate.
+
+    Returns
+    -------
+    tuple[_MetaFit, tuple[str, ...]]
+        Re-audited fit and ordered component-specific C-06 actions.
+    """
+
+    current = fitted
+    frozen = set(already_frozen)
+    actions = []
+    while current.effective_dof_class + current.effective_dof_band > 2.0:
+        contributions = {
+            component: float(getattr(current, f"effective_dof_{component.removeprefix('tau_')}"))
+            for component in current.active_components
+            if component not in frozen
+        }
+        if not contributions:
+            break
+        offender = max(sorted(contributions), key=contributions.__getitem__)
+        frozen.add(offender)
+        actions.append(offender)
+        current = _meta_fit(observations, eligible_bands, frozenset(frozen))
+    return current, tuple(actions)
 
 
 def _validate_replication_rows(rows: Tuple[FitPair, ...]) -> Mapping[Tuple[str, str], int]:
@@ -783,12 +833,17 @@ def _meta_profile_intervals(
     component_intervals = {}
     for component in ("tau_class", "tau_band"):
         if component not in names:
-            log_interval = (_LOG_TAU_BOUNDS[0], _LOG_TAU_BOUNDS[0])
+            log_interval = (-math.inf, -math.inf)
         else:
             log_interval = interval(names.index(component))
+        ratio_interval = (
+            (0.0, 0.0)
+            if not math.isfinite(log_interval[0])
+            else (math.exp(log_interval[0]), math.exp(log_interval[1]))
+        )
         component_intervals[component] = VarianceComponentCI(
             log_scale=log_interval,
-            ratio_scale=(math.exp(log_interval[0]), math.exp(log_interval[1])),
+            ratio_scale=ratio_interval,
         )
     return mu_interval, component_intervals["tau_class"], component_intervals["tau_band"]
 
@@ -903,8 +958,8 @@ def _bootstrap_spread(
     unit: str,
     config: JNDFitConfig,
     supported_cells: frozenset[Tuple[str, str]],
-    fitted_logs: Mapping[Tuple[str, str], float],
-    tau_variance: float,
+    eligible_bands: frozenset[str],
+    frozen_components: frozenset[str],
 ) -> Tuple[Tuple[float, float], float, Tuple[float, float]]:
     """Bootstrap W-13 spread under one frozen resampling unit.
 
@@ -920,10 +975,10 @@ def _bootstrap_spread(
         Frozen bootstrap settings.
     supported_cells : frozenset[tuple[str, str]]
         Cells supported in the original fit.
-    fitted_logs : mapping[tuple[str, str], float]
-        Original hierarchical cell centers.
-    tau_variance : float
-        Combined fitted random-effect variance.
+    eligible_bands : frozenset[str]
+        Bands whose random slope cleared the frozen quota.
+    frozen_components : frozenset[str]
+        Components frozen by the published split-half or C-06 responses.
 
     Returns
     -------
@@ -948,45 +1003,67 @@ def _bootstrap_spread(
         for sampled_unit in sampled:
             multiplicity_by_row[by_unit[str(sampled_unit)]] += 1.0
         active_rows = np.flatnonzero(multiplicity_by_row > 0.0)
+        active_groups: DefaultDict[str, list[int]] = defaultdict(list)
+        for index in active_rows:
+            active_groups[rows[int(index)].replicate_group_id].append(int(index))
+        qualifying_groups = {
+            group_id
+            for group_id, members in active_groups.items()
+            if len({rows[index].session_id for index in members}) >= 2
+            and len({(rows[index].blind_id_a, rows[index].blind_id_b) for index in members}) >= 2
+        }
+        qualifying_rows = np.asarray(
+            sorted(index for group_id in qualifying_groups for index in active_groups[group_id]),
+            dtype=np.int64,
+        )
+        if len(qualifying_rows) == 0:
+            dropped += len(supported_cells)
+            continue
         pooled_observation = _fit_cell_observation(
-            differences[active_rows],
-            np.asarray([rows[int(index)].graded_verdict for index in active_rows]),
-            np.asarray([rows[int(index)].lapse_rate for index in active_rows]),
-            multiplicity_by_row[active_rows],
+            differences[qualifying_rows],
+            np.asarray([rows[int(index)].graded_verdict for index in qualifying_rows]),
+            np.asarray([rows[int(index)].lapse_rate for index in qualifying_rows]),
+            multiplicity_by_row[qualifying_rows],
         )
         pooled_jnds.append(math.exp(pooled_observation.estimate))
-        cell_values = []
+        replicate_observations = {}
         for cell in sorted(supported_cells):
-            members = np.asarray(
-                [
-                    index
-                    for index, pair in enumerate(rows)
-                    if (pair.primary_class, pair.size_band) == cell
-                    and multiplicity_by_row[index] > 0.0
-                ],
-                dtype=np.int64,
-            )
-            base_pair_multiplicity: DefaultDict[str, float] = defaultdict(float)
-            for index in members:
-                base_pair_multiplicity[rows[int(index)].base_pair_id] = max(
-                    base_pair_multiplicity[rows[int(index)].base_pair_id],
-                    multiplicity_by_row[int(index)],
+            cell_groups = {
+                group_id
+                for group_id in qualifying_groups
+                if (
+                    rows[active_groups[group_id][0]].primary_class,
+                    rows[active_groups[group_id][0]].size_band,
                 )
-            replicated_count = int(sum(base_pair_multiplicity.values()))
-            if replicated_count < config.minimum_cell_count:
+                == cell
+            }
+            if len(cell_groups) < config.minimum_cell_count:
                 dropped += 1
                 continue
-            observation = _fit_cell_observation(
+            members = np.asarray(
+                sorted(index for group_id in cell_groups for index in active_groups[group_id]),
+                dtype=np.int64,
+            )
+            replicate_observations[cell] = _fit_cell_observation(
                 differences[members],
                 np.asarray([rows[int(index)].graded_verdict for index in members]),
                 np.asarray([rows[int(index)].lapse_rate for index in members]),
                 multiplicity_by_row[members],
             )
-            shrinkage = tau_variance / (tau_variance + observation.variance)
-            log_value = fitted_logs[cell] + shrinkage * (observation.estimate - fitted_logs[cell])
-            cell_values.append(math.exp(log_value))
-        if cell_values:
-            spreads.append(_spread(cell_values))
+        if replicate_observations:
+            replicate_fit = _meta_fit(
+                replicate_observations,
+                eligible_bands,
+                frozen_components,
+            )
+            spreads.append(
+                _spread(
+                    tuple(
+                        math.exp(replicate_fit.cell_logs[cell])
+                        for cell in sorted(replicate_observations)
+                    )
+                )
+            )
     if not spreads:
         raise ValueError(f"all {unit} bootstrap replicates lost cell support")
     interval = tuple(float(value) for value in np.percentile(spreads, (2.5, 97.5)))
@@ -1138,12 +1215,12 @@ def fit_jnd_heterogeneity(
     """
 
     rows = tuple(pairs)
-    counts = _validate_replication_rows(rows)
     if any(not pair.synthetic for pair in rows):
         raise NotImplementedError(
             "real W-13 split-half fitting is fail-closed because ADDENDUM-27 names "
             "the A15 salt but does not freeze a graph-to-half assignment rule"
         )
+    counts = _validate_replication_rows(rows)
     bands = {pair.size_band for pair in rows}
     classes = {pair.primary_class for pair in rows}
     missing_band_counts = sorted(bands - set(config.top_composite_pair_counts))
@@ -1165,51 +1242,60 @@ def fit_jnd_heterogeneity(
     differences = objective.score_differences(vector).detach().numpy()
     observations = _cell_observations(rows, differences)
     initial_fit = _meta_fit(observations, eligible_bands)
-    mu_ci_log, tau_class_ci, tau_band_ci = _meta_profile_intervals(
+    half_one, half_two = _split_half_fit(rows, differences, eligible_bands)
+    split_frozen_components = set()
+    _, initial_tau_class_ci, initial_tau_band_ci = _meta_profile_intervals(
         observations, eligible_bands, initial_fit
     )
-    half_one, half_two = _split_half_fit(rows, differences, eligible_bands)
-    frozen_components = set()
     for component, interval in (
-        ("tau_class", tau_class_ci.ratio_scale),
-        ("tau_band", tau_band_ci.ratio_scale),
+        ("tau_class", initial_tau_class_ci.ratio_scale),
+        ("tau_band", initial_tau_band_ci.ratio_scale),
     ):
         difference = abs(getattr(half_one, component) - getattr(half_two, component))
         if difference > interval[1] - interval[0]:
-            frozen_components.add(component)
+            split_frozen_components.add(component)
     effective_dof = initial_fit.effective_dof_class + initial_fit.effective_dof_band
-    if effective_dof > 2.0:
-        if initial_fit.effective_dof_class > 0.0:
-            frozen_components.add("tau_class")
-        if initial_fit.effective_dof_band > 0.0:
-            frozen_components.add("tau_band")
-    fitted = (
+    stability_fit = (
         initial_fit
-        if not frozen_components
-        else _meta_fit(observations, eligible_bands, frozenset(frozen_components))
+        if not split_frozen_components
+        else _meta_fit(observations, eligible_bands, frozenset(split_frozen_components))
+    )
+    fitted, c06_shrink_actions = _apply_c06_shrink(
+        observations,
+        eligible_bands,
+        stability_fit,
+        frozenset(split_frozen_components),
+    )
+    frozen_components = frozenset(split_frozen_components) | frozenset(c06_shrink_actions)
+    mu_ci_log, tau_class_ci, tau_band_ci = _meta_profile_intervals(
+        observations, eligible_bands, fitted
     )
     pooled_jnd = math.exp(fitted.mu)
     cell_jnd = {cell: math.exp(fitted.cell_logs[cell]) for cell in sorted(supported)}
     cell_jnd_ci = {
-        cell: _conditional_cell_interval(
-            rows,
-            differences,
-            cell,
-            fitted.cell_logs[cell],
-            fitted.tau_class**2 + (fitted.tau_band**2 if cell[1] in eligible_bands else 0.0),
+        cell: (
+            (math.exp(mu_ci_log[0]), math.exp(mu_ci_log[1]))
+            if fitted.tau_class == 0.0 and (fitted.tau_band == 0.0 or cell[1] not in eligible_bands)
+            else _conditional_cell_interval(
+                rows,
+                differences,
+                cell,
+                fitted.cell_logs[cell],
+                fitted.tau_class**2 + (fitted.tau_band**2 if cell[1] in eligible_bands else 0.0),
+            )
         )
         for cell in sorted(supported)
     }
+    jnd_by_cell = {cell: cell_jnd.get(cell, pooled_jnd) for cell in sorted(counts)}
     spread = _spread(tuple(cell_jnd.values()))
-    tau_variance = fitted.tau_class**2 + fitted.tau_band**2
     graph_interval, graph_drop, pooled_bootstrap_interval = _bootstrap_spread(
         rows,
         differences,
         "graph_hash",
         config,
         supported,
-        fitted.cell_logs,
-        tau_variance,
+        eligible_bands,
+        frozenset(frozen_components),
     )
     family_interval, family_drop, _ = _bootstrap_spread(
         rows,
@@ -1217,8 +1303,8 @@ def fit_jnd_heterogeneity(
         "generator_family",
         config,
         supported,
-        fitted.cell_logs,
-        tau_variance,
+        eligible_bands,
+        frozenset(frozen_components),
     )
     disclosures = tuple(
         KJNDDisclosure(cell, counts[cell], cell_jnd_ci[cell])
@@ -1252,6 +1338,7 @@ def fit_jnd_heterogeneity(
         band_effects=fitted.band_effects,
         cell_jnd=cell_jnd,
         cell_jnd_ci=cell_jnd_ci,
+        jnd_by_cell=jnd_by_cell,
         cell_counts=counts,
         unestimated_cells=tuple(sorted(set(counts) - supported)),
         spread=spread,
@@ -1260,11 +1347,12 @@ def fit_jnd_heterogeneity(
         bootstrap_drop_rate=BootstrapDropRate(graph_drop, family_drop),
         effective_dof=effective_dof,
         shrink_actions=tuple(sorted(frozen_components)),
+        c06_shrink_actions=c06_shrink_actions,
         k_jnd_disclosures=disclosures,
         split_half=SplitHalfStability(
             half_one={"tau_class": half_one.tau_class, "tau_band": half_one.tau_band},
             half_two={"tau_class": half_two.tau_class, "tau_band": half_two.tau_band},
-            frozen_components=tuple(sorted(frozen_components)),
+            frozen_components=tuple(sorted(split_frozen_components)),
         ),
         uncalibrated_classes=uncalibrated,
         tie_rates_by_class=_tie_rates(rows, differences, pooled_jnd, cell_jnd),

@@ -21,6 +21,7 @@ import torch
 import dagua.eval.ruler_v4.fit.access as access_module
 import dagua.eval.ruler_v4.fit.bank as bank_module
 import dagua.eval.ruler_v4.fit.optimize as optimize_module
+import dagua.eval.ruler_v4.fit.uncertainty as uncertainty_module
 from dagua.eval.ruler_v4.fit import (
     W08_LEDGER_KEY,
     AccessLedger,
@@ -225,10 +226,10 @@ def _jnd_success_rows() -> tuple[FitPair, ...]:
     Returns
     -------
     tuple[FitPair, ...]
-        Two presentations for each of 25 base pairs in four cells.
+        Two presentations for each of 50 base pairs in four cells.
     """
 
-    source = _synthetic_recovery_rows(count=100)
+    source = _synthetic_recovery_rows(count=200)
     rows = []
     cells = (
         ("class-1", "band-1"),
@@ -237,8 +238,8 @@ def _jnd_success_rows() -> tuple[FitPair, ...]:
         ("class-2", "band-2"),
     )
     for cell_index, cell in enumerate(cells):
-        for pair_index in range(25):
-            original = source[cell_index * 25 + pair_index]
+        for pair_index in range(50):
+            original = source[cell_index * 50 + pair_index]
             verdict = original.graded_verdict
             first = replace(
                 original,
@@ -1573,17 +1574,58 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
         )
 
 
+def test_c06_shrinks_one_offending_component_then_reaudits() -> None:
+    """C-06 preserves a nonoffending heterogeneity component when sufficient."""
+
+    class_effects = {"a": -0.6, "b": -0.2, "c": 0.25, "d": 0.7}
+    band_effects = {"x": -0.25, "y": 0.0, "z": 0.3}
+    observations = {
+        (primary_class, size_band): uncertainty_module._CellObservation(
+            estimate=class_effect + band_effect,
+            variance=0.1,
+        )
+        for primary_class, class_effect in class_effects.items()
+        for size_band, band_effect in band_effects.items()
+    }
+    initial = uncertainty_module._meta_fit(observations, frozenset(band_effects))
+
+    fitted, actions = uncertainty_module._apply_c06_shrink(
+        observations,
+        frozenset(band_effects),
+        initial,
+        frozenset(),
+    )
+
+    assert initial.effective_dof_class + initial.effective_dof_band > 2.0
+    assert actions == ("tau_class",)
+    assert fitted.tau_class == 0.0
+    assert fitted.tau_band > 0.0
+    assert fitted.effective_dof_class + fitted.effective_dof_band <= 2.0
+    assert len(set(fitted.cell_logs.values())) > 1
+
+
 def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """W-13 returns every mandatory publication and ledgers its branch once."""
 
     monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "ACCESS_LEDGER")
-    rows = _jnd_success_rows()
+    supported_rows = _jnd_success_rows()
+    sparse_rows = tuple(
+        replace(
+            row,
+            size_band="band-sparse",
+            graph_hash="graph-sparse",
+            base_pair_id="pair-sparse",
+            replicate_group_id="pair-sparse",
+        )
+        for row in supported_rows[:2]
+    )
+    rows = supported_rows + sparse_rows
     plan = FittingPlan(_weight_parameters())
     config = JNDFitConfig(
         role_hash=bank_module._FROZEN_A15_ROLE_HASH,
-        top_composite_pair_counts={"band-1": 67, "band-2": 67},
+        top_composite_pair_counts={"band-1": 67, "band-2": 67, "band-sparse": 0},
         rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
     )
     with pytest.raises(NotImplementedError, match="graph-to-half"):
@@ -1593,26 +1635,36 @@ def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
             {"w_structure": 0.6, "w_neighborhood": 1.6},
             config,
         )
-    fit = fit_jnd_heterogeneity(
-        rows,
-        plan,
-        {"w_structure": 0.6, "w_neighborhood": 1.6},
-        config,
-    )
+    with patch.object(
+        uncertainty_module,
+        "_meta_fit",
+        wraps=uncertainty_module._meta_fit,
+    ) as meta_fit:
+        fit = fit_jnd_heterogeneity(
+            rows,
+            plan,
+            {"w_structure": 0.6, "w_neighborhood": 1.6},
+            config,
+        )
 
     assert config.minimum_cell_count == 25
     assert config.q_band == 67
     assert config.bootstrap_replicates == 2000
-    assert set(fit.cell_counts.values()) == {25}
+    assert set(fit.cell_counts.values()) == {1, 50}
     assert set(fit.cell_jnd) == set(fit.cell_jnd_ci)
+    assert set(fit.jnd_by_cell) == set(fit.cell_counts)
+    assert ("class-1", "band-sparse") in fit.unestimated_cells
+    assert fit.jnd_by_cell[("class-1", "band-sparse")] == pytest.approx(math.exp(fit.mu))
     assert fit.tau_class_ci.log_scale[0] <= fit.tau_class_ci.log_scale[1]
     assert fit.tau_band_ci.ratio_scale[0] <= fit.tau_band_ci.ratio_scale[1]
     assert fit.spread_ci_graph_clusters[0] <= fit.spread_ci_graph_clusters[1]
     assert fit.spread_ci_generator_families[0] <= fit.spread_ci_generator_families[1]
-    assert 0.0 <= fit.bootstrap_drop_rate.graph_clusters <= 1.0
+    assert 0.0 < fit.bootstrap_drop_rate.graph_clusters <= 1.0
     assert 0.0 <= fit.bootstrap_drop_rate.generator_families <= 1.0
     assert fit.effective_dof >= 0.0
     assert fit.loss_path
+    assert meta_fit.call_count > config.bootstrap_replicates
+    assert set(fit.c06_shrink_actions).isdisjoint(fit.split_half.frozen_components)
     assert not fit.uncalibrated_classes
     assert set(fit.tie_rates_by_class) == {"class-1", "class-2"}
     with pytest.raises(TypeError, match="minimum_cell_count"):
@@ -1623,9 +1675,14 @@ def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
             minimum_cell_count=20,
         )
 
-    branch = evaluate_h_jnd_branch(fit)
-    r_pool = fit.pooled_jnd_ci[1] / fit.pooled_jnd_ci[0]
-    expected = "class-conditional" if fit.spread_ci_graph_clusters[0] > r_pool else "pooled"
-    assert branch.shipped_band == expected
+    branch_fit = replace(
+        fit,
+        pooled_jnd_ci=(1.0, 1.1),
+        spread_ci_graph_clusters=(1.2, 1.4),
+    )
+    branch = evaluate_h_jnd_branch(branch_fit)
+    assert branch.shipped_band == "class-conditional"
+    assert branch.spread_lower == 1.2
+    assert branch.pooled_ratio == pytest.approx(1.1)
     with pytest.raises(RuntimeError, match="once-only"):
-        evaluate_h_jnd_branch(fit)
+        evaluate_h_jnd_branch(branch_fit)
