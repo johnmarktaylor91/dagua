@@ -307,6 +307,43 @@ def test_objective_refuses_silent_graded_verdict_collapse() -> None:
         PairwiseObjective((row,), FittingPlan(_weight_parameters()))
 
 
+def test_objective_refuses_unidentified_scale_and_flags_bound_weights() -> None:
+    """Scale-invariant fits fail and projected bound endpoints are published."""
+
+    unidentified = FitPair(
+        numerator_a=(1.0, 2.0),
+        numerator_b=(2.0, 1.0),
+        mass_coefficients=(1.0, 1.0),
+        outcome=1,
+    )
+    with pytest.raises(ValueError, match="not identifiable"):
+        PairwiseObjective((unidentified,), FittingPlan(_weight_parameters()))
+
+    fixed_parameter = WeightParameter(
+        "w_fixed",
+        "universal",
+        1.0,
+        {"synthetic": 1.0},
+        ("synthetic",),
+        lower=1.0,
+        upper=1.0,
+    )
+    bounded_row = FitPair(
+        numerator_a=(1.0,),
+        numerator_b=(2.0,),
+        mass_coefficients=(1.0,),
+        outcome=1,
+        fixed_numerator_a=1.0,
+        fixed_numerator_b=1.0,
+        fixed_mass=1.0,
+    )
+    result = fit_weights(
+        PairwiseObjective((bounded_row,), FittingPlan((fixed_parameter,))),
+        OptimizerConfig(steps=1),
+    )
+    assert result.at_bounds == {"w_fixed": "fixed"}
+
+
 def test_fitting_plan_refuses_off_ledger_dof_and_diag_facets() -> None:
     """The plan refuses bucket overflow, reserved buckets, and DIAG weights."""
 

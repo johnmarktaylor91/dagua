@@ -76,6 +76,8 @@ class FitResult:
         Initial prior followed by every accepted optimizer update.
     losses : tuple[float, ...]
         Objective at the initial prior and every update.
+    at_bounds : mapping[str, str]
+        Parameters ending at ``lower``, ``upper``, or a ``fixed`` bound.
     converged : bool
         Whether the patience rule fired before the step cap.
     steps_completed : int
@@ -87,6 +89,7 @@ class FitResult:
     weights: Mapping[str, float]
     weight_paths: Mapping[str, Tuple[float, ...]]
     losses: Tuple[float, ...]
+    at_bounds: Mapping[str, str]
     converged: bool
     steps_completed: int
     seed: int
@@ -102,12 +105,18 @@ class FitResult:
 
         weights = dict(self.weights)
         paths = {key: tuple(value) for key, value in self.weight_paths.items()}
+        at_bounds = dict(self.at_bounds)
         if set(weights) != set(paths):
             raise ValueError("weight and path identities must match")
         if any(len(path) != len(self.losses) for path in paths.values()):
             raise ValueError("every weight path must align with the loss path")
+        if not set(at_bounds) <= set(weights) or any(
+            value not in {"lower", "upper", "fixed"} for value in at_bounds.values()
+        ):
+            raise ValueError("bound flags must name fitted weights and valid bound sides")
         object.__setattr__(self, "weights", MappingProxyType(weights))
         object.__setattr__(self, "weight_paths", MappingProxyType(paths))
+        object.__setattr__(self, "at_bounds", MappingProxyType(at_bounds))
 
 
 def _seed_everything(seed: int) -> None:
@@ -202,10 +211,20 @@ def fit_weights(objective: PairwiseObjective, config: OptimizerConfig) -> FitRes
             converged = True
             break
     final_weights = {name: paths[name][-1] for name in names}
+    at_bounds = {}
+    for parameter in plan.weights:
+        value = final_weights[parameter.name]
+        at_lower = math.isclose(value, float(parameter.lower), rel_tol=0.0, abs_tol=1.0e-12)
+        at_upper = math.isclose(value, float(parameter.upper), rel_tol=0.0, abs_tol=1.0e-12)
+        if at_lower or at_upper:
+            at_bounds[parameter.name] = (
+                "fixed" if at_lower and at_upper else ("lower" if at_lower else "upper")
+            )
     return FitResult(
         weights=final_weights,
         weight_paths={name: tuple(path) for name, path in paths.items()},
         losses=tuple(loss_path),
+        at_bounds=at_bounds,
         converged=converged,
         steps_completed=len(loss_path) - 1,
         seed=config.seed,
