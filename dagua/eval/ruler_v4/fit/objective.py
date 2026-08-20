@@ -214,6 +214,8 @@ class FitPair:
         Frozen A15 consumption purpose.
     is_replication : bool
         Whether the judgment belongs to the cross-session replication line.
+    replicate_group_id : str
+        Realized repeat-group identity used to select both cross-session legs.
     base_pair_id, session_id, blind_id_a, blind_id_b : str
         Replication and displayed-order provenance.
     synthetic : bool
@@ -241,6 +243,7 @@ class FitPair:
     observation_profile: str
     purpose: SplitPurpose
     is_replication: bool
+    replicate_group_id: str
     base_pair_id: str
     session_id: str
     blind_id_a: str
@@ -302,6 +305,7 @@ class FitPair:
                 self.session_id,
                 self.blind_id_a,
                 self.blind_id_b,
+                self.replicate_group_id,
             )
         ):
             raise ValueError("pair likelihood and replication identities must be nonempty")
@@ -333,6 +337,7 @@ def synthetic_fit_pair(
     observation_profile: str = "synthetic",
     is_replication: bool = False,
     base_pair_id: str = "synthetic",
+    replicate_group_id: Optional[str] = None,
     session_id: str = "synthetic",
     blind_id_a: str = "synthetic-a",
     blind_id_b: str = "synthetic-b",
@@ -360,6 +365,8 @@ def synthetic_fit_pair(
         Whether this fixture row exercises replication behavior.
     base_pair_id, session_id, blind_id_a, blind_id_b : str, optional
         Synthetic replication provenance.
+    replicate_group_id : str or None, optional
+        Repeat-group identity, defaulting to ``base_pair_id``.
 
     Returns
     -------
@@ -390,6 +397,7 @@ def synthetic_fit_pair(
         observation_profile=observation_profile,
         purpose=SplitPurpose.FIT,
         is_replication=is_replication,
+        replicate_group_id=base_pair_id if replicate_group_id is None else replicate_group_id,
         base_pair_id=base_pair_id,
         session_id=session_id,
         blind_id_a=blind_id_a,
@@ -559,6 +567,7 @@ def fit_pairs_from_rescoring(
                 observation_profile=pair.judgment.observation_profile,
                 purpose=pair.judgment.purpose,
                 is_replication=pair.judgment.is_replication,
+                replicate_group_id=pair.judgment.replicate_group_id,
                 base_pair_id=pair.judgment.base_pair_id,
                 session_id=pair.judgment.session_id,
                 blind_id_a=pair.judgment.blind_id_a,
@@ -792,7 +801,15 @@ def partition_fit_ord_lines(pairs: Sequence[FitPair]) -> FitOrdLines:
         raise ValueError("FIT-ORD requires nonempty train-role rows")
     if any(pair.purpose is not SplitPurpose.FIT for pair in rows):
         raise ValueError("a non-train row reached FIT-ORD")
-    replication = tuple(pair for pair in rows if pair.is_replication)
+    by_group: dict[str, list[FitPair]] = {}
+    for pair in rows:
+        by_group.setdefault(pair.replicate_group_id, []).append(pair)
+    qualified_groups = {
+        group_id
+        for group_id, members in by_group.items()
+        if len(members) >= 2 and len({member.session_id for member in members}) >= 2
+    }
+    replication = tuple(pair for pair in rows if pair.replicate_group_id in qualified_groups)
     if not replication:
         raise ValueError("FIT-ORD requires a train-role replication line")
     return FitOrdLines(train=rows, replication=replication)

@@ -208,6 +208,7 @@ def _judgment(purpose: SplitPurpose, suffix: str = "0") -> JudgmentRow:
         tie=False,
         confidence=2,
         is_replication=False,
+        replicate_group_id=f"pair-{suffix}",
         role=role,
         purpose=purpose,
         primary_class="class",
@@ -246,6 +247,7 @@ def _jnd_success_rows() -> tuple[FitPair, ...]:
                 generator_family=f"family-{pair_index % 4}",
                 is_replication=True,
                 base_pair_id=f"pair-{cell_index}-{pair_index}",
+                replicate_group_id=f"pair-{cell_index}-{pair_index}",
                 session_id=f"session-a-{cell_index}-{pair_index}",
                 blind_id_a="drawing-a",
                 blind_id_b="drawing-b",
@@ -371,6 +373,7 @@ def _loaded_holdout_fixture(tmp_path: Path) -> tuple[object, Path, Path, Path]:
                 "presentation_id": f"presentation-{suffix}",
                 "session_id": f"session-{suffix}",
                 "base_pair_id": f"pair-{suffix}",
+                "replicate_group_id": f"pair-{suffix}",
                 "graph_hash": graph_hash,
                 "blind_id_A": f"A-{suffix}",
                 "blind_id_B": f"B-{suffix}",
@@ -1379,17 +1382,42 @@ def test_weight_fit_refuses_nonfit_but_consumes_train_replication_rows() -> None
     config = OptimizerConfig(steps=1)
     with pytest.raises(ValueError, match="non-train"):
         PairwiseObjective((replace(row, purpose=SplitPurpose.VALIDATE),), plan)
-    replication = replace(row, is_replication=True)
+    original = replace(
+        row,
+        base_pair_id="replicated-pair",
+        replicate_group_id="replicated-pair",
+        session_id="session-a",
+        blind_id_a="drawing-a",
+        blind_id_b="drawing-b",
+    )
+    replication = replace(
+        original,
+        is_replication=True,
+        session_id="session-b",
+        blind_id_a="drawing-b",
+        blind_id_b="drawing-a",
+    )
     result = fit_weights(PairwiseObjective((replication,), plan), config)
-    lines = partition_fit_ord_lines((row, replication))
+    lines = partition_fit_ord_lines((original, replication))
 
     assert result.steps_completed == 1
-    assert lines.train == (row, replication)
-    assert lines.replication == (replication,)
+    assert lines.train == (original, replication)
+    assert lines.replication == (original, replication)
+    with pytest.raises(ValueError, match="25-pair minimum"):
+        fit_jnd_heterogeneity(
+            lines.replication,
+            plan,
+            result.weights,
+            JNDFitConfig(
+                role_hash=bank_module._FROZEN_A15_ROLE_HASH,
+                top_composite_pair_counts={"synthetic": 67},
+                rotation_envelopes={"synthetic": 0.01},
+            ),
+        )
     with pytest.raises(NotImplementedError, match="lapse prior"):
         fit_weights(PairwiseObjective((replace(replication, synthetic=False),), plan), config)
     with pytest.raises(ValueError, match="non-train"):
-        partition_fit_ord_lines((replace(row, purpose=SplitPurpose.VALIDATE), replication))
+        partition_fit_ord_lines((replace(original, purpose=SplitPurpose.VALIDATE), replication))
 
 
 def test_objective_fences_observation_profiles() -> None:
@@ -1472,6 +1500,7 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
             row,
             is_replication=True,
             base_pair_id=f"unique-{index}",
+            replicate_group_id=f"unique-{index}",
             session_id=f"session-{index}",
         )
         for index, row in enumerate(source)
@@ -1493,6 +1522,7 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
             source[0],
             is_replication=True,
             base_pair_id="shared",
+            replicate_group_id="shared",
             session_id="session-a",
             blind_id_a="drawing-a",
             blind_id_b="drawing-b",
@@ -1501,6 +1531,7 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
             source[1],
             is_replication=True,
             base_pair_id="shared",
+            replicate_group_id="shared",
             session_id="session-b",
             blind_id_a="drawing-b",
             blind_id_b="drawing-a",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -71,6 +71,8 @@ class ScheduledPair:
         Frozen campaign budget line.
     control_type : str or None
         Named control class, or ``None`` for a fitting-eligible presentation.
+    replicate_group_id : str
+        Realized repeat-group identity used instead of the advisory flag.
     """
 
     presentation_id: str
@@ -82,6 +84,7 @@ class ScheduledPair:
     profile_opaque_id: str
     budget_line: str
     control_type: Optional[str]
+    replicate_group_id: str
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,8 @@ class JudgmentRow:
         A13 confidence response in ``[1, 3]``.
     is_replication : bool
         Whether the row belongs to the cross-session replication line.
+    replicate_group_id : str
+        Realized repeat-group identity.
     role : str
         Frozen A15 graph role.
     purpose : SplitPurpose
@@ -131,6 +136,7 @@ class JudgmentRow:
     tie: bool
     confidence: int
     is_replication: bool
+    replicate_group_id: str
     role: str
     purpose: SplitPurpose
     primary_class: str
@@ -177,6 +183,8 @@ class JudgmentMetadata:
         Provenance and non-poolable likelihood strata.
     is_replication : bool
         Whether the presentation belongs to the replication line.
+    replicate_group_id : str
+        Realized repeat-group identity.
     role : str
         Frozen A15 graph role.
     purpose : SplitPurpose
@@ -199,6 +207,7 @@ class JudgmentMetadata:
     era: str
     observation_profile: str
     is_replication: bool
+    replicate_group_id: str
     role: str
     purpose: SplitPurpose
     primary_class: str
@@ -229,6 +238,7 @@ def _metadata_from_fields(fields: Mapping[str, object]) -> JudgmentMetadata:
         era=str(fields["era"]),
         observation_profile=str(fields["observation_profile"]),
         is_replication=bool(fields["is_replication"]),
+        replicate_group_id=str(fields["replicate_group_id"]),
         role=str(fields["role"]),
         purpose=cast(SplitPurpose, fields["purpose"]),
         primary_class=str(fields["primary_class"]),
@@ -700,6 +710,9 @@ def load_schedule(inputs: Iterable[PathLike]) -> Mapping[Tuple[str, str], Schedu
                     control_type=(
                         None if raw.get("control_type") is None else str(raw["control_type"])
                     ),
+                    replicate_group_id=str(
+                        raw.get("replicate_group_id", raw.get("base_pair_id", ""))
+                    ),
                 )
             except KeyError as error:
                 raise ValueError(f"{path}: incomplete schedule row: {error}") from error
@@ -712,6 +725,7 @@ def load_schedule(inputs: Iterable[PathLike]) -> Mapping[Tuple[str, str], Schedu
                     row.blind_id_a,
                     row.blind_id_b,
                     row.profile_opaque_id,
+                    row.replicate_group_id,
                 )
             ):
                 raise ValueError(f"{path}: schedule identities must be nonempty")
@@ -929,6 +943,8 @@ def load_bank(
                 (
                     str(raw.get("base_pair_id")) != scheduled.base_pair_id,
                     str(raw.get("graph_hash")) != scheduled.graph_hash,
+                    str(raw.get("replicate_group_id", scheduled.replicate_group_id))
+                    != scheduled.replicate_group_id,
                 )
             ):
                 raise ValueError(f"bank/schedule identity mismatch: {key}")
@@ -961,7 +977,8 @@ def load_bank(
                 "instrument_hash": row_instrument,
                 "era": row_era,
                 "observation_profile": scheduled.profile_opaque_id,
-                "is_replication": bool(raw.get("is_replication", budget_line == "REPLICATION")),
+                "is_replication": False,
+                "replicate_group_id": scheduled.replicate_group_id,
                 "role": role,
                 "purpose": purpose,
                 "primary_class": str(graph.get("primary_class", "")),
@@ -1005,7 +1022,26 @@ def load_bank(
                 }[purpose].append(ref)
     if paths and scheduled_matches == 0:
         raise ValueError("bank/schedule join matched zero rows")
-    ordered = tuple(sorted(rows, key=lambda row: (row.session_id, row.presentation_id)))
+    by_replicate_group: dict[str, list[JudgmentRow]] = {}
+    for row in rows:
+        by_replicate_group.setdefault(row.replicate_group_id, []).append(row)
+    qualified_replication_groups = {
+        group_id
+        for group_id, members in by_replicate_group.items()
+        if len(members) >= 2 and len({member.session_id for member in members}) >= 2
+    }
+    ordered = tuple(
+        sorted(
+            (
+                replace(
+                    row,
+                    is_replication=row.replicate_group_id in qualified_replication_groups,
+                )
+                for row in rows
+            ),
+            key=lambda row: (row.session_id, row.presentation_id),
+        )
+    )
     report = BankLoadReport(
         files=len(paths),
         raw_rows=counts["raw_rows"],
