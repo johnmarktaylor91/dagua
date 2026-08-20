@@ -424,6 +424,17 @@ def fit_jnd_heterogeneity(
     rows = tuple(pairs)
     if not rows or any(not pair.is_replication for pair in rows):
         raise ValueError("JND-HET accepts cross-session replication rows only")
+    by_base_pair: DefaultDict[str, list[FitPair]] = defaultdict(list)
+    for pair in rows:
+        by_base_pair[pair.base_pair_id].append(pair)
+    for base_pair_id, presentations in by_base_pair.items():
+        sessions = {pair.session_id for pair in presentations}
+        displayed_orders = {(pair.blind_id_a, pair.blind_id_b) for pair in presentations}
+        drawing_sets = {frozenset(order) for order in displayed_orders}
+        if len(sessions) < 2:
+            raise ValueError(f"JND-HET base pair {base_pair_id} lacks cross-session replication")
+        if len(drawing_sets) != 1 or len(displayed_orders) < 2:
+            raise ValueError(f"JND-HET base pair {base_pair_id} lacks a displayed side swap")
     counts: DefaultDict[Tuple[str, str], int] = defaultdict(int)
     for pair in rows:
         counts[(pair.primary_class, pair.size_band)] += 1
