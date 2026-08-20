@@ -567,20 +567,21 @@ the production port; none of the entries below overrides a contract.
     requires the minimum explicitly, validates true cross-session side swaps,
     and then fails closed. OWNER: freeze-fit methodology must supply the missing
     minimum and complete variance-component/bootstrap procedure.
-47. A15 section 5.7 allows at most four calibration looks under A18 alpha
-    spending, but no canonical inspection-ledger location or alpha-spending API
-    is present in the P5 harness inputs. VALIDATE judged fields are still readable
-    in code; the frozen protocol requires them to route through the four-look
-    ledger and a metadata-only accessor to serve the unlimited half. LOOK-LEDGER
+47. CLOSED by ADDENDUM-27 LOOK-LEDGER (a)-(d). A15 section 5.7's calibration
+    reads now route through separate within/cross four-look schedules with frozen
+    occasion order, the 8,520 information denominator, cumulative and incremental
+    O'Brien-Fleming alpha, content digests, and named decisions. Non-train labels
+    remain opaque after loading; a whitelist-only metadata accessor serves the
+    unlimited half, W-08 has a separate no-alpha schedule, and reusable holdout
+    and adversarial label reads are uncapped but recorded. LOOK-LEDGER
     (e) also requires the ledger root to remain the injected absolute campaign
     home, never checkout-derived; (f) requires the sealed census to remain sourced
     only from the verified A15 role hash and frozen A16 schedule digest, with a
     partial release failing closed. The shipped seal implements (e) and pins
     (f)'s A16 digest in-package; its census reconciles the superseded 341-session
     plan with the delivered 370-session campaign in stable `base_pair_id` space.
-    The (a)-(d) calibration path remains open. OWNER: campaign
-    activation must add the content-bound four-look ledger and metadata accessor
-    before calibration is used for stopping or capacity selection.
+    The content-bound (a)-(d) access path is implemented before any calibration
+    use for stopping or capacity selection.
 48. Outer-weight split-half CIs and JND/strict-win uncertainty publications are
     not implemented by P5FIX. The real graded likelihood and W-13 paths are both
     fail-closed, so these omissions cannot silently produce a freeze artifact.

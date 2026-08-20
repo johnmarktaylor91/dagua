@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Optional, Tuple, Union
+from typing import Any, Iterable, Mapping, Optional, Tuple, Union, cast
 
 PathLike = Union[str, Path]
 _NON_FITTING_BUDGET_LINES = frozenset({"CONTROLS", "MULTI-CONFIG"})
@@ -163,6 +163,78 @@ class JudgmentRow:
 
 
 @dataclass(frozen=True)
+class JudgmentMetadata:
+    """Expose only LOOK-LEDGER-whitelisted judgment metadata.
+
+    Parameters
+    ----------
+    presentation_id, session_id, base_pair_id, graph_hash : str
+        Frozen campaign identities.
+    instrument_hash, era, observation_profile : str
+        Provenance and non-poolable likelihood strata.
+    is_replication : bool
+        Whether the presentation belongs to the replication line.
+    role : str
+        Frozen A15 graph role.
+    purpose : SplitPurpose
+        Allowed consumption purpose.
+    primary_class, size_band, generator_family : str
+        Frozen A15 strata.
+
+    Notes
+    -----
+    The type intentionally has no verdict, tie, abstain, confidence, reason,
+    defect, free-note, departure, or raw model-fingerprint field. Unknown A13
+    fields are gated by default and never enter this projection.
+    """
+
+    presentation_id: str
+    session_id: str
+    base_pair_id: str
+    graph_hash: str
+    instrument_hash: str
+    era: str
+    observation_profile: str
+    is_replication: bool
+    role: str
+    purpose: SplitPurpose
+    primary_class: str
+    size_band: str
+    generator_family: str
+
+
+def _metadata_from_fields(fields: Mapping[str, object]) -> JudgmentMetadata:
+    """Project internal row fields onto the frozen metadata whitelist.
+
+    Parameters
+    ----------
+    fields : mapping[str, object]
+        Internal judgment constructor fields without labels.
+
+    Returns
+    -------
+    JudgmentMetadata
+        Whitelist-only immutable projection.
+    """
+
+    return JudgmentMetadata(
+        presentation_id=str(fields["presentation_id"]),
+        session_id=str(fields["session_id"]),
+        base_pair_id=str(fields["base_pair_id"]),
+        graph_hash=str(fields["graph_hash"]),
+        instrument_hash=str(fields["instrument_hash"]),
+        era=str(fields["era"]),
+        observation_profile=str(fields["observation_profile"]),
+        is_replication=bool(fields["is_replication"]),
+        role=str(fields["role"]),
+        purpose=cast(SplitPurpose, fields["purpose"]),
+        primary_class=str(fields["primary_class"]),
+        size_band=str(fields["size_band"]),
+        generator_family=str(fields["generator_family"]),
+    )
+
+
+@dataclass(frozen=True)
 class _SealedJudgmentRef:
     """Retain TEST provenance without materializing its verdict.
 
@@ -235,7 +307,11 @@ class JudgmentBank:
     Parameters
     ----------
     _rows : tuple[JudgmentRow, ...]
-        Stable presentation-sorted reusable inputs. TEST labels are absent.
+        Stable presentation-sorted train inputs. Every non-train label is absent.
+    _calibration_refs : tuple[_SealedJudgmentRef, ...]
+        Opaque calibration locators released only by the four-look ledger.
+    _reusable_refs, _diagnostic_refs : tuple[_SealedJudgmentRef, ...]
+        Opaque uncapped labels whose reads are nevertheless ledgered.
     _test_refs : tuple[_SealedJudgmentRef, ...]
         Stable opaque TEST source references without verdict or tie fields.
     role_hash : str
@@ -254,6 +330,9 @@ class JudgmentBank:
     """
 
     _rows: Tuple[JudgmentRow, ...]
+    _calibration_refs: Tuple[_SealedJudgmentRef, ...]
+    _reusable_refs: Tuple[_SealedJudgmentRef, ...]
+    _diagnostic_refs: Tuple[_SealedJudgmentRef, ...]
     _test_refs: Tuple[_SealedJudgmentRef, ...]
     role_hash: str
     expected_test_base_pairs: Mapping[str, Tuple[str, ...]]
@@ -279,10 +358,72 @@ class JudgmentBank:
         Returns
         -------
         tuple[JudgmentRow, ...]
-            Fit, validation, reusable holdout, and diagnostic rows only.
+            Train-role rows only. All non-train labels require the ledger.
         """
 
         return self._rows
+
+    def metadata(
+        self,
+        purpose: Optional[SplitPurpose] = None,
+        observation_profile: Optional[str] = None,
+        era: Optional[str] = None,
+        instrument_hash: Optional[str] = None,
+        replication_only: bool = False,
+    ) -> Tuple[JudgmentMetadata, ...]:
+        """Return unlimited whitelist-only metadata without taking a look.
+
+        Parameters
+        ----------
+        purpose : SplitPurpose or None
+            Optional frozen A15 consumption purpose.
+        observation_profile, era, instrument_hash : str or None
+            Optional exact provenance selectors.
+        replication_only : bool, default=False
+            Restrict metadata to the replication line.
+
+        Returns
+        -------
+        tuple[JudgmentMetadata, ...]
+            Stable metadata projections satisfying every selector.
+        """
+
+        row_fields = [
+            {
+                key: value
+                for key, value in vars(row).items()
+                if key not in {"verdict", "tie", "confidence"}
+            }
+            for row in self._rows
+        ]
+        row_fields.extend(
+            dict(ref.row_fields)
+            for refs in (
+                self._calibration_refs,
+                self._reusable_refs,
+                self._diagnostic_refs,
+                self._test_refs,
+            )
+            for ref in refs
+        )
+        metadata = (_metadata_from_fields(fields) for fields in row_fields)
+        return tuple(
+            sorted(
+                (
+                    row
+                    for row in metadata
+                    if (purpose is None or row.purpose is purpose)
+                    and (
+                        observation_profile is None
+                        or row.observation_profile == observation_profile
+                    )
+                    and (era is None or row.era == era)
+                    and (instrument_hash is None or row.instrument_hash == instrument_hash)
+                    and (not replication_only or row.is_replication)
+                ),
+                key=lambda row: (row.session_id, row.presentation_id),
+            )
+        )
 
     @property
     def guarded_test_count(self) -> int:
@@ -306,6 +447,34 @@ class JudgmentBank:
         """
 
         return self._test_refs
+
+    def _partition_gated_refs(self, purpose: SplitPurpose) -> Tuple[_SealedJudgmentRef, ...]:
+        """Return opaque non-train references to the ledger boundary.
+
+        Parameters
+        ----------
+        purpose : SplitPurpose
+            Non-train purpose to retrieve.
+
+        Returns
+        -------
+        tuple[_SealedJudgmentRef, ...]
+            Label-free source references.
+
+        Raises
+        ------
+        ValueError
+            If FIT or TEST is requested through this helper.
+        """
+
+        by_purpose = {
+            SplitPurpose.VALIDATE: self._calibration_refs,
+            SplitPurpose.REUSABLE_HOLDOUT: self._reusable_refs,
+            SplitPurpose.DIAGNOSTIC: self._diagnostic_refs,
+        }
+        if purpose not in by_purpose:
+            raise ValueError(f"purpose has no reusable gated reference set: {purpose.value}")
+        return by_purpose[purpose]
 
     def select(
         self,
@@ -341,8 +510,8 @@ class JudgmentBank:
             If direct TEST selection is attempted outside the holdout guard.
         """
 
-        if purpose is SplitPurpose.TEST:
-            raise ValueError("A15 TEST rows require TestHoldoutGuard.consume()")
+        if purpose is not None and purpose is not SplitPurpose.FIT:
+            raise ValueError("non-train judged rows require a LOOK-LEDGER release")
         return tuple(
             row
             for row in self.rows
@@ -720,6 +889,9 @@ def load_bank(
         for role in sorted(SEALED_TEST_ROLES)
     }
     rows = []
+    calibration_refs = []
+    reusable_refs = []
+    diagnostic_refs = []
     test_refs = []
     scheduled_matches = 0
     counts = {
@@ -807,13 +979,7 @@ def load_bank(
                 "generator_family": str(graph.get("generator_family", "")),
                 "source_path": str(path),
             }
-            if purpose is SplitPurpose.TEST:
-                test_refs.append(
-                    _SealedJudgmentRef(
-                        source_path=str(path), source_line=source_line, row_fields=row_fields
-                    )
-                )
-            else:
+            if purpose is SplitPurpose.FIT:
                 rows.append(
                     JudgmentRow(
                         **row_fields,
@@ -822,31 +988,67 @@ def load_bank(
                         confidence=confidence,
                     )
                 )
+            else:
+                ref = _SealedJudgmentRef(
+                    source_path=str(path), source_line=source_line, row_fields=row_fields
+                )
+                {
+                    SplitPurpose.VALIDATE: calibration_refs,
+                    SplitPurpose.REUSABLE_HOLDOUT: reusable_refs,
+                    SplitPurpose.DIAGNOSTIC: diagnostic_refs,
+                    SplitPurpose.TEST: test_refs,
+                }[purpose].append(ref)
     if paths and scheduled_matches == 0:
         raise ValueError("bank/schedule join matched zero rows")
     ordered = tuple(sorted(rows, key=lambda row: (row.session_id, row.presentation_id)))
     report = BankLoadReport(
         files=len(paths),
         raw_rows=counts["raw_rows"],
-        included_rows=len(ordered) + len(test_refs),
+        included_rows=(
+            len(ordered)
+            + len(calibration_refs)
+            + len(reusable_refs)
+            + len(diagnostic_refs)
+            + len(test_refs)
+        ),
         excluded_rejected_session=counts["excluded_rejected_session"],
         excluded_invalid=counts["excluded_invalid"],
         excluded_controls=counts["excluded_controls"],
         excluded_unscheduled=counts["excluded_unscheduled"],
         excluded_era=counts["excluded_era"],
     )
-    ordered_refs = tuple(
-        sorted(
-            test_refs,
-            key=lambda ref: (
-                str(ref.row_fields["session_id"]),
-                str(ref.row_fields["presentation_id"]),
-            ),
+
+    def ordered_refs(refs: list[_SealedJudgmentRef]) -> Tuple[_SealedJudgmentRef, ...]:
+        """Sort opaque source references by stable campaign identity.
+
+        Parameters
+        ----------
+        refs : list[_SealedJudgmentRef]
+            Mutable loader accumulator.
+
+        Returns
+        -------
+        tuple[_SealedJudgmentRef, ...]
+            Stable immutable references.
+        """
+
+        return tuple(
+            sorted(
+                refs,
+                key=lambda ref: (
+                    str(ref.row_fields["session_id"]),
+                    str(ref.row_fields["presentation_id"]),
+                ),
+            )
         )
-    )
+
+    ordered_test_refs = ordered_refs(test_refs)
     return JudgmentBank(
         _rows=ordered,
-        _test_refs=ordered_refs,
+        _calibration_refs=ordered_refs(calibration_refs),
+        _reusable_refs=ordered_refs(reusable_refs),
+        _diagnostic_refs=ordered_refs(diagnostic_refs),
+        _test_refs=ordered_test_refs,
         role_hash=role_hash,
         expected_test_base_pairs=expected_test_base_pairs,
         expected_test_graphs=expected_test_graphs,
