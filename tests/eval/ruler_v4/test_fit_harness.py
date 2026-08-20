@@ -443,6 +443,14 @@ def test_fitting_plan_enforces_traceability_prior_floor() -> None:
     diluted = replace(parameter, subterm_coefficients={"U12.headline": 0.05}, lower=0.6)
     with pytest.raises(ValueError, match="prior floor"):
         FittingPlan((diluted,), prior_floors={"U12": 0.5})
+    multi_facet = replace(
+        parameter,
+        subterm_coefficients={"U12.headline": 0.05, "U13.x": 1.0},
+        facet_ids=("U12", "U13"),
+        lower=0.6,
+    )
+    with pytest.raises(ValueError, match="one fitted scalar per traceability facet"):
+        FittingPlan((multi_facet,), prior_floors={"U12": 0.5, "U13": 0.5})
 
 
 def test_rescoring_bridge_reconciles_facet_and_fitted_dof_ownership() -> None:
