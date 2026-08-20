@@ -551,3 +551,57 @@ the production port; none of the entries below overrides a contract.
     production caller uses registered-ruler dispatch for v4 yet). OWNER:
     registry-seam hardening, to land before any external caller is
     pointed at `ruler="ruler_v4"` (pre-P5 wiring).
+45. P5FIX does not select a latent judgment mechanism. `V4_SPEC_r4.md` section
+    7.6 requires the graded seven-point response to feed ordered-probit JND,
+    while section 4.2 still labels the latent-space mechanism "P2 synthesis
+    pending". The bank and `FitPair` now retain verdict magnitude and confidence,
+    and `PairwiseObjective` refuses magnitude-2/3 rows rather than silently
+    collapsing them into the three-outcome logit fixture. OWNER: contract owner
+    must freeze the ordered thresholds/link and its dof declaration before a
+    real P5 weight fit is enabled.
+46. The former JND-HET point estimator was not W-13's hierarchical model:
+    `PREREG_V4_CALIBRATION.md` section 3 requires fitted `tau_class` and
+    `tau_band`, split-half stability, every cell CI, and graph-cluster/bootstrap
+    CIs for spread; `A18_INSERT_W13.md` also refers to a "preregistered minimum"
+    without assigning its numeric value. P5FIX removes the fixed-L2 substitute,
+    requires the minimum explicitly, validates true cross-session side swaps,
+    and then fails closed. OWNER: freeze-fit methodology must supply the missing
+    minimum and complete variance-component/bootstrap procedure.
+47. A15 section 5.7 allows at most four calibration looks under A18 alpha
+    spending, but no canonical inspection-ledger location or alpha-spending API
+    is present in the P5 harness inputs. TEST access is content-bound and
+    once-only; VALIDATE remains readable for diagnostic tooling. OWNER: campaign
+    activation must add a content-bound four-look ledger before calibration is
+    used for stopping or capacity selection.
+48. Outer-weight split-half CIs and JND/strict-win uncertainty publications are
+    not implemented by P5FIX. The real graded likelihood and W-13 paths are both
+    fail-closed, so these omissions cannot silently produce a freeze artifact.
+    OWNER: the same freeze-fit implementation that resolves entries 45-46 must
+    publish the uncertainty objects required by V4 spec sections 4.3 and 7.8.
+49. `era_robustness` is a reporting helper, not authority to ingest pilot data.
+    The authorized main bank currently contains CF@4 only, so CF@1-vs-CF@4
+    deltas remain absent. `load_bank` now denies `bank/pilot` and `bank/sealed`
+    even through recursive public-API inputs. OWNER: populate an authorized,
+    purpose-correct multi-era diagnostic corpus before publishing era deltas.
+50. P5FIX reconciles every fitted subterm, owning facet, diagnostic bit, fitted
+    identity, A18 bucket, and prior floor against the complete `WeightTable`.
+    It does not parse an external campaign `MANIFEST.json` because no manifest
+    path or frozen `fitted_dof_declaration` schema is part of the harness API.
+    OWNER: campaign wiring must pass the frozen declaration and verify its digest
+    before the real fit gate is opened.
+51. `V4_SPEC_r4.md` section 7.9 names U12/U13/U34 and "U11-route" for prior
+    floors, while the frozen `REQUIRED_PRIOR_FLOOR_FACETS` set and validated
+    `WeightTable` schema name only U12/U13/U34. P5FIX enforces the frozen table
+    exactly and does not silently invent a U11 subterm-level floor. OWNER:
+    contract/table owner must define the U11-route floor identity and value.
+52. The P5 JND bridge can prove cross-session repetition and displayed-order
+    reversal from opaque ids, but cannot prove engine blindness without the
+    quarantined blind-id truth map. The JND model is fail-closed independently.
+    OWNER: authorized freeze-fit orchestration must attest blind-map separation
+    without exposing engine identities to the fitting module.
+53. `FitPair` retains synthetic defaults for JND/lapse and synthetic stratum ids
+    so deterministic objective fixtures remain small. Every bank-to-rescoring
+    bridge call supplies these fields explicitly, real magnitude-2/3 rows are
+    refused, and weight fitting fences purpose/profile/instrument/era. OWNER:
+    remove the fixture defaults when the ordered-model constructor in entry 45
+    supplies a separate typed synthetic-row factory.
