@@ -246,13 +246,14 @@ class TestHoldoutGuard:
                 raise ValueError(f"guarded TEST source rows missing from {path}")
         return tuple(sorted(rows, key=lambda row: (row.session_id, row.presentation_id)))
 
-    def _validate_complete_role_census(
+    def _validate_role_census(
         self,
         partitions: HoldoutPartitions,
         refs: Tuple[_SealedJudgmentRef, ...],
         role: str,
+        require_complete: bool,
     ) -> None:
-        """Require one guarded release to match its frozen role census.
+        """Validate one guarded release against its frozen role census.
 
         Parameters
         ----------
@@ -262,11 +263,15 @@ class TestHoldoutGuard:
             Actual opaque rows proposed for release.
         role : str
             Frozen role being released.
+        require_complete : bool
+            Whether the release must cover the whole frozen role. This is true
+            only for once-only sealed budgets.
 
         Raises
         ------
         ValueError
-            If the role hash, base-pair set, or graph census is incomplete.
+            If the role hash is absent, the release leaves the frozen census,
+            or a required whole-role release is incomplete.
         """
 
         if not partitions.role_hash:
@@ -279,13 +284,21 @@ class TestHoldoutGuard:
                 f"guarded row set is not a subset of its frozen role census: {role}; "
                 f"extras={len(extras)}"
             )
+        actual_graphs = {str(ref.row_fields["graph_hash"]) for ref in refs}
+        expected_graphs = set(partitions.expected_test_graphs.get(role, ()))
+        graph_extras = actual_graphs - expected_graphs
+        if graph_extras:
+            raise ValueError(
+                f"guarded graph set is not a subset of its frozen role census: {role}; "
+                f"extras={len(graph_extras)}"
+            )
+        if not require_complete:
+            return
         missing = expected_base_pairs - actual_base_pairs
         if missing:
             raise ValueError(
                 f"cannot consume a partial guarded role: {role}; missing={len(missing)}"
             )
-        actual_graphs = tuple(sorted({str(ref.row_fields["graph_hash"]) for ref in refs}))
-        expected_graphs = partitions.expected_test_graphs.get(role, ())
         if actual_graphs != expected_graphs:
             raise ValueError(f"guarded role does not cover its frozen graph census: {role}")
 
@@ -322,7 +335,7 @@ class TestHoldoutGuard:
         refs = partitions._test_refs_by_role.get(role, ())
         if not refs:
             raise ValueError(f"cannot consume an empty A15 TEST role: {role}")
-        self._validate_complete_role_census(partitions, refs, role)
+        self._validate_role_census(partitions, refs, role, require_complete=True)
         role_label = "within" if role == "within-family-sealed" else "cross"
         try:
             self._ledger.reserve_once(
@@ -393,7 +406,7 @@ class CalibrationLookGuard(TestHoldoutGuard):
         )
         if not refs:
             raise ValueError(f"cannot consume an empty calibration role: {role}")
-        self._validate_complete_role_census(partitions, refs, role)
+        self._validate_role_census(partitions, refs, role, require_complete=False)
         try:
             reservation = self._ledger.reserve_look(
                 partitions.role_hash,
@@ -451,7 +464,7 @@ class ReusableJudgmentGuard(TestHoldoutGuard):
         if len(roles) != 1:
             raise ValueError("one reusable labelled read may release exactly one frozen role")
         role = next(iter(roles))
-        self._validate_complete_role_census(partitions, refs, role)
+        self._validate_role_census(partitions, refs, role, require_complete=False)
         self._ledger.record_unbudgeted(
             partitions.role_hash,
             purpose.value,

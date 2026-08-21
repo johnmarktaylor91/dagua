@@ -932,6 +932,12 @@ def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(
         "size_band": "band",
         "generator_family": "held-out-family",
     }
+    family["graphs"]["unbanked-class-holdout-graph"] = {
+        "role": "entire-class-holdout",
+        "primary_class": "held-out-class",
+        "size_band": "band",
+        "generator_family": "held-out-family",
+    }
     role_lines = "\n".join(
         f"{graph_hash}\t{graph['role']}" for graph_hash, graph in sorted(family["graphs"].items())
     )
@@ -948,6 +954,13 @@ def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(
         "budget_line": "PRIMARY",
         "partition": "entire-class-holdout",
     }
+    unbanked_schedule_row = {
+        **schedule_row,
+        "presentation_id": "presentation-class-holdout-unbanked",
+        "session_id": "session-class-holdout-unbanked",
+        "base_pair_id": "pair-class-holdout-unbanked",
+        "graph_hash": "unbanked-class-holdout-graph",
+    }
     bank_row = {
         "presentation_id": "presentation-class-holdout",
         "session_id": "session-class-holdout",
@@ -963,6 +976,7 @@ def test_entire_class_holdout_is_reusable_and_never_spends_the_seal(
     }
     with schedule_path.open("a", encoding="utf-8") as handle:
         handle.write(f"{json.dumps(schedule_row)}\n")
+        handle.write(f"{json.dumps(unbanked_schedule_row)}\n")
     with bank_path.open("a", encoding="utf-8") as handle:
         handle.write(f"{json.dumps(bank_row)}\n")
 
@@ -1154,14 +1168,19 @@ def test_calibration_labels_require_ordered_alpha_spent_looks(
             era="CF@4",
         )
     )
-    with pytest.raises(ValueError, match="partial guarded role"):
-        CalibrationLookGuard().consume(
-            filtered,
-            "within-family-calibration",
-            "post-M1",
-            100,
-            "capacity unlock",
-        )
+    partial_ledger_root = tmp_path / "PARTIAL_ACCESS_LEDGER"
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", partial_ledger_root)
+    partial_rows, partial_reservation = CalibrationLookGuard().consume(
+        filtered,
+        "within-family-calibration",
+        "post-M1",
+        100,
+        "capacity unlock",
+    )
+    assert len(partial_rows) == 1
+    assert partial_reservation.slot_index == 1
+
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", ledger_root)
     assert not ledger_root.exists()
 
     occasions = ("post-M1", "post-M2", "post-M3", "stopping")
