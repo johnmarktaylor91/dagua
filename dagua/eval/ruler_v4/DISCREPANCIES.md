@@ -616,11 +616,14 @@ the production port; none of the entries below overrides a contract.
     and `synthetic_fit_pair` is the separate typed fixture factory.
 54. CLOSED by ADDENDUM-28 RIDER-1. C-06 compares the JND block's fitted-parameter
     count `N_JND`, under the same conservative counting rule as the ledgered +2,
-    against the granted allocation. The smoother traces are published only as
-    dimensioned `(ED_k, n_k_realized)` pairs and are never compared with +2 or
-    any other constant. The implementation now audits the realized free
-    coordinate vector, preserves conformant heterogeneous fits, and publishes
-    `N_JND` plus any variance component fitted at its frozen upper bound.
+    against the granted allocation. The aggregate `effective_dof` scalar required
+    by (f) remains published; each component trace is additionally published as a
+    dimensioned `(ED_k, n_k_realized)` pair, and no trace is compared with +2 or
+    any other constant. The implementation audits the realized free-coordinate
+    vector, preserves conformant heterogeneous fits, freezes only extra coordinates
+    not named by `(mu, tau_class, tau_band)`, and publishes an explicit PARTIAL
+    declaration when a named offender cannot be frozen at its null prior. `N_JND`
+    and upper-bound disclosures cover the same active JND-block membership.
 55. The frozen A16 schedule's 341-session presentation-id space is disjoint from
     the delivered 370-session campaign after replanning re-minted presentation
     and session ids. The sealed roles reconcile exactly in the stable,
@@ -645,11 +648,17 @@ the production port; none of the entries below overrides a contract.
     synthetic fixtures with an explicitly fixture-only salted split, while every
     real W-13 call fails closed. OWNER: freeze the graph-half assignment algorithm
     before the first real fit.
-58. CLOSED by ADDENDUM-28 RIDER-2 and P5FIX7. LOOK-LEDGER now supports only
+58. CLOSED by ADDENDUM-28 RIDER-2, P5FIX7, and P5FIX8. LOOK-LEDGER supports only
     append-only ANNUL entries naming the target line's exact-byte digest, reason,
-    licensing addendum, date, and no-release scope evidence. Valid annulments
-    restore budget through generation-suffixed locks without removing history;
-    released judged content is not annullable, and void entries are disclosed.
-    The reviewed synthetic leak never reached the campaign ledger, so there was
-    nothing to annul. `run_freeze1_fit` now requires an explicit non-campaign
-    ledger root and passes the same isolated ledger into its H-JND reservation.
+    exact `(addendum, ledger_key, slot_index)` license, ISO calendar date, and
+    no-release scope evidence. The production license registry is empty because no
+    addendum licenses a specific correction today. A test-injected license proves
+    valid annulments restore budget through generation-suffixed locks without
+    removing history; void entries are disclosed. This ledger design can currently
+    evidence only the `synthetic_only` manifest basis. The reservation-without-reveal
+    and crash-before-publication bases require a future two-phase writer schema and
+    are not advertised as live bases. `state == "RELEASED"` is positively refused
+    even if a synthetic flag is present. The reviewed synthetic leak never reached
+    the campaign ledger, so there was nothing to annul. `run_freeze1_fit` refuses the
+    campaign root and every descendant; `evaluate_h_jnd_branch` requires an explicit
+    ledger, so neither surface can silently construct the campaign ledger.
