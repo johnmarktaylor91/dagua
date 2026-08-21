@@ -344,13 +344,19 @@ def _fit_weight_lapse_block(
     )
     if set(starting_weights) != set(names):
         raise ValueError("initial weight identities do not match the fitting plan")
+    parameter_bounds = []
+    for parameter in plan.weights:
+        if parameter.lower is None or parameter.upper is None:
+            raise RuntimeError("fitting-plan weight bounds were not normalized")
+        parameter_bounds.append((parameter.lower, parameter.upper))
+    bounds_by_name = {
+        parameter.name: parameter_bounds[index] for index, parameter in enumerate(plan.weights)
+    }
     starting_lapse = _SYNTHETIC_LAPSE_INITIAL if initial_lapse is None else initial_lapse
     initial = np.asarray(
         [starting_weights[name] for name in names] + [starting_lapse], dtype=np.float64
     )
-    bounds = [(float(parameter.lower), float(parameter.upper)) for parameter in plan.weights] + [
-        _SYNTHETIC_LAPSE_BOUNDS
-    ]
+    bounds = parameter_bounds + [_SYNTHETIC_LAPSE_BOUNDS]
 
     def evaluate(candidate: np.ndarray) -> float:
         """Evaluate one joint synthetic weight/lapse candidate.
@@ -388,7 +394,8 @@ def _fit_weight_lapse_block(
         accepted.append(np.asarray(candidate, dtype=np.float64).copy())
         losses.append(evaluate(candidate))
 
-    result = minimize(
+    # SciPy's stubs do not model the legal Powell callback/options combination.
+    result = minimize(  # type: ignore[call-overload]
         evaluate,
         initial,
         method="Powell",
@@ -411,16 +418,24 @@ def _fit_weight_lapse_block(
     at_bounds = {
         parameter.name: (
             "fixed"
-            if math.isclose(float(parameter.lower), float(parameter.upper), abs_tol=1.0e-12)
+            if math.isclose(
+                bounds_by_name[parameter.name][0],
+                bounds_by_name[parameter.name][1],
+                abs_tol=1.0e-12,
+            )
             else (
                 "lower"
-                if math.isclose(weights[parameter.name], float(parameter.lower), abs_tol=1.0e-12)
+                if math.isclose(
+                    weights[parameter.name],
+                    bounds_by_name[parameter.name][0],
+                    abs_tol=1.0e-12,
+                )
                 else "upper"
             )
         )
         for parameter in plan.weights
-        if math.isclose(weights[parameter.name], float(parameter.lower), abs_tol=1.0e-12)
-        or math.isclose(weights[parameter.name], float(parameter.upper), abs_tol=1.0e-12)
+        if math.isclose(weights[parameter.name], bounds_by_name[parameter.name][0], abs_tol=1.0e-12)
+        or math.isclose(weights[parameter.name], bounds_by_name[parameter.name][1], abs_tol=1.0e-12)
     }
     intervals = _profile_weight_intervals(objective, weights)
     information_rank, condition_number = _information_diagnostics(objective, weights)
