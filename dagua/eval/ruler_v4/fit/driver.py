@@ -693,6 +693,7 @@ def run_freeze1_fit(
                     ],
                     "split_half_frozen": list(jnd_fit.split_half.frozen_components),
                     "c06_shrink_actions": list(jnd_fit.c06_shrink_actions),
+                    "c06_partial_declaration": jnd_fit.c06_partial_declaration,
                 },
                 "h_jnd_branch": asdict(branch),
                 "access_budget_after": dict(budget_after),

@@ -6,8 +6,9 @@ import hashlib
 import json
 import math
 import os
+import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from statistics import NormalDist
 from typing import Iterable, Mapping, Optional, Tuple
@@ -21,14 +22,8 @@ W08_LEDGER_KEY = "w08-off-distribution"
 H_JND_LEDGER_KEY = "test-h-jnd-branch"
 _PLANNED_PRESENTATIONS = 8520
 _Z_ALPHA_OVER_TWO = NormalDist().inv_cdf(0.975)
-_ANNULMENT_AUTHORITY_ADDENDA = frozenset({28})
-_ANNULMENT_SCOPE_BASES = frozenset(
-    {
-        "reservation_without_reveal",
-        "synthetic_only_manifest",
-        "crash_before_publication",
-    }
-)
+_LICENSED_ANNULMENTS: frozenset[Tuple[int, str, int]] = frozenset()
+_ANNULMENT_SCOPE_BASES = frozenset({"synthetic_only_manifest"})
 
 
 class AccessBudgetConsumedError(RuntimeError):
@@ -170,12 +165,68 @@ def _valid_annulment_reason(value: object) -> bool:
     if not isinstance(value, str):
         return False
     reason = value.strip()
-    return (
-        bool(reason)
-        and "\n" not in reason
-        and reason[-1] in ".!?"
-        and not any(character in ".!?" for character in reason[:-1])
-    )
+    if not reason or "\n" in reason or reason[-1] not in ".!?":
+        return False
+    sentence_body = reason[:-1]
+    sentence_body = re.sub(r"(?<=\d)\.(?=\d)", "", sentence_body)
+    sentence_body = re.sub(r"\b(?:[A-Za-z]\.){2,}", "", sentence_body)
+    return not any(character in ".!?" for character in sentence_body)
+
+
+def _valid_annulment_date(value: object) -> bool:
+    """Return whether a value is an ISO 8601 calendar date.
+
+    Parameters
+    ----------
+    value : object
+        Candidate ANNUL date.
+
+    Returns
+    -------
+    bool
+        True only for a canonical ``YYYY-MM-DD`` calendar date.
+    """
+
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return False
+    return value == parsed.isoformat()
+
+
+def _annulment_is_licensed(
+    authority_addendum: object,
+    ledger_key: object,
+    slot_index: object,
+) -> bool:
+    """Return whether an addendum licenses one exact ledger correction.
+
+    Parameters
+    ----------
+    authority_addendum : object
+        Candidate preregistration addendum number.
+    ledger_key : object
+        Candidate bounded budget identity.
+    slot_index : object
+        Candidate one-based reservation slot.
+
+    Returns
+    -------
+    bool
+        True only for an exact tuple in the landed license registry.
+    """
+
+    if (
+        isinstance(authority_addendum, bool)
+        or not isinstance(authority_addendum, int)
+        or not isinstance(ledger_key, str)
+        or isinstance(slot_index, bool)
+        or not isinstance(slot_index, int)
+    ):
+        return False
+    return (authority_addendum, ledger_key, slot_index) in _LICENSED_ANNULMENTS
 
 
 def _numeric_record_value(record: Mapping[str, object], key: str) -> float:
@@ -222,15 +273,18 @@ class AccessLedger:
 
     @property
     def is_campaign_root(self) -> bool:
-        """Return whether this instance targets the current campaign root.
+        """Return whether this instance targets the campaign ledger tree.
 
         Returns
         -------
         bool
-            True when the resolved explicit root equals the injected campaign root.
+            True when the resolved root equals or is contained by the injected
+            campaign root.
         """
 
-        return self._ledger_root.resolve() == _ACCESS_LEDGER_ROOT.resolve()
+        resolved_root = self._ledger_root.resolve()
+        campaign_root = _ACCESS_LEDGER_ROOT.resolve()
+        return resolved_root == campaign_root or campaign_root in resolved_root.parents
 
     def _path(self, role_hash: str) -> Path:
         """Resolve one role-hash ledger path.
@@ -299,15 +353,14 @@ class AccessLedger:
         Returns
         -------
         bool
-            True only for one of RIDER-2's three licensed situations.
+            True only when the record positively proves the supported
+            synthetic-manifest situation without a judged-content release.
         """
 
-        if scope_basis == "reservation_without_reveal":
-            return target.get("state") == "RESERVED"
+        if target.get("state") == "RELEASED":
+            return False
         if scope_basis == "synthetic_only_manifest":
             return target.get("synthetic_only") is True
-        if scope_basis == "crash_before_publication":
-            return target.get("publication_state") == "NOT_PUBLISHED"
         return False
 
     def _annulment_audit(
@@ -350,12 +403,16 @@ class AccessLedger:
                 defect = "ANNUL ledger key does not match its target"
             elif record.get("slot_index") != target.record.get("slot_index"):
                 defect = "ANNUL slot index does not match its target"
-            elif record.get("authority_addendum") not in _ANNULMENT_AUTHORITY_ADDENDA:
+            elif not _annulment_is_licensed(
+                record.get("authority_addendum"),
+                record.get("ledger_key"),
+                record.get("slot_index"),
+            ):
                 defect = "ANNUL cites no landed licensing addendum"
             elif not _valid_annulment_reason(record.get("reason")):
                 defect = "ANNUL reason is not one sentence"
-            elif not isinstance(record.get("date"), str) or not record["date"]:
-                defect = "ANNUL date is missing"
+            elif not _valid_annulment_date(record.get("date")):
+                defect = "ANNUL date is not an ISO calendar date"
             elif record.get("scope_basis") not in _ANNULMENT_SCOPE_BASES:
                 defect = "ANNUL scope basis is not licensed"
             elif not self._scope_allows_annulment(target.record, str(record["scope_basis"])):
@@ -691,7 +748,7 @@ class AccessLedger:
         authority_addendum : int
             Landed addendum licensing this specific annulment.
         scope_basis : str
-            One of the three RIDER-2 no-release evidence classes.
+            Supported RIDER-2 no-release evidence class.
 
         Returns
         -------
@@ -704,7 +761,7 @@ class AccessLedger:
             If authority, reason, target identity, or constitutional scope is invalid.
         """
 
-        if authority_addendum not in _ANNULMENT_AUTHORITY_ADDENDA:
+        if not _annulment_is_licensed(authority_addendum, ledger_key, slot_index):
             raise ValueError("ANNUL requires a landed licensing addendum")
         if not _valid_annulment_reason(reason):
             raise ValueError("ANNUL reason must be one sentence")

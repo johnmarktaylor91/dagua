@@ -25,6 +25,7 @@ _LOG_JND_BOUNDS = (math.log(1.0e-6), math.log(100.0))
 _LOG_TAU_BOUNDS = (math.log(1.0e-6), math.log(10.0))
 _A15_HALF_SALT = "v4-split-2|within"
 _C06_GRANTED_PARAMETERS = 2
+_C06_NAMED_PARAMETERS = frozenset({"mu", "tau_class", "tau_band"})
 _TAU_BOUNDARY_LOG_ATOL = 1.0e-7
 
 
@@ -238,6 +239,8 @@ class JNDHeterogeneityFit:
         Components frozen at zero by stability or C-06.
     c06_shrink_actions : tuple[str, ...]
         Components frozen specifically by iterative C-06 re-audits.
+    c06_partial_declaration : bool
+        Whether C-06 fired but could not name and freeze an offender.
     k_jnd_disclosures : tuple[KJNDDisclosure, ...]
         Cells exceeding three times the pooled JND.
     split_half : SplitHalfStability
@@ -278,6 +281,7 @@ class JNDHeterogeneityFit:
     variance_boundary_disclosures: Tuple[VarianceBoundaryDisclosure, ...]
     shrink_actions: Tuple[str, ...]
     c06_shrink_actions: Tuple[str, ...]
+    c06_partial_declaration: bool
     k_jnd_disclosures: Tuple[KJNDDisclosure, ...]
     split_half: SplitHalfStability
     uncalibrated_classes: Tuple[str, ...]
@@ -361,6 +365,8 @@ class JNDProfileFit:
         Components fitted at the frozen variance upper bound.
     split_half_frozen, c06_shrink_actions : tuple[str, ...]
         Separately attributed mandatory shrink responses.
+    c06_partial_declaration : bool
+        Whether C-06 fired but could not name and freeze an offender.
     loss_path : tuple[float, ...]
         Deterministic marginal optimizer evaluations.
     """
@@ -379,6 +385,7 @@ class JNDProfileFit:
     variance_boundary_disclosures: Tuple[VarianceBoundaryDisclosure, ...]
     split_half_frozen: Tuple[str, ...]
     c06_shrink_actions: Tuple[str, ...]
+    c06_partial_declaration: bool
     loss_path: Tuple[float, ...]
 
     def __post_init__(self) -> None:
@@ -674,7 +681,7 @@ def _apply_c06_shrink(
     eligible_bands: frozenset[str],
     fitted: _MetaFit,
     already_frozen: frozenset[str],
-) -> Tuple[_MetaFit, Tuple[str, ...]]:
+) -> Tuple[_MetaFit, Tuple[str, ...], bool]:
     """Audit free JND coordinates and freeze implementation-drift offenders.
 
     Parameters
@@ -690,31 +697,96 @@ def _apply_c06_shrink(
 
     Returns
     -------
-    tuple[_MetaFit, tuple[str, ...]]
-        Re-audited fit and ordered component-specific C-06 actions. The
-        conformant two-component estimator requires no action regardless of
-        its reported smoother trace.
+    tuple[_MetaFit, tuple[str, ...], bool]
+        Re-audited fit, ordered component-specific C-06 actions, and whether
+        an excess coordinate could not be frozen and therefore requires a
+        PARTIAL declaration. The conformant two-component estimator requires
+        no action regardless of its reported smoother trace.
     """
 
     current = fitted
     frozen = set(already_frozen)
     actions = []
+    partial_declaration = False
     while _c06_parameter_count(current) > _C06_GRANTED_PARAMETERS:
         contributions = {
-            component: float(getattr(current, f"effective_dof_{component.removeprefix('tau_')}"))
+            component: _c06_trace_contribution(current, component)
             for component in current.active_components
-            if component not in frozen
-            and hasattr(current, f"effective_dof_{component.removeprefix('tau_')}")
+            if component not in frozen and component not in _C06_NAMED_PARAMETERS
         }
         if not contributions:
-            # An unnamed free coordinate cannot be silently reinterpreted or
-            # frozen; the caller's empty action records the required PARTIAL response.
+            partial_declaration = True
             break
         offender = max(sorted(contributions), key=contributions.__getitem__)
+        proposed_frozen = frozenset(frozen | {offender})
+        refitted = _meta_fit(observations, eligible_bands, proposed_frozen)
+        if not _c06_offender_frozen_at_null(refitted, offender):
+            partial_declaration = True
+            break
         frozen.add(offender)
         actions.append(offender)
-        current = _meta_fit(observations, eligible_bands, frozenset(frozen))
-    return current, tuple(actions)
+        current = refitted
+    return current, tuple(actions), partial_declaration
+
+
+def _c06_trace_contribution(fitted: _MetaFit, component: str) -> float:
+    """Return a component trace for C-06 offender ordering.
+
+    Parameters
+    ----------
+    fitted : _MetaFit
+        Fit publishing the candidate component.
+    component : str
+        Active JND-block coordinate name.
+
+    Returns
+    -------
+    float
+        Finite published trace, or zero when the drifted estimator publishes
+        no component trace so name order supplies the required tie-break.
+    """
+
+    suffix = component.removeprefix("tau_")
+    value = getattr(fitted, f"effective_dof_{suffix}", 0.0)
+    try:
+        contribution = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return contribution if math.isfinite(contribution) else 0.0
+
+
+def _c06_offender_frozen_at_null(fitted: _MetaFit, component: str) -> bool:
+    """Return whether a C-06 refit removed an offender at its zero null prior.
+
+    Parameters
+    ----------
+    fitted : _MetaFit
+        Refit requested with the offender in the frozen-component set.
+    component : str
+        Drift coordinate selected for the SHRINK response.
+
+    Returns
+    -------
+    bool
+        True only when the coordinate is no longer active and its published
+        value is exactly the null prior within numerical resolution.
+    """
+
+    if component in fitted.active_components:
+        return False
+    value = getattr(fitted, component, None)
+    if isinstance(value, bool) or value is None:
+        return False
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(numeric_value) and math.isclose(
+        numeric_value,
+        0.0,
+        rel_tol=0.0,
+        abs_tol=1.0e-12,
+    )
 
 
 def _c06_parameter_count(fitted: _MetaFit) -> int:
@@ -784,9 +856,13 @@ def _variance_boundary_disclosures(
     upper_bound = math.exp(_LOG_TAU_BOUNDS[1])
     disclosures = []
     for component in fitted.active_components:
-        if component not in {"tau_class", "tau_band"}:
+        fitted_value_object = getattr(fitted, component, None)
+        if isinstance(fitted_value_object, bool) or fitted_value_object is None:
             continue
-        fitted_value = float(getattr(fitted, component))
+        try:
+            fitted_value = float(fitted_value_object)
+        except (TypeError, ValueError):
+            continue
         if fitted_value <= 0.0 or not math.isclose(
             math.log(fitted_value),
             _LOG_TAU_BOUNDS[1],
@@ -794,13 +870,12 @@ def _variance_boundary_disclosures(
             abs_tol=_TAU_BOUNDARY_LOG_ATOL,
         ):
             continue
-        suffix = component.removeprefix("tau_")
         disclosures.append(
             VarianceBoundaryDisclosure(
                 component=component,
                 upper_bound=upper_bound,
                 fitted_value=fitted_value,
-                effective_dof=float(getattr(fitted, f"effective_dof_{suffix}")),
+                effective_dof=_c06_trace_contribution(fitted, component),
             )
         )
     return tuple(disclosures)
@@ -1589,7 +1664,7 @@ def profile_jnd_block(
         else _meta_fit(observations, eligible_bands, frozenset(split_frozen))
     )
     n_jnd = _c06_parameter_count(stability_fit)
-    fitted, c06_actions = _apply_c06_shrink(
+    fitted, c06_actions, c06_partial_declaration = _apply_c06_shrink(
         observations,
         eligible_bands,
         stability_fit,
@@ -1626,6 +1701,7 @@ def profile_jnd_block(
         variance_boundary_disclosures=_variance_boundary_disclosures(fitted),
         split_half_frozen=tuple(sorted(split_frozen)),
         c06_shrink_actions=c06_actions,
+        c06_partial_declaration=c06_partial_declaration,
         loss_path=initial_fit.loss_path + (() if fitted is initial_fit else fitted.loss_path),
     )
 
@@ -1711,7 +1787,7 @@ def fit_jnd_heterogeneity(
         else _meta_fit(observations, eligible_bands, frozenset(split_frozen_components))
     )
     n_jnd = _c06_parameter_count(stability_fit)
-    fitted, c06_shrink_actions = _apply_c06_shrink(
+    fitted, c06_shrink_actions, c06_partial_declaration = _apply_c06_shrink(
         observations,
         eligible_bands,
         stability_fit,
@@ -1806,6 +1882,7 @@ def fit_jnd_heterogeneity(
         variance_boundary_disclosures=_variance_boundary_disclosures(fitted),
         shrink_actions=tuple(sorted(frozen_components)),
         c06_shrink_actions=c06_shrink_actions,
+        c06_partial_declaration=c06_partial_declaration,
         k_jnd_disclosures=disclosures,
         split_half=SplitHalfStability(
             half_one={"tau_class": half_one.tau_class, "tau_band": half_one.tau_band},
@@ -1828,7 +1905,7 @@ def fit_jnd_heterogeneity(
 
 def evaluate_h_jnd_branch(
     fit: JNDHeterogeneityFit,
-    ledger: Optional[AccessLedger] = None,
+    ledger: AccessLedger,
     synthetic_only: bool = False,
 ) -> HJNDBranchResult:
     """Evaluate and ledger TEST H-JND exactly once at the freeze fit.
@@ -1837,9 +1914,8 @@ def evaluate_h_jnd_branch(
     ----------
     fit : JNDHeterogeneityFit
         Completed W-13 publication object.
-    ledger : AccessLedger or None, optional
-        Explicit ledger instance. ``None`` selects the campaign ledger for the
-        real once-only evaluation path.
+    ledger : AccessLedger
+        Explicit ledger instance for the once-only evaluation path.
     synthetic_only : bool, default=False
         Whether the caller's manifest proves the evaluation is synthetic-only.
     Returns
@@ -1856,8 +1932,7 @@ def evaluate_h_jnd_branch(
     r_pool = fit.pooled_jnd_ci[1] / fit.pooled_jnd_ci[0]
     spread_lower = fit.spread_ci_graph_clusters[0]
     shipped = "class-conditional" if spread_lower > r_pool else "pooled"
-    access_ledger = AccessLedger() if ledger is None else ledger
-    digest = access_ledger.reserve_once(
+    digest = ledger.reserve_once(
         fit.role_hash,
         H_JND_LEDGER_KEY,
         fit.replication_row_ids,

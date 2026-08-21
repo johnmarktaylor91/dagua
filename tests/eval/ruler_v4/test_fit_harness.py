@@ -11,6 +11,7 @@ import random
 import runpy
 from dataclasses import asdict, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, Mapping, Optional
 from unittest.mock import patch
 
@@ -1330,7 +1331,9 @@ def test_ledger_and_h_jnd_refuse_caller_minted_role_hashes(
     assert not (tmp_path / "ACCESS_LEDGER").exists()
 
 
-def test_ledger_annulment_is_append_only_and_restores_synthetic_budget(tmp_path: Path) -> None:
+def test_ledger_annulment_is_append_only_and_restores_synthetic_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Annul a synthetic-only spend and reuse its generation-suffixed slot."""
 
     ledger_root = tmp_path / "ACCESS_LEDGER"
@@ -1348,12 +1351,27 @@ def test_ledger_annulment_is_append_only_and_restores_synthetic_budget(tmp_path:
     original_digest = hashlib.sha256(original_line).hexdigest()
     original_lock = ledger_root / f"{role_hash}.{access_module.H_JND_LEDGER_KEY}.1.lock"
 
+    with pytest.raises(ValueError, match="landed licensing addendum"):
+        ledger.annul_reservation(
+            role_hash,
+            access_module.H_JND_LEDGER_KEY,
+            1,
+            "ADDENDUM-28 does not license this specific synthetic correction.",
+            authority_addendum=28,
+            scope_basis="synthetic_only_manifest",
+        )
+    monkeypatch.setattr(
+        access_module,
+        "_LICENSED_ANNULMENTS",
+        frozenset({(29, access_module.H_JND_LEDGER_KEY, 1)}),
+    )
+
     annulment = ledger.annul_reservation(
         role_hash,
         access_module.H_JND_LEDGER_KEY,
         1,
-        "A synthetic-only probe incorrectly consumed the campaign-style slot.",
-        authority_addendum=28,
+        "A synthetic-only probe with tau 0.5 incorrectly consumed the campaign-style slot.",
+        authority_addendum=29,
         scope_basis="synthetic_only_manifest",
     )
 
@@ -1380,7 +1398,7 @@ def test_ledger_annulment_is_append_only_and_restores_synthetic_budget(tmp_path:
             access_module.H_JND_LEDGER_KEY,
             1,
             "An unlicensed correction must be refused.",
-            authority_addendum=29,
+            authority_addendum=28,
             scope_basis="synthetic_only_manifest",
         )
     replacement_line = ledger_path.read_bytes().splitlines(keepends=True)[-1]
@@ -1391,7 +1409,7 @@ def test_ledger_annulment_is_append_only_and_restores_synthetic_budget(tmp_path:
         "slot_index": 1,
         "annulled_line_sha256": hashlib.sha256(replacement_line).hexdigest(),
         "reason": "This forged entry cites no landed authority.",
-        "authority_addendum": 29,
+        "authority_addendum": 28,
         "date": "2026-08-21",
         "scope_basis": "synthetic_only_manifest",
     }
@@ -1402,7 +1420,9 @@ def test_ledger_annulment_is_append_only_and_restores_synthetic_budget(tmp_path:
     assert len(ledger.annulment_lines(role_hash)) == 2
 
 
-def test_ledger_refuses_annulment_after_judged_content_release(tmp_path: Path) -> None:
+def test_ledger_refuses_annulment_after_judged_content_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Keep a revealed calibration look spent under RIDER-2's scope restriction."""
 
     ledger = AccessLedger(tmp_path / "ACCESS_LEDGER")
@@ -1415,6 +1435,17 @@ def test_ledger_refuses_annulment_after_judged_content_release(tmp_path: Path) -
         "capacity unlock",
         informative_judgments=100,
     )
+    monkeypatch.setattr(
+        access_module,
+        "_LICENSED_ANNULMENTS",
+        frozenset({(29, "within-family-calibration", 1)}),
+    )
+
+    assert access_module._ANNULMENT_SCOPE_BASES == frozenset({"synthetic_only_manifest"})
+    assert not ledger._scope_allows_annulment(  # noqa: SLF001
+        {"state": "RELEASED", "synthetic_only": True},
+        "synthetic_only_manifest",
+    )
 
     with pytest.raises(ValueError, match="judged content was unreleased"):
         ledger.annul_reservation(
@@ -1422,10 +1453,61 @@ def test_ledger_refuses_annulment_after_judged_content_release(tmp_path: Path) -
             "within-family-calibration",
             1,
             "The revealed look cannot regain its budget.",
-            authority_addendum=28,
-            scope_basis="reservation_without_reveal",
+            authority_addendum=29,
+            scope_basis="synthetic_only_manifest",
         )
     assert ledger.budget_usage(role_hash)["within-family-calibration"] == 1
+
+
+def test_annulment_metadata_accepts_sentence_punctuation_and_requires_iso_date() -> None:
+    """Validate ANNUL prose and dates without banning interior punctuation."""
+
+    assert access_module._valid_annulment_reason("The fitted tau 0.5 was wrong.")
+    assert access_module._valid_annulment_reason("The run used e.g. a bad root.")
+    assert not access_module._valid_annulment_reason("No terminal punctuation")
+    assert not access_module._valid_annulment_reason("One defect. Another defect.")
+    assert access_module._valid_annulment_date("2026-08-21")
+    assert not access_module._valid_annulment_date("x")
+    assert not access_module._valid_annulment_date("2026-8-21")
+
+
+def test_ledger_audit_discloses_noncalendar_annulment_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Disclose an otherwise licensed ANNUL line carrying a non-date token."""
+
+    ledger = AccessLedger(tmp_path / "ACCESS_LEDGER")
+    role_hash = bank_module._FROZEN_A15_ROLE_HASH
+    ledger.reserve_once(
+        role_hash,
+        access_module.H_JND_LEDGER_KEY,
+        ("synthetic-row",),
+        "synthetic branch probe",
+        synthetic_only=True,
+    )
+    monkeypatch.setattr(
+        access_module,
+        "_LICENSED_ANNULMENTS",
+        frozenset({(29, access_module.H_JND_LEDGER_KEY, 1)}),
+    )
+    ledger_path = tmp_path / "ACCESS_LEDGER" / f"{role_hash}.jsonl"
+    target_line = ledger_path.read_bytes().splitlines(keepends=True)[0]
+    invalid_date_annulment = {
+        "state": "ANNUL",
+        "role_hash": role_hash,
+        "ledger_key": access_module.H_JND_LEDGER_KEY,
+        "slot_index": 1,
+        "annulled_line_sha256": hashlib.sha256(target_line).hexdigest(),
+        "reason": "The synthetic spend was defective.",
+        "authority_addendum": 29,
+        "date": "x",
+        "scope_basis": "synthetic_only_manifest",
+    }
+    with ledger_path.open("a", encoding="utf-8") as handle:
+        encoded = json.dumps(invalid_date_annulment, sort_keys=True, separators=(",", ":"))
+        handle.write(encoded + "\n")
+
+    assert ledger.ledger_defects(role_hash) == ("line 2: ANNUL date is not an ISO calendar date",)
 
 
 def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
@@ -1811,7 +1893,7 @@ def test_c06_audits_free_coordinates_without_shrinking_heterogeneity() -> None:
     }
     initial = uncertainty_module._meta_fit(observations, frozenset(band_effects))
 
-    fitted, actions = uncertainty_module._apply_c06_shrink(
+    fitted, actions, partial_declaration = uncertainty_module._apply_c06_shrink(
         observations,
         frozenset(band_effects),
         initial,
@@ -1821,6 +1903,7 @@ def test_c06_audits_free_coordinates_without_shrinking_heterogeneity() -> None:
     assert initial.effective_dof_class + initial.effective_dof_band > 2.0
     assert uncertainty_module._c06_parameter_count(initial) == 2
     assert actions == ()
+    assert not partial_declaration
     assert fitted.tau_class > 0.0
     assert fitted.tau_band > 0.0
     assert fitted is initial
@@ -1842,7 +1925,7 @@ def test_c06_heterogeneous_block_does_not_collapse_to_pooled() -> None:
     }
     initial = uncertainty_module._meta_fit(observations, frozenset(band_effects))
 
-    fitted, actions = uncertainty_module._apply_c06_shrink(
+    fitted, actions, partial_declaration = uncertainty_module._apply_c06_shrink(
         observations,
         frozenset(band_effects),
         initial,
@@ -1850,8 +1933,118 @@ def test_c06_heterogeneous_block_does_not_collapse_to_pooled() -> None:
     )
 
     assert actions == ()
+    assert not partial_declaration
     assert uncertainty_module._c06_parameter_count(fitted) == 2
     assert len(set(fitted.cell_logs.values())) > 1
+
+
+def test_c06_shrinks_only_the_largest_trace_unnamed_drift_coordinate() -> None:
+    """Freeze an unnamed C-06 offender without sacrificing named heterogeneity."""
+
+    initial = SimpleNamespace(
+        parameter_vector=np.zeros(6),
+        active_components=(
+            "tau_class",
+            "tau_band",
+            "tau_generator",
+            "tau_extra",
+            "tau_alpha",
+        ),
+        tau_class=0.5,
+        tau_band=0.3,
+        tau_generator=0.1,
+        tau_extra=0.1,
+        tau_alpha=0.1,
+        effective_dof_class=3.6,
+        effective_dof_band=2.1,
+        effective_dof_generator=0.2,
+        effective_dof_extra=0.9,
+        effective_dof_alpha=0.2,
+    )
+    after_extra = SimpleNamespace(
+        **vars(initial),
+    )
+    after_extra.parameter_vector = np.zeros(5)
+    after_extra.active_components = ("tau_class", "tau_band", "tau_generator", "tau_alpha")
+    after_extra.tau_extra = 0.0
+    after_alpha = SimpleNamespace(**vars(after_extra))
+    after_alpha.parameter_vector = np.zeros(4)
+    after_alpha.active_components = ("tau_class", "tau_band", "tau_generator")
+    after_alpha.tau_alpha = 0.0
+    refitted = SimpleNamespace(
+        **vars(after_alpha),
+    )
+    refitted.parameter_vector = np.zeros(3)
+    refitted.active_components = ("tau_class", "tau_band")
+    refitted.tau_generator = 0.0
+
+    with patch.object(
+        uncertainty_module,
+        "_meta_fit",
+        side_effect=(after_extra, after_alpha, refitted),
+    ) as meta_fit:
+        fitted, actions, partial_declaration = uncertainty_module._apply_c06_shrink(
+            {},
+            frozenset(),
+            initial,
+            frozenset(),
+        )
+
+    assert fitted is refitted
+    assert actions == ("tau_extra", "tau_alpha", "tau_generator")
+    assert not partial_declaration
+    assert fitted.tau_class == initial.tau_class
+    assert fitted.tau_band == initial.tau_band
+    assert [call.args[2] for call in meta_fit.call_args_list] == [
+        frozenset({"tau_extra"}),
+        frozenset({"tau_alpha", "tau_extra"}),
+        frozenset({"tau_alpha", "tau_extra", "tau_generator"}),
+    ]
+
+
+def test_c06_point_effects_drift_publishes_partial_declaration() -> None:
+    """Declare PARTIAL when point effects cannot be frozen at a named null prior."""
+
+    point_effects = tuple(
+        [f"u_class-{index}" for index in range(4)] + [f"v_band-{index}" for index in range(3)]
+    )
+    initial = SimpleNamespace(
+        parameter_vector=np.zeros(len(point_effects) + 1),
+        active_components=point_effects,
+        **{component: 0.1 for component in point_effects},
+    )
+
+    with patch.object(uncertainty_module, "_meta_fit", return_value=initial):
+        fitted, actions, partial_declaration = uncertainty_module._apply_c06_shrink(
+            {},
+            frozenset(),
+            initial,
+            frozenset(),
+        )
+
+    assert fitted is initial
+    assert actions == ()
+    assert partial_declaration
+    assert uncertainty_module._c06_parameter_count(fitted) == 7
+
+
+def test_c06_boundary_disclosure_covers_unnamed_block_component() -> None:
+    """Publish an upper-bound disclosure for every active C-06 block component."""
+
+    fitted = SimpleNamespace(
+        active_components=("tau_class", "tau_generator"),
+        tau_class=0.5,
+        tau_generator=10.0,
+        effective_dof_class=3.6,
+        effective_dof_generator=0.4,
+    )
+
+    disclosures = uncertainty_module._variance_boundary_disclosures(fitted)
+
+    assert len(disclosures) == 1
+    assert disclosures[0].component == "tau_generator"
+    assert disclosures[0].fitted_value == 10.0
+    assert disclosures[0].effective_dof == 0.4
 
 
 def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
@@ -1935,12 +2128,16 @@ def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
         pooled_jnd_ci=(1.0, 1.1),
         spread_ci_graph_clusters=(1.2, 1.4),
     )
-    branch = evaluate_h_jnd_branch(branch_fit)
+    assert not fit.c06_partial_declaration
+    with pytest.raises(TypeError, match="ledger"):
+        evaluate_h_jnd_branch(branch_fit)  # type: ignore[call-arg]
+    branch_ledger = AccessLedger()
+    branch = evaluate_h_jnd_branch(branch_fit, branch_ledger)
     assert branch.shipped_band == "class-conditional"
     assert branch.spread_lower == 1.2
     assert branch.pooled_ratio == pytest.approx(1.1)
     with pytest.raises(RuntimeError, match="once-only"):
-        evaluate_h_jnd_branch(branch_fit)
+        evaluate_h_jnd_branch(branch_fit, branch_ledger)
 
 
 def test_heterogeneous_w13_fit_reaches_class_conditional_branch(
@@ -1967,7 +2164,7 @@ def test_heterogeneous_w13_fit_reaches_class_conditional_branch(
         ),
     )
 
-    branch = evaluate_h_jnd_branch(fit)
+    branch = evaluate_h_jnd_branch(fit, AccessLedger())
 
     assert fit.tau_class > 0.0
     assert fit.tau_band > 0.0
@@ -2047,8 +2244,21 @@ def test_freeze1_synthetic_driver_cannot_construct_default_campaign_ledger(
             tmp_path / "blocked-run",
             campaign_root,
         )
+    with pytest.raises(ValueError, match="cannot target the campaign ledger root"):
+        run_freeze1_fit(
+            _jnd_success_rows(),
+            FittingPlan(_weight_parameters()),
+            JNDFitConfig(
+                role_hash=bank_module._FROZEN_A15_ROLE_HASH,
+                top_composite_pair_counts={"band-1": 67, "band-2": 67},
+                rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
+            ),
+            tmp_path / "blocked-subtree-run",
+            campaign_root / "synthetic-subtree",
+        )
     assert not campaign_root.exists()
     assert not (tmp_path / "blocked-run").exists()
+    assert not (tmp_path / "blocked-subtree-run").exists()
 
 
 def test_freeze1_driver_runs_synthetic_fit_with_ledgered_artifacts(
@@ -2084,6 +2294,7 @@ def test_freeze1_driver_runs_synthetic_fit_with_ledgered_artifacts(
     assert result.access_budget_before["test-h-jnd-branch"] == 0
     assert result.access_budget_after["test-h-jnd-branch"] == 1
     assert not result.jnd_fit.uncalibrated_classes
+    assert not result.jnd_fit.c06_partial_declaration
     assert {path.name for path in run_dir.iterdir()} == {
         "manifest.json",
         "result.json",
@@ -2105,6 +2316,7 @@ def test_freeze1_driver_runs_synthetic_fit_with_ledgered_artifacts(
     assert publication["access_budget_after"]["test-h-jnd-branch"] == 1
     assert publication["ledger_annulments"] == []
     assert publication["ledger_defects"] == []
+    assert publication["jnd"]["c06_partial_declaration"] is False
     assert publication["iterations"] == len(result.trajectory) == len(trajectory)
     assert status == {"state": "COMPLETE"}
     with pytest.raises(FileExistsError):
