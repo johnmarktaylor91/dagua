@@ -5,6 +5,7 @@ from dagua.eval.ruler_v4.fit.access import (
     W08_LEDGER_KEY,
     AccessBudgetConsumedError,
     AccessLedger,
+    LedgerAnnulment,
     LookReservation,
 )
 from dagua.eval.ruler_v4.fit.bank import (
@@ -116,6 +117,7 @@ __all__ = [
     "JudgmentBank",
     "JudgmentMetadata",
     "JudgmentRow",
+    "LedgerAnnulment",
     "LookReservation",
     "OptimizerConfig",
     "OrderedCalibrationBin",

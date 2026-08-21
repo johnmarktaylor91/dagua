@@ -21,6 +21,14 @@ W08_LEDGER_KEY = "w08-off-distribution"
 H_JND_LEDGER_KEY = "test-h-jnd-branch"
 _PLANNED_PRESENTATIONS = 8520
 _Z_ALPHA_OVER_TWO = NormalDist().inv_cdf(0.975)
+_ANNULMENT_AUTHORITY_ADDENDA = frozenset({28})
+_ANNULMENT_SCOPE_BASES = frozenset(
+    {
+        "reservation_without_reveal",
+        "synthetic_only_manifest",
+        "crash_before_publication",
+    }
+)
 
 
 class AccessBudgetConsumedError(RuntimeError):
@@ -54,6 +62,47 @@ class LookReservation:
     information_fraction: Optional[float]
     cumulative_alpha: Optional[float]
     incremental_alpha: Optional[float]
+
+
+@dataclass(frozen=True)
+class LedgerAnnulment:
+    """Publish one valid append-only budget annulment.
+
+    Parameters
+    ----------
+    ledger_key : str
+        Budget identity of the annulled reservation.
+    slot_index : int
+        One-based slot restored by the annulment.
+    annulled_line_sha256 : str
+        SHA-256 of the exact persisted reservation-line bytes.
+    reason : str
+        One-sentence description of the specific defect.
+    authority_addendum : int
+        Landed preregistration addendum licensing the annulment.
+    date : str
+        UTC calendar date of the corrective entry.
+    scope_basis : str
+        Evidence class proving no judged content was released.
+    """
+
+    ledger_key: str
+    slot_index: int
+    annulled_line_sha256: str
+    reason: str
+    authority_addendum: int
+    date: str
+    scope_basis: str
+
+
+@dataclass(frozen=True)
+class _LedgerEntry:
+    """Retain one parsed ledger record and its exact persisted bytes."""
+
+    record: Mapping[str, object]
+    exact_bytes: bytes
+    sha256: str
+    line_number: int
 
 
 def _row_set_digest(row_ids: Iterable[str]) -> Tuple[str, int]:
@@ -104,13 +153,84 @@ def _cumulative_alpha(information_fraction: float) -> float:
     return 2.0 - 2.0 * NormalDist().cdf(_Z_ALPHA_OVER_TWO / math.sqrt(information_fraction))
 
 
+def _valid_annulment_reason(value: object) -> bool:
+    """Return whether a value is a single, terminated sentence.
+
+    Parameters
+    ----------
+    value : object
+        Candidate ANNUL reason.
+
+    Returns
+    -------
+    bool
+        True for one nonempty line ending in sentence punctuation.
+    """
+
+    if not isinstance(value, str):
+        return False
+    reason = value.strip()
+    return (
+        bool(reason)
+        and "\n" not in reason
+        and reason[-1] in ".!?"
+        and not any(character in ".!?" for character in reason[:-1])
+    )
+
+
+def _numeric_record_value(record: Mapping[str, object], key: str) -> float:
+    """Read one required numeric value from a persisted ledger record.
+
+    Parameters
+    ----------
+    record : mapping[str, object]
+        Parsed ledger record.
+    key : str
+        Required numeric field name.
+
+    Returns
+    -------
+    float
+        Persisted numeric value.
+
+    Raises
+    ------
+    ValueError
+        If the persisted field is missing, boolean, or nonnumeric.
+    """
+
+    value = record.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"ledger record requires numeric {key}")
+    return float(value)
+
+
 class AccessLedger:
     """Append releases to the frozen campaign ledger with per-slot locks."""
 
-    def __init__(self) -> None:
-        """Use the injected absolute campaign ledger root."""
+    def __init__(self, ledger_root: Optional[Path] = None) -> None:
+        """Use an explicit root or the injected campaign ledger root.
 
-        self._ledger_root = _ACCESS_LEDGER_ROOT
+        Parameters
+        ----------
+        ledger_root : pathlib.Path or None, optional
+            Explicit isolated ledger root. ``None`` selects the frozen campaign
+            root for real access machinery.
+        """
+
+        self._ledger_root = _ACCESS_LEDGER_ROOT if ledger_root is None else Path(ledger_root)
+
+    @property
+    def is_campaign_root(self) -> bool:
+        """Return whether this instance targets the current campaign root.
+
+        Returns
+        -------
+        bool
+            True when the resolved explicit root equals the injected campaign root.
+        """
+
+        return self._ledger_root.resolve() == _ACCESS_LEDGER_ROOT.resolve()
 
     def _path(self, role_hash: str) -> Path:
         """Resolve one role-hash ledger path.
@@ -130,8 +250,125 @@ class AccessLedger:
             raise ValueError("ledger release requires the frozen A15 role hash")
         return self._ledger_root / f"{role_hash}.jsonl"
 
+    def _entries(self, role_hash: str) -> Tuple[_LedgerEntry, ...]:
+        """Read every ledger line while preserving its exact bytes.
+
+        Parameters
+        ----------
+        role_hash : str
+            Verified frozen A15 role hash.
+
+        Returns
+        -------
+        tuple[_LedgerEntry, ...]
+            Parsed entries in append order.
+        """
+
+        path = self._path(role_hash)
+        if not path.exists():
+            return ()
+        entries = []
+        with path.open("rb") as handle:
+            for line_number, exact_bytes in enumerate(handle, start=1):
+                if not exact_bytes.strip():
+                    continue
+                value = json.loads(exact_bytes.decode("utf-8"))
+                if not isinstance(value, dict):
+                    raise ValueError(f"{path}:{line_number}: invalid access-ledger record")
+                entries.append(
+                    _LedgerEntry(
+                        record=value,
+                        exact_bytes=exact_bytes,
+                        sha256=hashlib.sha256(exact_bytes).hexdigest(),
+                        line_number=line_number,
+                    )
+                )
+        return tuple(entries)
+
+    @staticmethod
+    def _scope_allows_annulment(target: Mapping[str, object], scope_basis: str) -> bool:
+        """Return whether target evidence proves no judged-content release.
+
+        Parameters
+        ----------
+        target : mapping[str, object]
+            Reservation record named by an ANNUL entry.
+        scope_basis : str
+            Constitutional no-release evidence class.
+
+        Returns
+        -------
+        bool
+            True only for one of RIDER-2's three licensed situations.
+        """
+
+        if scope_basis == "reservation_without_reveal":
+            return target.get("state") == "RESERVED"
+        if scope_basis == "synthetic_only_manifest":
+            return target.get("synthetic_only") is True
+        if scope_basis == "crash_before_publication":
+            return target.get("publication_state") == "NOT_PUBLISHED"
+        return False
+
+    def _annulment_audit(
+        self, role_hash: str
+    ) -> Tuple[frozenset[str], Tuple[Mapping[str, object], ...], Tuple[str, ...]]:
+        """Validate ANNUL lines and return their budget effects and defects.
+
+        Parameters
+        ----------
+        role_hash : str
+            Verified frozen A15 role hash.
+
+        Returns
+        -------
+        tuple[frozenset[str], tuple[mapping[str, object], ...], tuple[str, ...]]
+            Annulled exact-line digests, valid ANNUL records, and disclosed
+            invalid-entry defects.
+        """
+
+        entries = self._entries(role_hash)
+        earlier_by_digest: dict[str, _LedgerEntry] = {}
+        annulled = set()
+        valid = []
+        defects = []
+        for entry in entries:
+            record = entry.record
+            if record.get("state") != "ANNUL":
+                earlier_by_digest[entry.sha256] = entry
+                continue
+            target_digest = record.get("annulled_line_sha256")
+            target = earlier_by_digest.get(str(target_digest))
+            defect: Optional[str] = None
+            if record.get("role_hash") != role_hash:
+                defect = "ANNUL role hash does not match its ledger"
+            elif not isinstance(target_digest, str) or target is None:
+                defect = "ANNUL does not identify an earlier exact ledger line"
+            elif target_digest in annulled:
+                defect = "ANNUL targets an already annulled reservation"
+            elif record.get("ledger_key") != target.record.get("ledger_key"):
+                defect = "ANNUL ledger key does not match its target"
+            elif record.get("slot_index") != target.record.get("slot_index"):
+                defect = "ANNUL slot index does not match its target"
+            elif record.get("authority_addendum") not in _ANNULMENT_AUTHORITY_ADDENDA:
+                defect = "ANNUL cites no landed licensing addendum"
+            elif not _valid_annulment_reason(record.get("reason")):
+                defect = "ANNUL reason is not one sentence"
+            elif not isinstance(record.get("date"), str) or not record["date"]:
+                defect = "ANNUL date is missing"
+            elif record.get("scope_basis") not in _ANNULMENT_SCOPE_BASES:
+                defect = "ANNUL scope basis is not licensed"
+            elif not self._scope_allows_annulment(target.record, str(record["scope_basis"])):
+                defect = "ANNUL target does not prove that judged content was unreleased"
+            if defect is not None:
+                defects.append(f"line {entry.line_number}: {defect}")
+                continue
+            annulled.add(str(target_digest))
+            valid.append(record)
+        return frozenset(annulled), tuple(valid), tuple(defects)
+
     def _records(self, role_hash: str, ledger_key: str) -> Tuple[Mapping[str, object], ...]:
-        """Read existing records for one budget key.
+        """Read active, non-annulled records for one budget key.
 
         Parameters
         ----------
@@ -141,23 +378,18 @@ class AccessLedger:
         Returns
         -------
         tuple[mapping[str, object], ...]
-            Existing key-specific records in append order.
+            Active key-specific reservation records in append order.
         """
 
-        path = self._path(role_hash)
-        if not path.exists():
-            return ()
-        records = []
-        with path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                if not line.strip():
-                    continue
-                value = json.loads(line)
-                if not isinstance(value, dict):
-                    raise ValueError(f"{path}:{line_number}: invalid access-ledger record")
-                if value.get("role_hash") == role_hash and value.get("ledger_key") == ledger_key:
-                    records.append(value)
-        return tuple(records)
+        annulled, _, _ = self._annulment_audit(role_hash)
+        return tuple(
+            entry.record
+            for entry in self._entries(role_hash)
+            if entry.record.get("state") != "ANNUL"
+            and entry.sha256 not in annulled
+            and entry.record.get("role_hash") == role_hash
+            and entry.record.get("ledger_key") == ledger_key
+        )
 
     def _append(
         self,
@@ -188,11 +420,20 @@ class AccessLedger:
 
         path = self._path(role_hash)
         path.parent.mkdir(parents=True, exist_ok=True)
-        lock_suffix = (
-            str(slot_index)
-            if bounded
-            else hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
-        )
+        if bounded:
+            _, valid_annulments, _ = self._annulment_audit(role_hash)
+            generation = sum(
+                int(
+                    record.get("ledger_key") == ledger_key
+                    and record.get("slot_index") == slot_index
+                )
+                for record in valid_annulments
+            )
+            lock_suffix = str(slot_index) + (f".a{generation}" if generation else "")
+        else:
+            lock_suffix = hashlib.sha256(
+                json.dumps(payload, sort_keys=True).encode("utf-8")
+            ).hexdigest()
         lock_path = path.parent / f"{role_hash}.{ledger_key}.{lock_suffix}.lock"
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
         try:
@@ -205,6 +446,20 @@ class AccessLedger:
             os.fsync(lock_descriptor)
         finally:
             os.close(lock_descriptor)
+        self._append_line(path, payload)
+
+    @staticmethod
+    def _append_line(path: Path, payload: Mapping[str, object]) -> None:
+        """Append and fsync one canonical JSON ledger line.
+
+        Parameters
+        ----------
+        path : pathlib.Path
+            Existing or new ledger JSONL path.
+        payload : mapping[str, object]
+            Complete append-only record.
+        """
+
         encoded = (json.dumps(dict(payload), sort_keys=True, separators=(",", ":")) + "\n").encode(
             "utf-8"
         )
@@ -279,11 +534,15 @@ class AccessLedger:
             ):
                 raise ValueError("calibration looks require a nonnegative informative count")
             information_fraction = min(informative_judgments / _PLANNED_PRESENTATIONS, 1.0)
-            previous_fraction = 0.0 if not records else float(records[-1]["information_fraction"])
+            previous_fraction = (
+                0.0 if not records else _numeric_record_value(records[-1], "information_fraction")
+            )
             if information_fraction < previous_fraction:
                 raise ValueError("calibration information fraction cannot decrease")
             cumulative_alpha = _cumulative_alpha(information_fraction)
-            previous_alpha = 0.0 if not records else float(records[-1]["cumulative_alpha"])
+            previous_alpha = (
+                0.0 if not records else _numeric_record_value(records[-1], "cumulative_alpha")
+            )
             incremental_alpha = cumulative_alpha - previous_alpha
         else:
             if informative_judgments is not None:
@@ -366,6 +625,7 @@ class AccessLedger:
         ledger_key: str,
         row_ids: Iterable[str],
         purpose: str,
+        synthetic_only: bool = False,
     ) -> str:
         """Reserve one content-bound branch or sealed evaluation event.
 
@@ -377,6 +637,8 @@ class AccessLedger:
             Complete released row census.
         purpose : str
             Named use of the once-only event.
+        synthetic_only : bool, default=False
+            Whether the spending run's manifest proves it is synthetic-only.
 
         Returns
         -------
@@ -401,10 +663,129 @@ class AccessLedger:
             "row_set_digest": digest,
             "row_count": row_count,
             "purpose": purpose,
+            "synthetic_only": synthetic_only,
             "date": datetime.now(timezone.utc).isoformat(),
         }
         self._append(role_hash, ledger_key, 1, payload, bounded=True)
         return digest
+
+    def annul_reservation(
+        self,
+        role_hash: str,
+        ledger_key: str,
+        slot_index: int,
+        reason: str,
+        authority_addendum: int,
+        scope_basis: str,
+    ) -> LedgerAnnulment:
+        """Append a licensed ANNUL line for a no-release reservation defect.
+
+        Parameters
+        ----------
+        role_hash, ledger_key : str
+            Frozen partition and budget identities.
+        slot_index : int
+            One-based reservation slot to restore.
+        reason : str
+            One sentence naming the specific defect.
+        authority_addendum : int
+            Landed addendum licensing this specific annulment.
+        scope_basis : str
+            One of the three RIDER-2 no-release evidence classes.
+
+        Returns
+        -------
+        LedgerAnnulment
+            Validated corrective entry appended to the ledger.
+
+        Raises
+        ------
+        ValueError
+            If authority, reason, target identity, or constitutional scope is invalid.
+        """
+
+        if authority_addendum not in _ANNULMENT_AUTHORITY_ADDENDA:
+            raise ValueError("ANNUL requires a landed licensing addendum")
+        if not _valid_annulment_reason(reason):
+            raise ValueError("ANNUL reason must be one sentence")
+        if scope_basis not in _ANNULMENT_SCOPE_BASES:
+            raise ValueError("ANNUL scope basis is not licensed")
+        annulled, _, _ = self._annulment_audit(role_hash)
+        targets = tuple(
+            entry
+            for entry in self._entries(role_hash)
+            if entry.record.get("state") != "ANNUL"
+            and entry.sha256 not in annulled
+            and entry.record.get("role_hash") == role_hash
+            and entry.record.get("ledger_key") == ledger_key
+            and entry.record.get("slot_index") == slot_index
+        )
+        if len(targets) != 1:
+            raise ValueError("ANNUL requires exactly one active target reservation")
+        target = targets[0]
+        if not self._scope_allows_annulment(target.record, scope_basis):
+            raise ValueError("ANNUL target does not prove that judged content was unreleased")
+        entry = LedgerAnnulment(
+            ledger_key=ledger_key,
+            slot_index=slot_index,
+            annulled_line_sha256=target.sha256,
+            reason=reason.strip(),
+            authority_addendum=authority_addendum,
+            date=datetime.now(timezone.utc).date().isoformat(),
+            scope_basis=scope_basis,
+        )
+        payload = {
+            "state": "ANNUL",
+            "role_hash": role_hash,
+            "ledger_key": entry.ledger_key,
+            "slot_index": entry.slot_index,
+            "annulled_line_sha256": entry.annulled_line_sha256,
+            "reason": entry.reason,
+            "authority_addendum": entry.authority_addendum,
+            "date": entry.date,
+            "scope_basis": entry.scope_basis,
+        }
+        path = self._path(role_hash)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._append_line(path, payload)
+        return entry
+
+    def annulment_lines(self, role_hash: str) -> Tuple[str, ...]:
+        """Return every ANNUL line verbatim for freeze-report publication.
+
+        Parameters
+        ----------
+        role_hash : str
+            Frozen A15 role identity.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Exact UTF-8 ANNUL lines, including their persisted newline.
+        """
+
+        return tuple(
+            entry.exact_bytes.decode("utf-8")
+            for entry in self._entries(role_hash)
+            if entry.record.get("state") == "ANNUL"
+        )
+
+    def ledger_defects(self, role_hash: str) -> Tuple[str, ...]:
+        """Return disclosed defects for void ANNUL lines.
+
+        Parameters
+        ----------
+        role_hash : str
+            Frozen A15 role identity.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Validation defects in append order.
+        """
+
+        _, _, defects = self._annulment_audit(role_hash)
+        return defects
 
     def budget_usage(self, role_hash: str) -> Mapping[str, int]:
         """Return persistent bounded-budget consumption without reading labels.

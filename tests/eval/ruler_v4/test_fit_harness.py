@@ -1330,6 +1330,104 @@ def test_ledger_and_h_jnd_refuse_caller_minted_role_hashes(
     assert not (tmp_path / "ACCESS_LEDGER").exists()
 
 
+def test_ledger_annulment_is_append_only_and_restores_synthetic_budget(tmp_path: Path) -> None:
+    """Annul a synthetic-only spend and reuse its generation-suffixed slot."""
+
+    ledger_root = tmp_path / "ACCESS_LEDGER"
+    ledger = AccessLedger(ledger_root)
+    role_hash = bank_module._FROZEN_A15_ROLE_HASH
+    ledger.reserve_once(
+        role_hash,
+        access_module.H_JND_LEDGER_KEY,
+        ("synthetic-row",),
+        "synthetic branch probe",
+        synthetic_only=True,
+    )
+    ledger_path = ledger_root / f"{role_hash}.jsonl"
+    original_line = ledger_path.read_bytes().splitlines(keepends=True)[0]
+    original_digest = hashlib.sha256(original_line).hexdigest()
+    original_lock = ledger_root / f"{role_hash}.{access_module.H_JND_LEDGER_KEY}.1.lock"
+
+    annulment = ledger.annul_reservation(
+        role_hash,
+        access_module.H_JND_LEDGER_KEY,
+        1,
+        "A synthetic-only probe incorrectly consumed the campaign-style slot.",
+        authority_addendum=28,
+        scope_basis="synthetic_only_manifest",
+    )
+
+    assert annulment.annulled_line_sha256 == original_digest
+    assert original_lock.exists()
+    assert ledger.budget_usage(role_hash)[access_module.H_JND_LEDGER_KEY] == 0
+    assert len(ledger.annulment_lines(role_hash)) == 1
+    assert ledger.ledger_defects(role_hash) == ()
+    ledger.reserve_once(
+        role_hash,
+        access_module.H_JND_LEDGER_KEY,
+        ("replacement-row",),
+        "replacement synthetic branch probe",
+        synthetic_only=True,
+    )
+    replacement_lock = ledger_root / f"{role_hash}.{access_module.H_JND_LEDGER_KEY}.1.a1.lock"
+    assert replacement_lock.exists()
+    assert original_lock.exists()
+    assert len(ledger_path.read_bytes().splitlines()) == 3
+    assert ledger.budget_usage(role_hash)[access_module.H_JND_LEDGER_KEY] == 1
+    with pytest.raises(ValueError, match="landed licensing addendum"):
+        ledger.annul_reservation(
+            role_hash,
+            access_module.H_JND_LEDGER_KEY,
+            1,
+            "An unlicensed correction must be refused.",
+            authority_addendum=29,
+            scope_basis="synthetic_only_manifest",
+        )
+    replacement_line = ledger_path.read_bytes().splitlines(keepends=True)[-1]
+    void_annulment = {
+        "state": "ANNUL",
+        "role_hash": role_hash,
+        "ledger_key": access_module.H_JND_LEDGER_KEY,
+        "slot_index": 1,
+        "annulled_line_sha256": hashlib.sha256(replacement_line).hexdigest(),
+        "reason": "This forged entry cites no landed authority.",
+        "authority_addendum": 29,
+        "date": "2026-08-21",
+        "scope_basis": "synthetic_only_manifest",
+    }
+    with ledger_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(void_annulment, sort_keys=True, separators=(",", ":")) + "\n")
+    assert ledger.budget_usage(role_hash)[access_module.H_JND_LEDGER_KEY] == 1
+    assert ledger.ledger_defects(role_hash) == ("line 4: ANNUL cites no landed licensing addendum",)
+    assert len(ledger.annulment_lines(role_hash)) == 2
+
+
+def test_ledger_refuses_annulment_after_judged_content_release(tmp_path: Path) -> None:
+    """Keep a revealed calibration look spent under RIDER-2's scope restriction."""
+
+    ledger = AccessLedger(tmp_path / "ACCESS_LEDGER")
+    role_hash = bank_module._FROZEN_A15_ROLE_HASH
+    ledger.reserve_look(
+        role_hash,
+        "within-family-calibration",
+        "post-M1",
+        ("judged-row",),
+        "capacity unlock",
+        informative_judgments=100,
+    )
+
+    with pytest.raises(ValueError, match="judged content was unreleased"):
+        ledger.annul_reservation(
+            role_hash,
+            "within-family-calibration",
+            1,
+            "The revealed look cannot regain its budget.",
+            authority_addendum=28,
+            scope_basis="reservation_without_reveal",
+        )
+    assert ledger.budget_usage(role_hash)["within-family-calibration"] == 1
+
+
 def test_bank_loader_denies_pilot_and_sealed_subtrees(tmp_path: Path) -> None:
     """Public ingestion refuses direct and recursive quarantined-bank reads."""
 
@@ -1894,10 +1992,17 @@ def test_freeze1_driver_fails_closed_for_holdouts_and_real_rows(tmp_path: Path) 
             plan,
             config,
             tmp_path / "holdout-run",
+            tmp_path / "holdout-ledger",
         )
     real_rows = tuple(replace(row, synthetic=False) for row in rows)
     with pytest.raises(FitStartConditionError, match="campaign completion"):
-        run_freeze1_fit(real_rows, plan, config, tmp_path / "premature-real-run")
+        run_freeze1_fit(
+            real_rows,
+            plan,
+            config,
+            tmp_path / "premature-real-run",
+            tmp_path / "premature-real-ledger",
+        )
     ready = RealFitStartConditions(
         campaign_complete=True,
         protocol_start_authorized=True,
@@ -1911,6 +2016,7 @@ def test_freeze1_driver_fails_closed_for_holdouts_and_real_rows(tmp_path: Path) 
             plan,
             config,
             tmp_path / "gated-real-run",
+            tmp_path / "gated-real-ledger",
             real_start_conditions=ready,
         )
     with pytest.raises(TypeError, match="joint_tolerance"):
@@ -1920,15 +2026,29 @@ def test_freeze1_driver_fails_closed_for_holdouts_and_real_rows(tmp_path: Path) 
     assert not (tmp_path / "gated-real-run").exists()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="OWNER_ACT_NEEDED: the protocol has no once-only ledger annulment rider",
-)
-def test_freeze1_synthetic_driver_cannot_construct_default_campaign_ledger() -> None:
-    """Bank the structural campaign-ledger isolation required after annulment."""
+def test_freeze1_synthetic_driver_cannot_construct_default_campaign_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Require the P5BR2 construction to inject a non-campaign ledger root."""
 
     source = inspect.getsource(run_freeze1_fit)
     assert "AccessLedger()" not in source
+    campaign_root = tmp_path / "CAMPAIGN_ACCESS_LEDGER"
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", campaign_root)
+    with pytest.raises(ValueError, match="cannot target the campaign ledger root"):
+        run_freeze1_fit(
+            _jnd_success_rows(),
+            FittingPlan(_weight_parameters()),
+            JNDFitConfig(
+                role_hash=bank_module._FROZEN_A15_ROLE_HASH,
+                top_composite_pair_counts={"band-1": 67, "band-2": 67},
+                rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
+            ),
+            tmp_path / "blocked-run",
+            campaign_root,
+        )
+    assert not campaign_root.exists()
+    assert not (tmp_path / "blocked-run").exists()
 
 
 def test_freeze1_driver_runs_synthetic_fit_with_ledgered_artifacts(
@@ -1945,8 +2065,9 @@ def test_freeze1_driver_runs_synthetic_fit_with_ledgered_artifacts(
         rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
     )
     run_dir = tmp_path / "freeze1-run"
+    synthetic_ledger_root = tmp_path / "SYNTHETIC_ACCESS_LEDGER"
 
-    result = run_freeze1_fit(rows, plan, config, run_dir)
+    result = run_freeze1_fit(rows, plan, config, run_dir, synthetic_ledger_root)
 
     assert result.trajectory
     assert result.trajectory[0].joint_improvement is None
@@ -1982,8 +2103,12 @@ def test_freeze1_driver_runs_synthetic_fit_with_ledgered_artifacts(
     assert manifest["row_count"] == len(rows)
     assert manifest["replication_row_count"] == len(rows)
     assert publication["access_budget_after"]["test-h-jnd-branch"] == 1
+    assert publication["ledger_annulments"] == []
+    assert publication["ledger_defects"] == []
     assert publication["iterations"] == len(result.trajectory) == len(trajectory)
     assert status == {"state": "COMPLETE"}
     with pytest.raises(FileExistsError):
-        run_freeze1_fit(rows, plan, config, run_dir)
-    assert AccessLedger().budget_usage(bank_module._FROZEN_A15_ROLE_HASH)["test-h-jnd-branch"] == 1
+        run_freeze1_fit(rows, plan, config, run_dir, synthetic_ledger_root)
+    role_hash = bank_module._FROZEN_A15_ROLE_HASH
+    assert AccessLedger(synthetic_ledger_root).budget_usage(role_hash)["test-h-jnd-branch"] == 1
+    assert AccessLedger().budget_usage(role_hash)["test-h-jnd-branch"] == 0

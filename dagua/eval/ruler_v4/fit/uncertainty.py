@@ -1828,6 +1828,8 @@ def fit_jnd_heterogeneity(
 
 def evaluate_h_jnd_branch(
     fit: JNDHeterogeneityFit,
+    ledger: Optional[AccessLedger] = None,
+    synthetic_only: bool = False,
 ) -> HJNDBranchResult:
     """Evaluate and ledger TEST H-JND exactly once at the freeze fit.
 
@@ -1835,6 +1837,11 @@ def evaluate_h_jnd_branch(
     ----------
     fit : JNDHeterogeneityFit
         Completed W-13 publication object.
+    ledger : AccessLedger or None, optional
+        Explicit ledger instance. ``None`` selects the campaign ledger for the
+        real once-only evaluation path.
+    synthetic_only : bool, default=False
+        Whether the caller's manifest proves the evaluation is synthetic-only.
     Returns
     -------
     HJNDBranchResult
@@ -1849,11 +1856,13 @@ def evaluate_h_jnd_branch(
     r_pool = fit.pooled_jnd_ci[1] / fit.pooled_jnd_ci[0]
     spread_lower = fit.spread_ci_graph_clusters[0]
     shipped = "class-conditional" if spread_lower > r_pool else "pooled"
-    digest = AccessLedger().reserve_once(
+    access_ledger = AccessLedger() if ledger is None else ledger
+    digest = access_ledger.reserve_once(
         fit.role_hash,
         H_JND_LEDGER_KEY,
         fit.replication_row_ids,
         purpose="test-h-jnd-branch-evaluation",
+        synthetic_only=synthetic_only,
     )
     return HJNDBranchResult(
         shipped_band=shipped,

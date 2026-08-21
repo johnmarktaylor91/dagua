@@ -645,18 +645,11 @@ the production port; none of the entries below overrides a contract.
     synthetic fixtures with an explicitly fixture-only salted split, while every
     real W-13 call fails closed. OWNER: freeze the graph-half assignment algorithm
     before the first real fit.
-58. ADDENDUM-27 FIT-ORD(i)'s profiled fixed-point driver is implemented as
-    `run_freeze1_fit`: it publishes the deterministic weight/JND/lapse trajectory
-    at the frozen `1e-10` tolerance and requires campaign completion, protocol
-    start authorization, a frozen lapse prior, a frozen graph-half assignment,
-    and blind-map attestation before any real call. The earlier protocol section
-    5 description of three boundaries is superseded by the shipped structure:
-    every likelihood entry enforces train purpose, every fitting entry refuses
-    real rows independently, and the driver adds the explicit start-condition
-    gate before its still-disabled real adapter. Synthetic calls remain capable
-    of reaching the default campaign ledger and spending the once-only
-    `test-h-jnd-branch` event. The frozen protocol defines append-only records but
-    no correction or annulment entry, so neither deleting nor inventing a repair
-    record is authorized. OWNER: add a protocol rider that defines the exact
-    append-only annulment schema and budget accounting, then require the driver
-    test path to receive a non-campaign ledger root structurally.
+58. CLOSED by ADDENDUM-28 RIDER-2 and P5FIX7. LOOK-LEDGER now supports only
+    append-only ANNUL entries naming the target line's exact-byte digest, reason,
+    licensing addendum, date, and no-release scope evidence. Valid annulments
+    restore budget through generation-suffixed locks without removing history;
+    released judged content is not annullable, and void entries are disclosed.
+    The reviewed synthetic leak never reached the campaign ledger, so there was
+    nothing to annul. `run_freeze1_fit` now requires an explicit non-campaign
+    ledger root and passes the same isolated ledger into its H-JND reservation.

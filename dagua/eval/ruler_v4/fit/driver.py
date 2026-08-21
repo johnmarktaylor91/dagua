@@ -490,6 +490,7 @@ def run_freeze1_fit(
     plan: FittingPlan,
     jnd_config: JNDFitConfig,
     run_dir: Path,
+    ledger_root: Path,
     config: Optional[FitDriverConfig] = None,
     real_start_conditions: Optional[RealFitStartConditions] = None,
 ) -> Freeze1FitResult:
@@ -505,6 +506,8 @@ def run_freeze1_fit(
         Frozen W-13 support and guard inputs.
     run_dir : pathlib.Path
         New, non-existing output directory.
+    ledger_root : pathlib.Path
+        Explicit non-campaign ledger root for this synthetic-only run.
     config : FitDriverConfig or None
         Frozen driver configuration; ``None`` constructs the only valid values.
     real_start_conditions : RealFitStartConditions or None
@@ -524,7 +527,8 @@ def run_freeze1_fit(
     FileExistsError
         If ``run_dir`` already exists.
     ValueError
-        If rows violate train-only or deterministic configuration guards.
+        If rows violate train-only or deterministic configuration guards, or
+        if a synthetic run targets the campaign ledger root.
     """
 
     rows = tuple(pairs)
@@ -537,8 +541,10 @@ def run_freeze1_fit(
     driver_config = FitDriverConfig() if config is None else config
     lines = partition_fit_ord_lines(rows)
     output = Path(run_dir)
+    ledger = AccessLedger(ledger_root)
+    if ledger.is_campaign_root:
+        raise ValueError("synthetic FREEZE-1 cannot target the campaign ledger root")
     output.mkdir(parents=False, exist_ok=False)
-    ledger = AccessLedger()
     budget_before = ledger.budget_usage(_FROZEN_A15_ROLE_HASH)
     _atomic_write_json(
         output / "manifest.json",
@@ -640,7 +646,7 @@ def run_freeze1_fit(
             raise ValueError(
                 f"rotation-envelope guard blocks classes: {list(jnd_fit.uncalibrated_classes)}"
             )
-        branch = evaluate_h_jnd_branch(jnd_fit)
+        branch = evaluate_h_jnd_branch(jnd_fit, ledger=ledger, synthetic_only=True)
         budget_after = ledger.budget_usage(_FROZEN_A15_ROLE_HASH)
         trajectory_rows = [
             {
@@ -690,6 +696,8 @@ def run_freeze1_fit(
                 },
                 "h_jnd_branch": asdict(branch),
                 "access_budget_after": dict(budget_after),
+                "ledger_annulments": list(ledger.annulment_lines(_FROZEN_A15_ROLE_HASH)),
+                "ledger_defects": list(ledger.ledger_defects(_FROZEN_A15_ROLE_HASH)),
                 "iterations": len(trajectory),
                 "converged": True,
             },
