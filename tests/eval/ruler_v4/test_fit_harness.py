@@ -1518,8 +1518,8 @@ def test_jnd_heterogeneity_rejects_non_replication_rows() -> None:
         )
 
 
-def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
-    """Replication flags cannot substitute for repeated side-swapped pairs."""
+def test_jnd_heterogeneity_requires_actual_cross_session_repeats() -> None:
+    """Replication flags cannot substitute for cross-session repeated pairs."""
 
     plan = FittingPlan(_weight_parameters())
     source = _synthetic_recovery_rows(count=2)
@@ -1545,7 +1545,7 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
             ),
         )
 
-    swapped = (
+    same_displayed_order = (
         replace(
             source[0],
             is_replication=True,
@@ -1561,19 +1561,89 @@ def test_jnd_heterogeneity_requires_actual_cross_session_side_swaps() -> None:
             base_pair_id="shared",
             replicate_group_id="shared",
             session_id="session-b",
-            blind_id_a="drawing-b",
-            blind_id_b="drawing-a",
+            blind_id_a="drawing-a",
+            blind_id_b="drawing-b",
         ),
     )
     with pytest.raises(ValueError, match="25-pair minimum"):
         fit_jnd_heterogeneity(
-            swapped,
+            same_displayed_order,
             plan,
             {"w_structure": 0.6, "w_neighborhood": 1.6},
             JNDFitConfig(
                 role_hash=bank_module._FROZEN_A15_ROLE_HASH,
                 top_composite_pair_counts={"synthetic": 67},
                 rotation_envelopes={"synthetic": 0.01},
+            ),
+        )
+
+
+def test_jnd_replication_accepts_realized_same_order_side_bits(tmp_path: Path) -> None:
+    """W-13 accepts realized repeat legs whose schedule keeps one displayed order."""
+
+    _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
+    repeat_schedule = {
+        "presentation_id": "presentation-fit-repeat",
+        "session_id": "session-fit-repeat",
+        "base_pair_id": "pair-fit",
+        "replicate_group_id": "pair-fit",
+        "graph_hash": "fit-graph",
+        "blind_id_A": "A-fit",
+        "blind_id_B": "B-fit",
+        "profile_opaque_id": "profile",
+        "budget_line": "PRIMARY",
+        "partition": "train",
+    }
+    repeat_bank = {
+        "presentation_id": "presentation-fit-repeat",
+        "session_id": "session-fit-repeat",
+        "base_pair_id": "pair-fit",
+        "replicate_group_id": "pair-fit",
+        "graph_hash": "fit-graph",
+        "session_accepted": True,
+        "instrument_hash": "instrument",
+        "judge_id": "judge/CF@4",
+        "verdict": 1,
+        "tie": False,
+        "confidence": 2,
+        "side_bit": 1,
+    }
+    with schedule_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(repeat_schedule)}\n")
+    with bank_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{json.dumps(repeat_bank)}\n")
+
+    bank = _load_synthetic_bank((bank_path,), (schedule_path,), family_path, schedule_path)
+    assert len(bank.rows) == 2
+    assert all(row.is_replication for row in bank.rows)
+    assert {(row.blind_id_a, row.blind_id_b) for row in bank.rows} == {("A-fit", "B-fit")}
+
+    source = _synthetic_recovery_rows(count=2)
+    repetitions = tuple(
+        replace(
+            source[index],
+            is_replication=row.is_replication,
+            replicate_group_id=row.replicate_group_id,
+            base_pair_id=row.base_pair_id,
+            session_id=row.session_id,
+            blind_id_a=row.blind_id_a,
+            blind_id_b=row.blind_id_b,
+            graph_hash=row.graph_hash,
+            primary_class=row.primary_class,
+            size_band=row.size_band,
+            generator_family=row.generator_family,
+        )
+        for index, row in enumerate(bank.rows)
+    )
+    with pytest.raises(ValueError, match="25-pair minimum"):
+        fit_jnd_heterogeneity(
+            repetitions,
+            FittingPlan(_weight_parameters()),
+            {"w_structure": 0.6, "w_neighborhood": 1.6},
+            JNDFitConfig(
+                role_hash=bank_module._FROZEN_A15_ROLE_HASH,
+                top_composite_pair_counts={"band": 67},
+                rotation_envelopes={"class": 0.01},
             ),
         )
 

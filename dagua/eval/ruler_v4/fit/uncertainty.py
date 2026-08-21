@@ -781,7 +781,7 @@ def _validate_replication_rows(rows: Tuple[FitPair, ...]) -> Mapping[Tuple[str, 
     ------
     ValueError
         If a row is non-replication, non-train, cross-stratum, or lacks a true
-        cross-session displayed side swap.
+        cross-session presentation of one drawing pair.
     """
 
     if not rows:
@@ -797,18 +797,15 @@ def _validate_replication_rows(rows: Tuple[FitPair, ...]) -> Mapping[Tuple[str, 
     counts: DefaultDict[Tuple[str, str], int] = defaultdict(int)
     for replicate_group_id, presentations in by_base_pair.items():
         sessions = {pair.session_id for pair in presentations}
-        displayed_orders = {(pair.blind_id_a, pair.blind_id_b) for pair in presentations}
-        drawing_sets = {frozenset(order) for order in displayed_orders}
+        drawing_sets = {frozenset((pair.blind_id_a, pair.blind_id_b)) for pair in presentations}
         cells = {(pair.primary_class, pair.size_band) for pair in presentations}
         base_pair_ids = {pair.base_pair_id for pair in presentations}
         if len(sessions) < 2:
             raise ValueError(
                 f"JND-HET replicate group {replicate_group_id} lacks cross-session replication"
             )
-        if len(drawing_sets) != 1 or len(displayed_orders) < 2:
-            raise ValueError(
-                f"JND-HET replicate group {replicate_group_id} lacks a displayed side swap"
-            )
+        if len(drawing_sets) != 1:
+            raise ValueError(f"JND-HET replicate group {replicate_group_id} crosses drawing pairs")
         if len(base_pair_ids) != 1:
             raise ValueError(f"JND-HET replicate group {replicate_group_id} crosses base pairs")
         if len(cells) != 1:
