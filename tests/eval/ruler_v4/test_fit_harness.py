@@ -1697,6 +1697,36 @@ def test_c06_shrinks_one_offending_component_then_reaudits() -> None:
     assert len(set(fitted.cell_logs.values())) > 1
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="OWNER_ACT_NEEDED: W-13-EST(f) does not freeze the C-06 trace comparand",
+)
+def test_c06_heterogeneous_block_does_not_collapse_to_pooled() -> None:
+    """Bank the heterogeneous C-06 collapse pending the owner comparand ruling."""
+
+    class_effects = {f"class-{index}": (index - 4.5) * 0.18 for index in range(10)}
+    band_effects = {f"band-{index}": (index - 2.5) * 0.12 for index in range(6)}
+    observations = {
+        (primary_class, size_band): uncertainty_module._CellObservation(
+            estimate=class_effect + band_effect,
+            variance=0.02,
+        )
+        for primary_class, class_effect in class_effects.items()
+        for size_band, band_effect in band_effects.items()
+    }
+    initial = uncertainty_module._meta_fit(observations, frozenset(band_effects))
+
+    fitted, actions = uncertainty_module._apply_c06_shrink(
+        observations,
+        frozenset(band_effects),
+        initial,
+        frozenset(),
+    )
+
+    assert actions != ("tau_class", "tau_band")
+    assert len(set(fitted.cell_logs.values())) > 1
+
+
 def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1821,6 +1851,17 @@ def test_freeze1_driver_fails_closed_for_holdouts_and_real_rows(tmp_path: Path) 
     assert not (tmp_path / "holdout-run").exists()
     assert not (tmp_path / "premature-real-run").exists()
     assert not (tmp_path / "gated-real-run").exists()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="OWNER_ACT_NEEDED: the protocol has no once-only ledger annulment rider",
+)
+def test_freeze1_synthetic_driver_cannot_construct_default_campaign_ledger() -> None:
+    """Bank the structural campaign-ledger isolation required after annulment."""
+
+    source = inspect.getsource(run_freeze1_fit)
+    assert "AccessLedger()" not in source
 
 
 def test_freeze1_driver_runs_synthetic_fit_with_ledgered_artifacts(
