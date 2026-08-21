@@ -561,8 +561,11 @@ the production port; none of the entries below overrides a contract.
     freezes the 25-pair and `Q_band=67` gates, publishes supported and
     unestimated cells, profile intervals, separate 2,000-resample graph-cluster
     and generator-family spread intervals with drop rates, and validates true
-    cross-session side swaps. Real activation remains fail-closed only for the
-    newly docketed graph-half assignment gap in entry 57.
+    cross-session repetitions of one drawing pair. It does not require a
+    displayed-order reversal inside every replicate group: the realized campaign
+    has no such non-control groups, and W-13-EST requires cross-session
+    replication rather than that stricter invariant. Real activation remains
+    fail-closed only for the graph-half assignment gap in entry 57.
 47. CLOSED by ADDENDUM-27 LOOK-LEDGER (a)-(d). A15 section 5.7's calibration
     reads now route through separate within/cross four-look schedules with frozen
     occasion order, the 8,520 information denominator, cumulative and incremental
@@ -571,13 +574,17 @@ the production port; none of the entries below overrides a contract.
     unlimited half, W-08 has a separate no-alpha schedule, and reusable holdout
     and adversarial label reads are uncapped but recorded. LOOK-LEDGER
     (e) also requires the ledger root to remain the injected absolute campaign
-    home, never checkout-derived; (f) requires the sealed census to remain sourced
-    only from the verified A15 role hash and frozen A16 schedule digest, with a
-    partial release failing closed. The shipped seal implements (e) and pins
-    (f)'s A16 digest in-package; its census reconciles the superseded 341-session
-    plan with the delivered 370-session campaign in stable `base_pair_id` space.
-    The content-bound (a)-(d) access path is implemented before any calibration
-    use for stopping or capacity selection.
+    home, never checkout-derived; (f) requires every released row and graph set
+    to remain a subset of the census sourced only from the verified A15 role hash
+    and frozen A16 schedule digest. Whole-partition completeness is enforced only
+    for the two sealed `n <= 1` budgets. The `n <= 4` calibration paths and the
+    uncapped reusable/adversarial paths may release partial in-census row sets;
+    each calibration release still consumes its next ordered look, and each
+    uncapped release is still recorded. The shipped seal pins (f)'s A16 digest
+    in-package and reconciles the superseded 341-session plan with the delivered
+    370-session campaign in stable `base_pair_id` space. The content-bound
+    (a)-(d) access path is implemented before any calibration use for stopping or
+    capacity selection.
 48. CLOSED by ADDENDUM-27 W-13-EST. Outer weights now carry 95% intervals from
     profile likelihood on the fitted objective plus observed-information rank
     and condition number; the graph-half gate freezes failing weights at their
@@ -607,10 +614,17 @@ the production port; none of the entries below overrides a contract.
 53. CLOSED by ADDENDUM-27 FIT-ORD. `FitPair` has no synthetic JND, lapse, or
     stratum defaults; real bridge construction supplies every field explicitly,
     and `synthetic_fit_pair` is the separate typed fixture factory.
-54. CLOSED by ADDENDUM-27 W-13-EST(f). The JND result publishes the smoother
-    trace beside the ledgered +2 and names every component frozen at its null
-    prior by the C-06 SHRINK response; no fixed-lambda point-effects substitute
-    remains.
+54. OWNER_ACT_NEEDED after the W-13-EST(f) implementation audit. The JND result
+    publishes the smoother trace beside the ledgered +2 and iteratively freezes
+    one offending component at its null prior, but the frozen text does not name
+    a dimensionally commensurable comparand for that trace. Comparing the sum of
+    per-level shrinkage factors directly with the two-parameter allocation makes
+    real heterogeneity freeze both components and collapses TEST H-JND to pooled
+    by construction. OWNER: for each random-effect component's smoother trace,
+    must C-06 compare against a per-component allocation of 1, against
+    `n_levels - 1`, or against a separately defined parameter-count audit, and
+    is the aggregate ledgered +2 ever a valid trace threshold? Until that ruling
+    lands, the existing estimator response must not be reinterpreted or replaced.
 55. The frozen A16 schedule's 341-session presentation-id space is disjoint from
     the delivered 370-session campaign after replanning re-minted presentation
     and session ids. The sealed roles reconcile exactly in the stable,
@@ -635,3 +649,18 @@ the production port; none of the entries below overrides a contract.
     synthetic fixtures with an explicitly fixture-only salted split, while every
     real W-13 call fails closed. OWNER: freeze the graph-half assignment algorithm
     before the first real fit.
+58. ADDENDUM-27 FIT-ORD(i)'s profiled fixed-point driver is implemented as
+    `run_freeze1_fit`: it publishes the deterministic weight/JND/lapse trajectory
+    at the frozen `1e-10` tolerance and requires campaign completion, protocol
+    start authorization, a frozen lapse prior, a frozen graph-half assignment,
+    and blind-map attestation before any real call. The earlier protocol section
+    5 description of three boundaries is superseded by the shipped structure:
+    every likelihood entry enforces train purpose, every fitting entry refuses
+    real rows independently, and the driver adds the explicit start-condition
+    gate before its still-disabled real adapter. Synthetic calls remain capable
+    of reaching the default campaign ledger and spending the once-only
+    `test-h-jnd-branch` event. The frozen protocol defines append-only records but
+    no correction or annulment entry, so neither deleting nor inventing a repair
+    record is authorized. OWNER: add a protocol rider that defines the exact
+    append-only annulment schema and budget accounting, then require the driver
+    test path to receive a non-campaign ledger root structurally.
