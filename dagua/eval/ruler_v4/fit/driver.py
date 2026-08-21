@@ -678,6 +678,13 @@ def run_freeze1_fit(
                     "spread_ci_generator_families": list(jnd_fit.spread_ci_generator_families),
                     "unestimated_cells": [list(cell) for cell in jnd_fit.unestimated_cells],
                     "effective_dof": jnd_fit.effective_dof,
+                    "c06_component_audit": {
+                        name: asdict(audit) for name, audit in jnd_fit.c06_component_audit.items()
+                    },
+                    "n_jnd": jnd_fit.n_jnd,
+                    "variance_boundary_disclosures": [
+                        asdict(disclosure) for disclosure in jnd_fit.variance_boundary_disclosures
+                    ],
                     "split_half_frozen": list(jnd_fit.split_half.frozen_components),
                     "c06_shrink_actions": list(jnd_fit.c06_shrink_actions),
                 },

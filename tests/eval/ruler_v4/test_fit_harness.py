@@ -11,7 +11,7 @@ import random
 import runpy
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional
 from unittest.mock import patch
 
 import numpy as np
@@ -224,8 +224,15 @@ def _judgment(purpose: SplitPurpose, suffix: str = "0") -> JudgmentRow:
     )
 
 
-def _jnd_success_rows() -> tuple[FitPair, ...]:
+def _jnd_success_rows(
+    cell_jnds: Optional[Mapping[tuple[str, str], float]] = None,
+) -> tuple[FitPair, ...]:
     """Build four supported cells of true cross-session side swaps.
+
+    Parameters
+    ----------
+    cell_jnds : mapping[tuple[str, str], float] or None, optional
+        Optional cell-specific JND truths used to resample the judgments.
 
     Returns
     -------
@@ -234,6 +241,8 @@ def _jnd_success_rows() -> tuple[FitPair, ...]:
     """
 
     source = _synthetic_recovery_rows(count=200)
+    generator = np.random.default_rng(20260821)
+    truth = np.asarray((0.6, 1.6), dtype=np.float64)
     rows = []
     cells = (
         ("class-1", "band-1"),
@@ -244,9 +253,31 @@ def _jnd_success_rows() -> tuple[FitPair, ...]:
     for cell_index, cell in enumerate(cells):
         for pair_index in range(50):
             original = source[cell_index * 50 + pair_index]
-            verdict = original.graded_verdict
+            jnd = 0.18 if cell_jnds is None else cell_jnds[cell]
+            if cell_jnds is None:
+                verdict = original.graded_verdict
+            else:
+                mass = original.fixed_mass + float(np.asarray(original.mass_coefficients) @ truth)
+                difference = (
+                    original.fixed_numerator_a + float(np.asarray(original.numerator_a) @ truth)
+                ) / mass
+                difference -= (
+                    original.fixed_numerator_b + float(np.asarray(original.numerator_b) @ truth)
+                ) / mass
+                cutpoints = np.asarray((-3, -2, -1, 1, 2, 3), dtype=np.float64) * jnd
+                cdf = np.asarray(
+                    [
+                        0.5 * (1.0 + math.erf((cutpoint - difference) / math.sqrt(2.0)))
+                        for cutpoint in cutpoints
+                    ]
+                )
+                probabilities = np.diff(np.concatenate(([0.0], cdf, [1.0])))
+                verdict = int(generator.choice(tuple(range(-3, 4)), p=probabilities))
             first = replace(
                 original,
+                outcome=0 if verdict == 0 else 1 if verdict > 0 else -1,
+                graded_verdict=verdict,
+                jnd=jnd,
                 primary_class=cell[0],
                 size_band=cell[1],
                 graph_hash=f"graph-{pair_index % 10}",
@@ -1667,8 +1698,8 @@ def test_jnd_replication_accepts_realized_same_order_side_bits(tmp_path: Path) -
         )
 
 
-def test_c06_shrinks_one_offending_component_then_reaudits() -> None:
-    """C-06 preserves a nonoffending heterogeneity component when sufficient."""
+def test_c06_audits_free_coordinates_without_shrinking_heterogeneity() -> None:
+    """C-06 compares parameter count, while preserving reported smoother traces."""
 
     class_effects = {"a": -0.6, "b": -0.2, "c": 0.25, "d": 0.7}
     band_effects = {"x": -0.25, "y": 0.0, "z": 0.3}
@@ -1690,19 +1721,16 @@ def test_c06_shrinks_one_offending_component_then_reaudits() -> None:
     )
 
     assert initial.effective_dof_class + initial.effective_dof_band > 2.0
-    assert actions == ("tau_class",)
-    assert fitted.tau_class == 0.0
+    assert uncertainty_module._c06_parameter_count(initial) == 2
+    assert actions == ()
+    assert fitted.tau_class > 0.0
     assert fitted.tau_band > 0.0
-    assert fitted.effective_dof_class + fitted.effective_dof_band <= 2.0
+    assert fitted is initial
     assert len(set(fitted.cell_logs.values())) > 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="OWNER_ACT_NEEDED: W-13-EST(f) does not freeze the C-06 trace comparand",
-)
 def test_c06_heterogeneous_block_does_not_collapse_to_pooled() -> None:
-    """Bank the heterogeneous C-06 collapse pending the owner comparand ruling."""
+    """Preserve a heterogeneous fit under the rider-frozen C-06 comparand."""
 
     class_effects = {f"class-{index}": (index - 4.5) * 0.18 for index in range(10)}
     band_effects = {f"band-{index}": (index - 2.5) * 0.12 for index in range(6)}
@@ -1723,7 +1751,8 @@ def test_c06_heterogeneous_block_does_not_collapse_to_pooled() -> None:
         frozenset(),
     )
 
-    assert actions != ("tau_class", "tau_band")
+    assert actions == ()
+    assert uncertainty_module._c06_parameter_count(fitted) == 2
     assert len(set(fitted.cell_logs.values())) > 1
 
 
@@ -1785,6 +1814,11 @@ def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
     assert 0.0 < fit.bootstrap_drop_rate.graph_clusters <= 1.0
     assert 0.0 <= fit.bootstrap_drop_rate.generator_families <= 1.0
     assert fit.effective_dof >= 0.0
+    assert fit.n_jnd <= 2
+    assert set(fit.c06_component_audit) == {"tau_class", "tau_band"}
+    assert fit.c06_component_audit["tau_class"].realized_levels == 2
+    assert fit.c06_component_audit["tau_band"].realized_levels == 2
+    assert all(audit.effective_dof >= 0.0 for audit in fit.c06_component_audit.values())
     assert fit.loss_path
     assert meta_fit.call_count > config.bootstrap_replicates
     assert set(fit.c06_shrink_actions).isdisjoint(fit.split_half.frozen_components)
@@ -1809,6 +1843,39 @@ def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
     assert branch.pooled_ratio == pytest.approx(1.1)
     with pytest.raises(RuntimeError, match="once-only"):
         evaluate_h_jnd_branch(branch_fit)
+
+
+def test_heterogeneous_w13_fit_reaches_class_conditional_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reach the H-JND class-conditional branch from fitted heterogeneity."""
+
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "ACCESS_LEDGER")
+    cell_jnds = {
+        ("class-1", "band-1"): 0.05,
+        ("class-1", "band-2"): 0.25,
+        ("class-2", "band-1"): 0.25,
+        ("class-2", "band-2"): 1.25,
+    }
+    rows = _jnd_success_rows(cell_jnds)
+    fit = fit_jnd_heterogeneity(
+        rows,
+        FittingPlan(_weight_parameters()),
+        {"w_structure": 0.6, "w_neighborhood": 1.6},
+        JNDFitConfig(
+            role_hash=bank_module._FROZEN_A15_ROLE_HASH,
+            top_composite_pair_counts={"band-1": 67, "band-2": 67},
+            rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
+        ),
+    )
+
+    branch = evaluate_h_jnd_branch(fit)
+
+    assert fit.tau_class > 0.0
+    assert fit.tau_band > 0.0
+    assert fit.c06_shrink_actions == ()
+    assert branch.shipped_band == "class-conditional"
+    assert branch.spread_lower > branch.pooled_ratio
 
 
 def test_freeze1_driver_fails_closed_for_holdouts_and_real_rows(tmp_path: Path) -> None:
