@@ -24,6 +24,8 @@ _PROFILE_DROP = 1.920729410347062
 _LOG_JND_BOUNDS = (math.log(1.0e-6), math.log(100.0))
 _LOG_TAU_BOUNDS = (math.log(1.0e-6), math.log(10.0))
 _A15_HALF_SALT = "v4-split-2|within"
+_C06_GRANTED_PARAMETERS = 2
+_TAU_BOUNDARY_LOG_ATOL = 1.0e-7
 
 
 @dataclass(frozen=True)
@@ -155,6 +157,44 @@ class BootstrapDropRate:
 
 
 @dataclass(frozen=True)
+class C06ComponentAudit:
+    """Publish one smoother trace with its realized-level dimension.
+
+    Parameters
+    ----------
+    effective_dof : float
+        Reported smoother trace for the variance component.
+    realized_levels : int
+        Number of realized levels that bounds the trace.
+    """
+
+    effective_dof: float
+    realized_levels: int
+
+
+@dataclass(frozen=True)
+class VarianceBoundaryDisclosure:
+    """Publish a variance component fitted at its frozen upper bound.
+
+    Parameters
+    ----------
+    component : str
+        Named variance component.
+    upper_bound : float
+        Frozen upper bound on the fitted ``tau`` scale.
+    fitted_value : float
+        Fitted component value.
+    effective_dof : float
+        Smoother trace at the fitted boundary value.
+    """
+
+    component: str
+    upper_bound: float
+    fitted_value: float
+    effective_dof: float
+
+
+@dataclass(frozen=True)
 class JNDHeterogeneityFit:
     """Publish the complete W-13 estimator, uncertainty, and guard record.
 
@@ -188,6 +228,12 @@ class JNDHeterogeneityFit:
         Support loss under each unit system.
     effective_dof : float
         Pre-response C-06 smoother trace reported beside the ledgered +2.
+    c06_component_audit : mapping[str, C06ComponentAudit]
+        Per-component smoother traces paired with realized-level ceilings.
+    n_jnd : int
+        Free JND-block parameter count compared with the granted allocation.
+    variance_boundary_disclosures : tuple[VarianceBoundaryDisclosure, ...]
+        Components fitted at the frozen variance upper bound.
     shrink_actions : tuple[str, ...]
         Components frozen at zero by stability or C-06.
     c06_shrink_actions : tuple[str, ...]
@@ -227,6 +273,9 @@ class JNDHeterogeneityFit:
     spread_ci_generator_families: Tuple[float, float]
     bootstrap_drop_rate: BootstrapDropRate
     effective_dof: float
+    c06_component_audit: Mapping[str, C06ComponentAudit]
+    n_jnd: int
+    variance_boundary_disclosures: Tuple[VarianceBoundaryDisclosure, ...]
     shrink_actions: Tuple[str, ...]
     c06_shrink_actions: Tuple[str, ...]
     k_jnd_disclosures: Tuple[KJNDDisclosure, ...]
@@ -256,6 +305,7 @@ class JNDHeterogeneityFit:
             "cell_jnd_ci",
             "jnd_by_cell",
             "cell_counts",
+            "c06_component_audit",
             "tie_rates_by_class",
         ):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
@@ -303,6 +353,12 @@ class JNDProfileFit:
         Marginal-objective decrease from the prior fixed-point profile.
     effective_dof : float
         Pre-response C-06 smoother trace.
+    c06_component_audit : mapping[str, C06ComponentAudit]
+        Per-component smoother traces paired with realized-level ceilings.
+    n_jnd : int
+        Free JND-block parameter count compared with the granted allocation.
+    variance_boundary_disclosures : tuple[VarianceBoundaryDisclosure, ...]
+        Components fitted at the frozen variance upper bound.
     split_half_frozen, c06_shrink_actions : tuple[str, ...]
         Separately attributed mandatory shrink responses.
     loss_path : tuple[float, ...]
@@ -318,6 +374,9 @@ class JNDProfileFit:
     marginal_loss: float
     block_improvement: Optional[float]
     effective_dof: float
+    c06_component_audit: Mapping[str, C06ComponentAudit]
+    n_jnd: int
+    variance_boundary_disclosures: Tuple[VarianceBoundaryDisclosure, ...]
     split_half_frozen: Tuple[str, ...]
     c06_shrink_actions: Tuple[str, ...]
     loss_path: Tuple[float, ...]
@@ -327,6 +386,11 @@ class JNDProfileFit:
 
         object.__setattr__(self, "jnd_by_cell", MappingProxyType(dict(self.jnd_by_cell)))
         object.__setattr__(self, "cell_counts", MappingProxyType(dict(self.cell_counts)))
+        object.__setattr__(
+            self,
+            "c06_component_audit",
+            MappingProxyType(dict(self.c06_component_audit)),
+        )
 
 
 @dataclass(frozen=True)
@@ -611,7 +675,7 @@ def _apply_c06_shrink(
     fitted: _MetaFit,
     already_frozen: frozenset[str],
 ) -> Tuple[_MetaFit, Tuple[str, ...]]:
-    """Freeze one largest effective-dof contributor and re-audit iteratively.
+    """Audit free JND coordinates and freeze implementation-drift offenders.
 
     Parameters
     ----------
@@ -627,25 +691,119 @@ def _apply_c06_shrink(
     Returns
     -------
     tuple[_MetaFit, tuple[str, ...]]
-        Re-audited fit and ordered component-specific C-06 actions.
+        Re-audited fit and ordered component-specific C-06 actions. The
+        conformant two-component estimator requires no action regardless of
+        its reported smoother trace.
     """
 
     current = fitted
     frozen = set(already_frozen)
     actions = []
-    while current.effective_dof_class + current.effective_dof_band > 2.0:
+    while _c06_parameter_count(current) > _C06_GRANTED_PARAMETERS:
         contributions = {
             component: float(getattr(current, f"effective_dof_{component.removeprefix('tau_')}"))
             for component in current.active_components
             if component not in frozen
+            and hasattr(current, f"effective_dof_{component.removeprefix('tau_')}")
         }
         if not contributions:
+            # An unnamed free coordinate cannot be silently reinterpreted or
+            # frozen; the caller's empty action records the required PARTIAL response.
             break
         offender = max(sorted(contributions), key=contributions.__getitem__)
         frozen.add(offender)
         actions.append(offender)
         current = _meta_fit(observations, eligible_bands, frozenset(frozen))
     return current, tuple(actions)
+
+
+def _c06_parameter_count(fitted: _MetaFit) -> int:
+    """Count free JND-block coordinates under the conservative ledger rule.
+
+    Parameters
+    ----------
+    fitted : _MetaFit
+        Marginal-likelihood fit whose vector contains ``mu`` followed by all
+        free JND-block coordinates.
+
+    Returns
+    -------
+    int
+        Free coordinate count excluding the base JND location ``mu``.
+    """
+
+    return max(int(fitted.parameter_vector.size) - 1, 0)
+
+
+def _c06_component_publication(
+    observations: Mapping[Tuple[str, str], _CellObservation],
+    eligible_bands: frozenset[str],
+    fitted: _MetaFit,
+) -> Mapping[str, C06ComponentAudit]:
+    """Pair each smoother trace with its realized-level ceiling.
+
+    Parameters
+    ----------
+    observations : mapping[tuple[str, str], _CellObservation]
+        Supported cell observations entering the marginal fit.
+    eligible_bands : frozenset[str]
+        Bands eligible for the random band component.
+    fitted : _MetaFit
+        Fit whose pre-response smoother traces are published.
+
+    Returns
+    -------
+    mapping[str, C06ComponentAudit]
+        Class and band component audit records.
+    """
+
+    realized_classes = {cell[0] for cell in observations}
+    realized_bands = {cell[1] for cell in observations if cell[1] in eligible_bands}
+    return {
+        "tau_class": C06ComponentAudit(fitted.effective_dof_class, len(realized_classes)),
+        "tau_band": C06ComponentAudit(fitted.effective_dof_band, len(realized_bands)),
+    }
+
+
+def _variance_boundary_disclosures(
+    fitted: _MetaFit,
+) -> Tuple[VarianceBoundaryDisclosure, ...]:
+    """Return disclosures for variance components at the optimizer ceiling.
+
+    Parameters
+    ----------
+    fitted : _MetaFit
+        Post-response marginal-likelihood fit.
+
+    Returns
+    -------
+    tuple[VarianceBoundaryDisclosure, ...]
+        Named upper-bound disclosures in component order.
+    """
+
+    upper_bound = math.exp(_LOG_TAU_BOUNDS[1])
+    disclosures = []
+    for component in fitted.active_components:
+        if component not in {"tau_class", "tau_band"}:
+            continue
+        fitted_value = float(getattr(fitted, component))
+        if fitted_value <= 0.0 or not math.isclose(
+            math.log(fitted_value),
+            _LOG_TAU_BOUNDS[1],
+            rel_tol=0.0,
+            abs_tol=_TAU_BOUNDARY_LOG_ATOL,
+        ):
+            continue
+        suffix = component.removeprefix("tau_")
+        disclosures.append(
+            VarianceBoundaryDisclosure(
+                component=component,
+                upper_bound=upper_bound,
+                fitted_value=fitted_value,
+                effective_dof=float(getattr(fitted, f"effective_dof_{suffix}")),
+            )
+        )
+    return tuple(disclosures)
 
 
 def _prefer_lower_boundary_fit(
@@ -1430,6 +1588,7 @@ def profile_jnd_block(
         if not split_frozen
         else _meta_fit(observations, eligible_bands, frozenset(split_frozen))
     )
+    n_jnd = _c06_parameter_count(stability_fit)
     fitted, c06_actions = _apply_c06_shrink(
         observations,
         eligible_bands,
@@ -1458,6 +1617,13 @@ def profile_jnd_block(
             None if previous_loss is None else max(previous_loss - fitted.loss, 0.0)
         ),
         effective_dof=initial_fit.effective_dof_class + initial_fit.effective_dof_band,
+        c06_component_audit=_c06_component_publication(
+            observations,
+            eligible_bands,
+            initial_fit,
+        ),
+        n_jnd=n_jnd,
+        variance_boundary_disclosures=_variance_boundary_disclosures(fitted),
         split_half_frozen=tuple(sorted(split_frozen)),
         c06_shrink_actions=c06_actions,
         loss_path=initial_fit.loss_path + (() if fitted is initial_fit else fitted.loss_path),
@@ -1544,6 +1710,7 @@ def fit_jnd_heterogeneity(
         if not split_frozen_components
         else _meta_fit(observations, eligible_bands, frozenset(split_frozen_components))
     )
+    n_jnd = _c06_parameter_count(stability_fit)
     fitted, c06_shrink_actions = _apply_c06_shrink(
         observations,
         eligible_bands,
@@ -1630,6 +1797,13 @@ def fit_jnd_heterogeneity(
         spread_ci_generator_families=family_interval,
         bootstrap_drop_rate=BootstrapDropRate(graph_drop, family_drop),
         effective_dof=effective_dof,
+        c06_component_audit=_c06_component_publication(
+            observations,
+            eligible_bands,
+            initial_fit,
+        ),
+        n_jnd=n_jnd,
+        variance_boundary_disclosures=_variance_boundary_disclosures(fitted),
         shrink_actions=tuple(sorted(frozen_components)),
         c06_shrink_actions=c06_shrink_actions,
         k_jnd_disclosures=disclosures,

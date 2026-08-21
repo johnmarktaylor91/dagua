@@ -614,17 +614,13 @@ the production port; none of the entries below overrides a contract.
 53. CLOSED by ADDENDUM-27 FIT-ORD. `FitPair` has no synthetic JND, lapse, or
     stratum defaults; real bridge construction supplies every field explicitly,
     and `synthetic_fit_pair` is the separate typed fixture factory.
-54. OWNER_ACT_NEEDED after the W-13-EST(f) implementation audit. The JND result
-    publishes the smoother trace beside the ledgered +2 and iteratively freezes
-    one offending component at its null prior, but the frozen text does not name
-    a dimensionally commensurable comparand for that trace. Comparing the sum of
-    per-level shrinkage factors directly with the two-parameter allocation makes
-    real heterogeneity freeze both components and collapses TEST H-JND to pooled
-    by construction. OWNER: for each random-effect component's smoother trace,
-    must C-06 compare against a per-component allocation of 1, against
-    `n_levels - 1`, or against a separately defined parameter-count audit, and
-    is the aggregate ledgered +2 ever a valid trace threshold? Until that ruling
-    lands, the existing estimator response must not be reinterpreted or replaced.
+54. CLOSED by ADDENDUM-28 RIDER-1. C-06 compares the JND block's fitted-parameter
+    count `N_JND`, under the same conservative counting rule as the ledgered +2,
+    against the granted allocation. The smoother traces are published only as
+    dimensioned `(ED_k, n_k_realized)` pairs and are never compared with +2 or
+    any other constant. The implementation now audits the realized free
+    coordinate vector, preserves conformant heterogeneous fits, and publishes
+    `N_JND` plus any variance component fitted at its frozen upper bound.
 55. The frozen A16 schedule's 341-session presentation-id space is disjoint from
     the delivered 370-session campaign after replanning re-minted presentation
     and session ids. The sealed roles reconcile exactly in the stable,
