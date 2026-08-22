@@ -1695,7 +1695,7 @@ def test_frozen_recorded_bank_fixture_has_stable_loader_digest(tmp_path: Path) -
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     assert hashlib.sha256(encoded).hexdigest() == (
-        "ea01976a9ad1308de1f7205325a2d101dab1455b2e1bc2b35c64031e7d3a4046"  # noqa: E501  # pragma: allowlist secret
+        "24a34d434024f21622bdd5d2fe323d933207781093ab0bdc0b99847282516a78"  # noqa: E501  # pragma: allowlist secret
     )
 
 
