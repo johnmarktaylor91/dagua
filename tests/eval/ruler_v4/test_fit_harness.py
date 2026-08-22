@@ -132,13 +132,21 @@ def _fitted_weight_table() -> WeightTable:
     )
 
 
-def _synthetic_recovery_rows(count: int = 1500) -> tuple[FitPair, ...]:
+def _synthetic_recovery_rows(
+    count: int = 1500,
+    lapse_rate: float = 1.0 / 109.0,
+    seed: int = 123,
+) -> tuple[FitPair, ...]:
     """Sample seven-point probit judgments from known P-mean weights.
 
     Parameters
     ----------
     count : int, default=1500
         Number of synthetic judgments.
+    lapse_rate : float, default=1/109
+        Known seven-category uniform-lapse truth.
+    seed : int, default=123
+        Local generator seed; process-global RNG state is untouched.
 
     Returns
     -------
@@ -146,7 +154,7 @@ def _synthetic_recovery_rows(count: int = 1500) -> tuple[FitPair, ...]:
         Reproducible A/tie/B judgments with ground truth ``(0.6, 1.6)``.
     """
 
-    generator = np.random.default_rng(123)
+    generator = np.random.default_rng(seed)
     truth = np.asarray((0.6, 1.6), dtype=np.float64)
     rows = []
     for index in range(count):
@@ -166,8 +174,7 @@ def _synthetic_recovery_rows(count: int = 1500) -> tuple[FitPair, ...]:
             ]
         )
         probabilities = np.diff(np.concatenate(([0.0], cdf, [1.0])))
-        lapse = 1.0 / 109.0
-        probabilities = (1.0 - lapse) * probabilities + lapse / 7.0
+        probabilities = (1.0 - lapse_rate) * probabilities + lapse_rate / 7.0
         verdict = int(generator.choice(tuple(range(-3, 4)), p=probabilities))
         rows.append(
             synthetic_fit_pair(
@@ -179,10 +186,48 @@ def _synthetic_recovery_rows(count: int = 1500) -> tuple[FitPair, ...]:
                 fixed_numerator_b=fixed_b,
                 fixed_mass=1.0,
                 jnd=jnd,
+                lapse_rate=lapse_rate,
                 graph_hash=f"synthetic-{index}",
             )
         )
     return tuple(rows)
+
+
+def _summed_lapse_objective(
+    lapse_rate: float,
+    rows: tuple[FitPair, ...],
+    plan: FittingPlan,
+    weights: torch.Tensor,
+    prior_multiplicity: float,
+) -> float:
+    """Evaluate an independent summed NLL plus a chosen lapse-prior multiple.
+
+    Parameters
+    ----------
+    lapse_rate : float
+        Candidate uniform-lapse scalar.
+    rows : tuple[FitPair, ...]
+        Fixed synthetic judgments.
+    plan : FittingPlan
+        Frozen fixed-weight plan.
+    weights : torch.Tensor
+        Fixed outer-weight vector.
+    prior_multiplicity : float
+        Zero, one, or two copies of the frozen Beta penalty.
+
+    Returns
+    -------
+    float
+        Summed objective at the candidate lapse.
+    """
+
+    candidate_rows = tuple(replace(row, lapse_rate=lapse_rate) for row in rows)
+    objective = PairwiseObjective(candidate_rows, plan)
+    prior = -math.log(lapse_rate) - 108.0 * math.log1p(-lapse_rate)
+    return (
+        float(objective.negative_log_likelihood(weights)) * len(candidate_rows)
+        + prior_multiplicity * prior
+    )
 
 
 def _judgment(purpose: SplitPurpose, suffix: str = "0") -> JudgmentRow:
@@ -608,6 +653,102 @@ def test_exact_duplication_weakens_one_dataset_lapse_prior() -> None:
     )
 
     assert 1.0 / 109.0 < sparse_lapse < duplicated_lapse < 0.25
+
+
+def test_non_mode_lapse_recovers_once_penalized_optimum_and_truth_interval() -> None:
+    """A truth away from 1/109 detects a dropped, doubled, or inert lapse prior."""
+
+    from scipy.optimize import minimize_scalar
+
+    lapse_truth = 0.03
+    rows = _synthetic_recovery_rows(count=4000, lapse_rate=lapse_truth, seed=4242)
+    parameters = (
+        WeightParameter(
+            "w_structure",
+            "universal",
+            0.6,
+            {"U01.headline": 1.0},
+            ("U01",),
+            lower=0.6,
+            upper=0.6,
+        ),
+        WeightParameter(
+            "w_neighborhood",
+            "universal",
+            1.6,
+            {"U03.r_1": 1.0},
+            ("U03",),
+            lower=1.6,
+            upper=1.6,
+        ),
+    )
+    plan = FittingPlan(parameters)
+    weights = torch.tensor((0.6, 1.6), dtype=torch.float64)
+    references = {
+        multiplicity: float(
+            minimize_scalar(
+                _summed_lapse_objective,
+                args=(rows, plan, weights, multiplicity),
+                bounds=(1.0e-9, 0.25),
+                method="bounded",
+                options={"xatol": 1.0e-11},
+            ).x
+        )
+        for multiplicity in (0.0, 1.0, 2.0)
+    }
+
+    _, fitted_lapse, _ = driver_module._fit_weight_lapse_block(
+        rows,
+        plan,
+        FitDriverConfig(),
+    )
+    interval = driver_module._profile_lapse_interval(
+        rows,
+        plan,
+        {"w_structure": 0.6, "w_neighborhood": 1.6},
+        fitted_lapse,
+    )
+
+    once_error = abs(fitted_lapse - references[1.0])
+    assert once_error < 1.0e-6
+    assert once_error < abs(fitted_lapse - references[0.0]) / 100.0
+    assert once_error < abs(fitted_lapse - references[2.0]) / 100.0
+    assert abs(fitted_lapse - 1.0 / 109.0) > 0.002
+    assert interval[0] <= lapse_truth <= interval[1]
+
+
+def test_zero_lapse_event_fixture_stays_between_prior_mode_and_mean() -> None:
+    """Zero generated uniform-lapse events leave the penalized fit interior."""
+
+    parameters = (
+        WeightParameter(
+            "w_structure",
+            "universal",
+            0.6,
+            {"U01.headline": 1.0},
+            ("U01",),
+            lower=0.6,
+            upper=0.6,
+        ),
+        WeightParameter(
+            "w_neighborhood",
+            "universal",
+            1.6,
+            {"U03.r_1": 1.0},
+            ("U03",),
+            lower=1.6,
+            upper=1.6,
+        ),
+    )
+    rows = _synthetic_recovery_rows(count=100, lapse_rate=0.0, seed=6)
+
+    _, fitted_lapse, _ = driver_module._fit_weight_lapse_block(
+        rows,
+        FittingPlan(parameters),
+        FitDriverConfig(),
+    )
+
+    assert 1.0 / 109.0 < fitted_lapse < 2.0 / 111.0
 
 
 def test_lapse_boundary_disclosure_publishes_both_objectives() -> None:
@@ -1964,6 +2105,41 @@ def test_side_swap_controls_are_audit_only_and_join_by_group(tmp_path: Path) -> 
     assert result.likelihood_row_count == 0
 
 
+def test_side_swap_audit_produces_finite_realized_740_leg_join() -> None:
+    """The full 740-leg campaign-sized join is nonempty, finite, and audit-only."""
+
+    source = _synthetic_recovery_rows(count=740)
+    pairs = tuple(
+        replace(
+            row,
+            replicate_group_id=f"realized-group-{index}",
+            base_pair_id=f"realized-pair-{index}",
+            session_id=f"base-session-{index}",
+            blind_id_a=f"drawing-a-{index}",
+            blind_id_b=f"drawing-b-{index}",
+        )
+        for index, row in enumerate(source)
+    )
+    controls = tuple(
+        SideSwapAuditRow(
+            replicate_group_id=pair.replicate_group_id,
+            base_pair_id=pair.base_pair_id,
+            session_id=f"control-session-{index}",
+            blind_id_a=pair.blind_id_b,
+            blind_id_b=pair.blind_id_a,
+            graded_verdict=-pair.graded_verdict,
+        )
+        for index, pair in enumerate(pairs)
+    )
+
+    result = side_swap_audit(pairs, controls)
+
+    assert result.control_legs == result.resolved_legs == result.exact_reversals == 740
+    assert math.isfinite(result.order_effect)
+    assert all(math.isfinite(value) for value in result.interval)
+    assert result.likelihood_row_count == 0
+
+
 def test_blind_attestation_digest_input_and_whitelist_are_derived(tmp_path: Path) -> None:
     """BLIND-ATTEST derives its gate from exact line bytes and rejects leaked keys."""
 
@@ -2128,6 +2304,73 @@ def test_dof_declaration_gate_is_complete_external_and_realized(tmp_path: Path) 
             plan,
             weight_table,
             undeclared_profiles,
+        )
+    declaration["buckets"] = [dict(entry) for entry in buckets]
+    declaration["buckets"][0]["filled"] = universal[:8]
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    with (
+        patch.object(driver_module, "_allocation_block_sha256", return_value=source_digest),
+        pytest.raises(FitStartConditionError, match="N_u is not filled"),
+    ):
+        driver_module._verify_dof_declaration(
+            declaration_path,
+            hashlib.sha256(declaration_path.read_bytes()).hexdigest(),
+            tmp_path / "PREREG.md",
+            plan,
+            weight_table,
+            profiles,
+        )
+    declaration["buckets"] = [dict(entry) for entry in buckets]
+    declaration["buckets"][1]["filled"] = ["forbidden-unspent"]
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    with (
+        patch.object(driver_module, "_allocation_block_sha256", return_value=source_digest),
+        pytest.raises(FitStartConditionError, match="UNSPENT is not filled"),
+    ):
+        driver_module._verify_dof_declaration(
+            declaration_path,
+            hashlib.sha256(declaration_path.read_bytes()).hexdigest(),
+            tmp_path / "PREREG.md",
+            plan,
+            weight_table,
+            profiles,
+        )
+    declaration["buckets"] = [dict(entry) for entry in buckets]
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    valid_digest = hashlib.sha256(declaration_path.read_bytes()).hexdigest()
+    with (
+        patch.object(driver_module, "_allocation_block_sha256", return_value="0" * 64),
+        pytest.raises(FitStartConditionError, match="allocation source is stale"),
+    ):
+        driver_module._verify_dof_declaration(
+            declaration_path,
+            valid_digest,
+            tmp_path / "PREREG.md",
+            plan,
+            weight_table,
+            profiles,
+        )
+    tenth_universal = SimpleNamespace(
+        entries=weight_table.entries,
+        fitted_parameter_buckets={
+            **weight_table.fitted_parameter_buckets,
+            "u-extra": "universal",
+        },
+        dof_account=SimpleNamespace(within_cap=True, within_buckets=False, used=20),
+        d_power=20,
+        prior_floors=weight_table.prior_floors,
+    )
+    with (
+        patch.object(driver_module, "_allocation_block_sha256", return_value=source_digest),
+        pytest.raises(FitStartConditionError, match="realized fitted identities"),
+    ):
+        driver_module._verify_dof_declaration(
+            declaration_path,
+            valid_digest,
+            tmp_path / "PREREG.md",
+            plan,
+            tenth_universal,
+            profiles,
         )
     declaration["assignment_complete"] = False
     declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
@@ -2689,6 +2932,64 @@ def test_heterogeneous_w13_fit_reaches_class_conditional_branch(
     assert branch.spread_lower > branch.pooled_ratio
 
 
+def test_unbalanced_heterogeneous_split_freezes_tau_but_balanced_split_does_not() -> None:
+    """A hand split that strands a true class effect triggers HALF-ASSIGN(g)."""
+
+    cell_jnds = {
+        ("class-1", "band-1"): 0.08,
+        ("class-1", "band-2"): 0.16,
+        ("class-2", "band-1"): 0.64,
+        ("class-2", "band-2"): 1.28,
+    }
+    rows = tuple(
+        replace(row, graph_hash=f"{row.primary_class}-{row.graph_hash}")
+        for row in _jnd_success_rows(cell_jnds)
+    )
+    graphs = sorted({row.graph_hash for row in rows})
+    balanced_halves = {graph: int(graph.rsplit("-", 1)[1]) % 2 for graph in graphs}
+    unbalanced_halves = {graph: int(graph.startswith("class-2")) for graph in graphs}
+    assignments = {
+        "balanced": HalfAssignment(
+            graph_halves=balanced_halves,
+            unit_halves={graph: half for graph, half in balanced_halves.items()},
+            table_sha256="0" * 64,
+            family_map_sha256="1" * 64,
+        ),
+        "unbalanced": HalfAssignment(
+            graph_halves=unbalanced_halves,
+            unit_halves={graph: half for graph, half in unbalanced_halves.items()},
+            table_sha256="2" * 64,
+            family_map_sha256="3" * 64,
+        ),
+    }
+    plan = FittingPlan(_weight_parameters())
+    config = JNDFitConfig(
+        role_hash=bank_module._FROZEN_A15_ROLE_HASH,
+        top_composite_pair_counts={"band-1": 67, "band-2": 67},
+        rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
+    )
+
+    profiles = {
+        name: uncertainty_module.profile_jnd_block(
+            rows,
+            plan,
+            {"w_structure": 0.6, "w_neighborhood": 1.6},
+            config,
+            half_assignment=assignment,
+        )
+        for name, assignment in assignments.items()
+    }
+
+    assert "tau_class" not in profiles["balanced"].split_half_frozen
+    assert not profiles["balanced"].split_half_unevaluable
+    assert profiles["balanced"].tau_class > 0.0
+    assert "tau_class" in profiles["unbalanced"].split_half_frozen
+    assert profiles["unbalanced"].tau_class == 0.0
+    assert {item.component for item in profiles["unbalanced"].split_half_unevaluable} == {
+        "tau_class"
+    }
+
+
 def test_freeze1_driver_fails_closed_for_holdouts_and_real_rows(tmp_path: Path) -> None:
     """Real activation opens only after all six gates and artifacts verify."""
 
@@ -2742,6 +3043,159 @@ def test_freeze1_driver_fails_closed_for_holdouts_and_real_rows(tmp_path: Path) 
     assert not (tmp_path / "holdout-run").exists()
     assert not (tmp_path / "premature-real-run").exists()
     assert not (tmp_path / "gated-real-run").exists()
+
+
+def test_freeze1_driver_derives_and_red_teams_each_of_six_start_gates(
+    tmp_path: Path,
+) -> None:
+    """Each driver-level owner or derived gate refuses before any state exists."""
+
+    real_rows = tuple(replace(row, synthetic=False) for row in _jnd_success_rows())
+    plan = FittingPlan(_weight_parameters())
+    config = JNDFitConfig(
+        role_hash=bank_module._FROZEN_A15_ROLE_HASH,
+        top_composite_pair_counts={"band-1": 67, "band-2": 67},
+        rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
+    )
+    ready = RealFitStartConditions(True, True, True, True, True, True)
+    graphs = sorted({row.graph_hash for row in real_rows})
+    assignment = HalfAssignment(
+        graph_halves={graph: index % 2 for index, graph in enumerate(graphs)},
+        unit_halves={f"unit-{index}": index % 2 for index in range(len(graphs))},
+        table_sha256="0" * 64,
+        family_map_sha256="1" * 64,
+    )
+    declaration = {
+        "buckets": [
+            {
+                "bucket": "N_g",
+                "filled": ["mu", "tau_class", "tau_band", "lapse_rate"],
+            }
+        ]
+    }
+    artifacts = {
+        "family_map_path": tmp_path / "family.json",
+        "dof_declaration_path": tmp_path / "dof.json",
+        "dof_declaration_sha256": "a" * 64,
+        "dof_source_path": tmp_path / "source.md",
+        "weight_table": SimpleNamespace(),
+        "scoring_profiles": SimpleNamespace(),
+        "blind_attestation_path": tmp_path / "blind.jsonl",
+        "blind_attestation_sha256": "b" * 64,
+        "side_swap_audit_rows": (),
+    }
+    refused_paths = []
+
+    for index, conditions in enumerate(
+        (
+            replace(ready, campaign_complete=False),
+            replace(ready, protocol_start_authorized=False),
+        )
+    ):
+        run_dir = tmp_path / f"owner-run-{index}"
+        ledger_root = tmp_path / f"owner-ledger-{index}"
+        with pytest.raises(FitStartConditionError):
+            run_freeze1_fit(
+                real_rows,
+                plan,
+                config,
+                run_dir,
+                ledger_root,
+                real_start_conditions=conditions,
+            )
+        refused_paths.append((run_dir, ledger_root))
+
+    half_run = tmp_path / "half-run"
+    half_ledger = tmp_path / "half-ledger"
+    with (
+        patch.object(
+            driver_module,
+            "load_half_assignment",
+            side_effect=ValueError("half gate false"),
+        ),
+        pytest.raises(FitStartConditionError),
+    ):
+        run_freeze1_fit(
+            real_rows,
+            plan,
+            config,
+            half_run,
+            half_ledger,
+            real_start_conditions=ready,
+            **artifacts,
+        )
+    refused_paths.append((half_run, half_ledger))
+
+    dof_run = tmp_path / "dof-run"
+    dof_ledger = tmp_path / "dof-ledger"
+    with (
+        patch.object(driver_module, "load_half_assignment", return_value=assignment),
+        patch.object(
+            driver_module,
+            "_verify_dof_declaration",
+            side_effect=ValueError("dof gate false"),
+        ),
+        pytest.raises(FitStartConditionError),
+    ):
+        run_freeze1_fit(
+            real_rows,
+            plan,
+            config,
+            dof_run,
+            dof_ledger,
+            real_start_conditions=ready,
+            **artifacts,
+        )
+    refused_paths.append((dof_run, dof_ledger))
+
+    blind_run = tmp_path / "blind-run"
+    blind_ledger = tmp_path / "blind-ledger"
+    with (
+        patch.object(driver_module, "load_half_assignment", return_value=assignment),
+        patch.object(driver_module, "_verify_dof_declaration", return_value=declaration),
+        patch.object(
+            driver_module,
+            "_verify_blind_attestation",
+            side_effect=ValueError("blind gate false"),
+        ),
+        pytest.raises(FitStartConditionError),
+    ):
+        run_freeze1_fit(
+            real_rows,
+            plan,
+            config,
+            blind_run,
+            blind_ledger,
+            real_start_conditions=ready,
+            **artifacts,
+        )
+    refused_paths.append((blind_run, blind_ledger))
+
+    lapse_run = tmp_path / "lapse-run"
+    lapse_ledger = tmp_path / "lapse-ledger"
+    with (
+        patch.object(driver_module, "_LANDED_PRIOR_ADDENDUM", 30),
+        patch.object(driver_module, "load_half_assignment", return_value=assignment),
+        patch.object(driver_module, "_verify_dof_declaration", return_value=declaration),
+        patch.object(driver_module, "_verify_blind_attestation", return_value={}),
+        patch.object(driver_module, "side_swap_audit", return_value=SimpleNamespace()),
+        pytest.raises(FitStartConditionError),
+    ):
+        run_freeze1_fit(
+            real_rows,
+            plan,
+            config,
+            lapse_run,
+            lapse_ledger,
+            real_start_conditions=ready,
+            **artifacts,
+        )
+    refused_paths.append((lapse_run, lapse_ledger))
+
+    assert len(refused_paths) == 6
+    assert all(
+        not run_dir.exists() and not ledger_root.exists() for run_dir, ledger_root in refused_paths
+    )
 
 
 def test_freeze1_synthetic_driver_cannot_construct_default_campaign_ledger(
