@@ -6,10 +6,11 @@ import hashlib
 import json
 import math
 import os
+import re
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping, Optional, Sequence, Tuple
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -39,11 +40,54 @@ from dagua.eval.ruler_v4.fit.uncertainty import (
     fit_jnd_heterogeneity,
     profile_jnd_block,
 )
+from dagua.eval.ruler_v4.weight_table import REQUIRED_PRIOR_FLOOR_FACETS, WeightTable
 
 _JOINT_TOLERANCE = 1.0e-10
 _MAX_FIXED_POINT_ITERATIONS = 25
 _LAPSE_BOUNDS = (0.0, 0.25)
 _LAPSE_INITIAL = 1.0 / 109.0
+_LANDED_PRIOR_ADDENDUM = 29
+_EXPECTED_MAP_SHA256 = (
+    "fd6f7659c011f985bdbcb44686a782af6505f6ea83a61ab7f1f69925722d418a"  # pragma: allowlist secret
+)
+_DOF_BUCKETS = (
+    ("N_u", 9, True, "universal"),
+    ("UNSPENT", 1, False, "unspent"),
+    ("N_s", 3, True, "semantic"),
+    ("N_g", 4, True, "group_model"),
+    ("N_t", 3, True, "aggregation"),
+)
+_BLIND_ASSERTIONS = frozenset(
+    {
+        "A1_QUARANTINE_DISJOINT",
+        "A2_SCHEMA_BLIND",
+        "A3_CODE_BLIND",
+        "A4_RESOLUTION_COMPLETE",
+    }
+)
+_BLIND_FORBIDDEN_KEYS = frozenset(
+    {
+        "engine",
+        "layout",
+        "renderer",
+        "graph_name",
+        "positions_path",
+        "store",
+        "record_id",
+        "profile",
+        "blind_id",
+        "verdict",
+        "tie",
+        "abstain",
+        "confidence",
+        "reason",
+        "free_note",
+        "defects",
+    }
+)
+_BLIND_MANDATED_KEY_EXCEPTIONS = frozenset(
+    {"engine_identity_fields", "missing_blind_ids", "duplicate_blind_ids"}
+)
 
 
 class FitStartConditionError(RuntimeError):
@@ -68,6 +112,8 @@ class RealFitStartConditions:
         Whether DISCREPANCIES 56 has been resolved.
     graph_half_assignment_frozen : bool
         Whether DISCREPANCIES 57 has been resolved.
+    fitted_dof_declaration_verified : bool
+        Whether DOF-DECL(d/e) verified the external fitted-identity ledger.
     blind_map_attested : bool
         Whether the orchestration attested blind-map separation.
     """
@@ -76,6 +122,7 @@ class RealFitStartConditions:
     protocol_start_authorized: bool
     lapse_prior_frozen: bool
     graph_half_assignment_frozen: bool
+    fitted_dof_declaration_verified: bool
     blind_map_attested: bool
 
     @property
@@ -272,6 +319,317 @@ def _input_digest(pairs: Sequence[FitPair]) -> str:
         digest.update("\0".join(fields).encode("utf-8"))
         digest.update(b"\n")
     return digest.hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    """Return a streaming SHA-256 digest for one artifact.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        File to digest.
+
+    Returns
+    -------
+    str
+        Lowercase hexadecimal SHA-256 digest.
+    """
+
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _allocation_block_sha256(source_path: Path) -> str:
+    """Re-extract DOF-DECL's canonical A18 section-7 allocation digest.
+
+    Parameters
+    ----------
+    source_path : pathlib.Path
+        Live ``PREREG_V4_CALIBRATION.md`` supplied as frozen configuration.
+
+    Returns
+    -------
+    str
+        SHA-256 of the canonical allocation image from DOF-DECL(a-bis).
+
+    Raises
+    ------
+    FitStartConditionError
+        If the five allocation rows or their arithmetic cannot be parsed.
+    """
+
+    source = Path(source_path).read_text(encoding="utf-8")
+    rows = re.findall(
+        r"^\|\s*(`N_[usgt]`[^|]*|UNSPENT[^|]*)\|\s*(\d+)\s*\|([^|]*)\|",
+        source,
+        re.MULTILINE,
+    )
+    if len(rows) != 5:
+        raise FitStartConditionError("DOF declaration source must contain five allocation rows")
+    parsed = []
+    for label, cap, contents in rows:
+        match = re.match(r"`?(N_[usgt]|UNSPENT)`?", label.strip())
+        if match is None:
+            raise FitStartConditionError("DOF declaration source has an invalid bucket label")
+        parsed.append((match.group(1), int(cap), contents))
+    if tuple(row[0] for row in parsed) != tuple(bucket[0] for bucket in _DOF_BUCKETS):
+        raise FitStartConditionError("DOF declaration source bucket order differs from A18")
+    cap_match = re.search(r"allowed_fitted_dof = min\(20, (\d+)\) = \*\*(\d+)\*\*", source)
+    power_match = re.search(r"D_power = floor\(min\(([\d.]+), (\d+)\)\) = (\d+)", source)
+    controlled_match = re.search(r"`controlled_stimulus_fitted_dof = (\d+)`", source)
+    if cap_match is None or power_match is None or controlled_match is None:
+        raise FitStartConditionError("DOF declaration source arithmetic is incomplete")
+    inputs = {}
+    for name, pattern in (
+        ("i_floor", r"I_floor\s*=\s*([\d,]+)"),
+        ("j_min", r"J_min\s*=\s*([\d,]+)"),
+        ("u_ms", r"U_ms\s*=\s*([\d,]+)"),
+    ):
+        match = re.search(pattern, source)
+        if match is None:
+            raise FitStartConditionError(f"DOF declaration source lacks {name}")
+        inputs[name] = int(match.group(1).replace(",", ""))
+    lines = [
+        f"allowed_fitted_dof={int(cap_match.group(2))}",
+        f"d_power={int(power_match.group(3))}",
+        f"i_floor={inputs['i_floor']}",
+        f"j_min={inputs['j_min']}",
+        f"u_ms={inputs['u_ms']}",
+    ]
+    lines.extend(
+        f"bucket={name} cap={cap} contents={' '.join(contents.split())}"
+        for name, cap, contents in parsed
+    )
+    lines.append(f"controlled_stimulus_fitted_dof={int(controlled_match.group(1))}")
+    return hashlib.sha256(("\n".join(lines) + "\n").encode("utf-8")).hexdigest()
+
+
+def _verify_dof_declaration(
+    declaration_path: Path,
+    expected_sha256: str,
+    source_path: Path,
+    plan: FittingPlan,
+    weight_table: WeightTable,
+) -> Mapping[str, object]:
+    """Verify DOF-DECL content and reconcile it with the realized fit ledger.
+
+    Parameters
+    ----------
+    declaration_path : pathlib.Path
+        Frozen ``FITTED_DOF_DECLARATION.json``.
+    expected_sha256 : str
+        Digest frozen by the declaration's latest landed transition.
+    source_path : pathlib.Path
+        Live A18 preregistration source for the allocation-block check.
+    plan : FittingPlan
+        Realized fit plan.
+    weight_table : WeightTable
+        Complete shipped table whose fitted identities must match the declaration.
+
+    Returns
+    -------
+    mapping[str, object]
+        Parsed verified declaration for verbatim manifest publication.
+
+    Raises
+    ------
+    FitStartConditionError
+        If any digest, schema, completeness, allocation, or fit cross-check fails.
+    """
+
+    path = Path(declaration_path)
+    if _sha256_file(path) != expected_sha256:
+        raise FitStartConditionError("fitted DOF declaration digest does not match")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or raw.get("schema_version") != "v4-dof-decl-1":
+        raise FitStartConditionError("fitted DOF declaration schema is invalid")
+    if raw.get("source_allocation_sha256") != _allocation_block_sha256(source_path):
+        raise FitStartConditionError("fitted DOF declaration allocation source is stale")
+    if raw.get("assignment_complete") is not True or not raw.get("assignment_authority"):
+        raise FitStartConditionError("fitted DOF declaration assignment is incomplete")
+    buckets = raw.get("buckets")
+    if not isinstance(buckets, list) or len(buckets) != len(_DOF_BUCKETS):
+        raise FitStartConditionError("fitted DOF declaration bucket table is invalid")
+    declared_by_code: dict[str, set[str]] = {}
+    all_identities = []
+    for entry, (name, cap, assignable, code_name) in zip(buckets, _DOF_BUCKETS):
+        if not isinstance(entry, dict):
+            raise FitStartConditionError("fitted DOF declaration bucket row is invalid")
+        filled = entry.get("filled")
+        if (
+            entry.get("bucket") != name
+            or entry.get("cap") != cap
+            or entry.get("assignable") is not assignable
+            or not isinstance(filled, list)
+            or any(not isinstance(identity, str) or not identity for identity in filled)
+        ):
+            raise FitStartConditionError(f"fitted DOF declaration bucket {name} is invalid")
+        if len(filled) != (cap if assignable else 0):
+            raise FitStartConditionError(f"fitted DOF declaration bucket {name} is not filled")
+        declared_by_code[code_name] = set(filled)
+        all_identities.extend(filled)
+    if len(all_identities) != len(set(all_identities)):
+        raise FitStartConditionError("fitted identity appears in more than one DOF bucket")
+    if raw.get("sum") != 20 or raw.get("allowed_fitted_dof") != 20:
+        raise FitStartConditionError("fitted DOF declaration cap arithmetic differs from A18")
+    if raw.get("controlled_stimulus_fitted_dof") != 0:
+        raise FitStartConditionError("controlled-stimulus fitted DOF must remain zero")
+    if set(raw.get("prior_floor_facets", [])) != set(REQUIRED_PRIOR_FLOOR_FACETS):
+        raise FitStartConditionError("fitted DOF declaration prior-floor facets differ")
+
+    table_outer = {
+        entry.fitted_parameter
+        for entry in weight_table.entries
+        if entry.fitted_parameter is not None
+    }
+    plan_outer = {parameter.name for parameter in plan.weights}
+    if table_outer != plan_outer:
+        raise FitStartConditionError("fitting plan and WeightTable outer identities differ")
+    actual_by_code: dict[str, set[str]] = {name: set() for name in declared_by_code}
+    for identity, bucket in weight_table.fitted_parameter_buckets.items():
+        if bucket in actual_by_code:
+            actual_by_code[bucket].add(identity)
+    if actual_by_code != declared_by_code:
+        raise FitStartConditionError("realized fitted identities differ from the DOF declaration")
+    account = weight_table.dof_account
+    if (
+        not account.within_cap
+        or not account.within_buckets
+        or account.used != len(all_identities)
+        or weight_table.d_power != 20
+    ):
+        raise FitStartConditionError("realized fitted DOF accounting does not reconcile")
+    if set(weight_table.prior_floors) != set(REQUIRED_PRIOR_FLOOR_FACETS):
+        raise FitStartConditionError("realized WeightTable omits declared prior-floor facets")
+    if dict(weight_table.prior_floors) != dict(plan.prior_floors):
+        raise FitStartConditionError("realized plan changes a declared prior floor")
+    return MappingProxyType(raw)
+
+
+def _forbidden_attestation_key(key: str) -> bool:
+    """Return whether one attestation key violates BLIND-ATTEST(d).
+
+    Parameters
+    ----------
+    key : str
+        JSON object key from an attestation line.
+
+    Returns
+    -------
+    bool
+        True for record-content fields outside the constitutional whitelist.
+    """
+
+    if key in _BLIND_MANDATED_KEY_EXCEPTIONS:
+        return False
+    lowered = key.lower()
+    return any(token in lowered for token in _BLIND_FORBIDDEN_KEYS)
+
+
+def _attestation_whitelist_valid(value: Any) -> bool:
+    """Recursively enforce the amended BLIND-ATTEST content whitelist.
+
+    Parameters
+    ----------
+    value : Any
+        Parsed JSON value.
+
+    Returns
+    -------
+    bool
+        True only when no object key carries prohibited record content.
+    """
+
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str)
+            and not _forbidden_attestation_key(key)
+            and _attestation_whitelist_valid(child)
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return not value
+    return isinstance(value, (str, int, bool)) and not isinstance(value, float)
+
+
+def _verify_blind_attestation(
+    attestation_path: Path,
+    line_sha256: str,
+    expected_map_sha256: str,
+    fit_input_digest: str,
+) -> Mapping[str, object]:
+    """Verify one exact append-only attestation line without opening the map.
+
+    Parameters
+    ----------
+    attestation_path : pathlib.Path
+        Append-only JSONL attestation record.
+    line_sha256 : str
+        Orchestration-supplied digest of the exact attesting line bytes.
+    expected_map_sha256 : str
+        Frozen ADDENDUM-19 map digest.
+    fit_input_digest : str
+        Driver-recomputed digest of this delivered row set.
+
+    Returns
+    -------
+    mapping[str, object]
+        Parsed verified line for manifest and freeze-report publication.
+
+    Raises
+    ------
+    FitStartConditionError
+        If no exact line matches or any schema/content assertion is false.
+    """
+
+    matches = [
+        line
+        for line in Path(attestation_path).read_bytes().splitlines(keepends=True)
+        if hashlib.sha256(line).hexdigest() == line_sha256
+    ]
+    if len(matches) != 1:
+        raise FitStartConditionError("blind-map attestation line digest does not resolve once")
+    raw = json.loads(matches[0])
+    required = {
+        "attestation_version",
+        "date",
+        "attester",
+        "map_path",
+        "map_sha256",
+        "map_rows",
+        "map_authority",
+        "fit_input_digest",
+        "assertions",
+    }
+    if not isinstance(raw, dict) or set(raw) != required:
+        raise FitStartConditionError("blind-map attestation line schema fields differ")
+    if raw.get("attestation_version") != "v4-blind-attest-1":
+        raise FitStartConditionError("blind-map attestation schema version differs")
+    if not _attestation_whitelist_valid(raw):
+        raise FitStartConditionError("blind-map attestation violates the content whitelist")
+    assertions = raw.get("assertions")
+    if not isinstance(assertions, dict) or set(assertions) != _BLIND_ASSERTIONS:
+        raise FitStartConditionError("blind-map attestation assertion set differs")
+    for name, block in assertions.items():
+        if (
+            not isinstance(block, dict)
+            or set(block) != {"assertion", "result", "evidence"}
+            or block.get("assertion") != name
+            or block.get("result") is not True
+            or not isinstance(block.get("evidence"), dict)
+        ):
+            raise FitStartConditionError(f"blind-map attestation assertion is false: {name}")
+    a2_evidence = assertions["A2_SCHEMA_BLIND"]["evidence"]
+    if not isinstance(a2_evidence, dict) or a2_evidence.get("engine_identity_fields") != []:
+        raise FitStartConditionError("blind-map attestation row schema is not engine-blind")
+    if raw.get("fit_input_digest") != fit_input_digest:
+        raise FitStartConditionError("blind-map attestation input digest differs from this run")
+    if raw.get("map_sha256") != expected_map_sha256:
+        raise FitStartConditionError("blind-map attestation map digest differs from frozen config")
+    return MappingProxyType(raw)
 
 
 def _pairs_with_profile(

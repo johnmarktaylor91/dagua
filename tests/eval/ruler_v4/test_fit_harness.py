@@ -21,6 +21,7 @@ import torch
 
 import dagua.eval.ruler_v4.fit.access as access_module
 import dagua.eval.ruler_v4.fit.bank as bank_module
+import dagua.eval.ruler_v4.fit.driver as driver_module
 import dagua.eval.ruler_v4.fit.optimize as optimize_module
 import dagua.eval.ruler_v4.fit.uncertainty as uncertainty_module
 from dagua.eval.ruler_v4.fit import (
@@ -1908,6 +1909,165 @@ def test_side_swap_controls_are_audit_only_and_join_by_group(tmp_path: Path) -> 
     assert result.control_legs == result.resolved_legs == result.exact_reversals == 1
     assert result.order_effect == pytest.approx(0.0)
     assert result.likelihood_row_count == 0
+
+
+def test_blind_attestation_digest_input_and_whitelist_are_derived(tmp_path: Path) -> None:
+    """BLIND-ATTEST derives its gate from exact line bytes and rejects leaked keys."""
+
+    fit_digest = "a" * 64
+    map_digest = "b" * 64
+    assertions = {
+        "A1_QUARANTINE_DISJOINT": {
+            "assertion": "A1_QUARANTINE_DISJOINT",
+            "result": True,
+            "evidence": {
+                "quarantine_root": "p3/quarantine/blind-map",
+                "fit_input_path_count": 1,
+                "intersection_count": 0,
+            },
+        },
+        "A2_SCHEMA_BLIND": {
+            "assertion": "A2_SCHEMA_BLIND",
+            "result": True,
+            "evidence": {
+                "fitpair_field_count": 27,
+                "fitpair_field_list_sha256": "c" * 64,
+                "engine_identity_fields": [],
+            },
+        },
+        "A3_CODE_BLIND": {
+            "assertion": "A3_CODE_BLIND",
+            "result": True,
+            "evidence": {
+                "module_root": "dagua/eval/ruler_v4/fit",
+                "files_scanned": 10,
+                "matches": 0,
+                "scanner_sha256": "d" * 64,
+            },
+        },
+        "A4_RESOLUTION_COMPLETE": {
+            "assertion": "A4_RESOLUTION_COMPLETE",
+            "result": True,
+            "evidence": {
+                "base_pairs": 2,
+                "resolved": 2,
+                "distinct_pair_count": 2,
+                "missing_blind_ids": 0,
+                "duplicate_blind_ids": 0,
+                "graph_hash_mismatches": 0,
+            },
+        },
+    }
+    payload = {
+        "attestation_version": "v4-blind-attest-1",
+        "date": "2026-08-22",
+        "attester": "P5ACTIVATE",
+        "map_path": "p3/quarantine/blind-map/map.jsonl",
+        "map_sha256": map_digest,
+        "map_rows": 2,
+        "map_authority": "ADDENDUM-19",
+        "fit_input_digest": fit_digest,
+        "assertions": assertions,
+    }
+    line = f"{json.dumps(payload, sort_keys=True, separators=(',', ':'))}\n".encode()
+    path = tmp_path / "attest.jsonl"
+    path.write_bytes(line)
+    line_digest = hashlib.sha256(line).hexdigest()
+
+    verified = driver_module._verify_blind_attestation(
+        path,
+        line_digest,
+        map_digest,
+        fit_digest,
+    )
+
+    assert verified["fit_input_digest"] == fit_digest
+    with pytest.raises(FitStartConditionError, match="input digest"):
+        driver_module._verify_blind_attestation(path, line_digest, map_digest, "e" * 64)
+    leaked = dict(payload)
+    leaked["graph_name"] = "forbidden"
+    leaked_line = f"{json.dumps(leaked, sort_keys=True, separators=(',', ':'))}\n".encode()
+    path.write_bytes(leaked_line)
+    with pytest.raises(FitStartConditionError, match="schema fields"):
+        driver_module._verify_blind_attestation(
+            path,
+            hashlib.sha256(leaked_line).hexdigest(),
+            map_digest,
+            fit_digest,
+        )
+
+
+def test_dof_declaration_gate_is_complete_external_and_realized(tmp_path: Path) -> None:
+    """DOF-DECL verifies its digest, completeness, buckets, and realized identities."""
+
+    universal = [f"u-{index}" for index in range(9)]
+    semantic = [f"s-{index}" for index in range(3)]
+    group = ["mu", "tau_class", "tau_band", "lapse_rate"]
+    aggregation = ["blend_mixing_weight", "cvar_alpha", "smoothed_max_temperature"]
+    buckets = [
+        {"bucket": "N_u", "cap": 9, "assignable": True, "filled": universal},
+        {"bucket": "UNSPENT", "cap": 1, "assignable": False, "filled": []},
+        {"bucket": "N_s", "cap": 3, "assignable": True, "filled": semantic},
+        {"bucket": "N_g", "cap": 4, "assignable": True, "filled": group},
+        {"bucket": "N_t", "cap": 3, "assignable": True, "filled": aggregation},
+    ]
+    source_digest = "f" * 64
+    declaration = {
+        "schema_version": "v4-dof-decl-1",
+        "source_allocation_sha256": source_digest,
+        "assignment_complete": True,
+        "assignment_authority": "ADDENDUM-30",
+        "buckets": buckets,
+        "sum": 20,
+        "allowed_fitted_dof": 20,
+        "controlled_stimulus_fitted_dof": 0,
+        "prior_floor_facets": ["U12", "U13", "U34"],
+    }
+    declaration_path = tmp_path / "FITTED_DOF_DECLARATION.json"
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    expected_digest = hashlib.sha256(declaration_path.read_bytes()).hexdigest()
+    bucket_by_identity = {
+        **{identity: "universal" for identity in universal},
+        **{identity: "semantic" for identity in semantic},
+        **{identity: "group_model" for identity in group},
+        **{identity: "aggregation" for identity in aggregation},
+    }
+    weight_table = SimpleNamespace(
+        entries=tuple(
+            SimpleNamespace(fitted_parameter=identity) for identity in universal + semantic
+        ),
+        fitted_parameter_buckets=bucket_by_identity,
+        dof_account=SimpleNamespace(within_cap=True, within_buckets=True, used=19),
+        d_power=20,
+        prior_floors={"U12": 0.5, "U13": 0.5, "U34": 0.5},
+    )
+    plan = SimpleNamespace(
+        weights=tuple(SimpleNamespace(name=identity) for identity in universal + semantic),
+        prior_floors=weight_table.prior_floors,
+    )
+    with patch.object(driver_module, "_allocation_block_sha256", return_value=source_digest):
+        verified = driver_module._verify_dof_declaration(
+            declaration_path,
+            expected_digest,
+            tmp_path / "PREREG.md",
+            plan,
+            weight_table,
+        )
+
+    assert verified["assignment_complete"] is True
+    declaration["assignment_complete"] = False
+    declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
+    with (
+        patch.object(driver_module, "_allocation_block_sha256", return_value=source_digest),
+        pytest.raises(FitStartConditionError, match="incomplete"),
+    ):
+        driver_module._verify_dof_declaration(
+            declaration_path,
+            hashlib.sha256(declaration_path.read_bytes()).hexdigest(),
+            tmp_path / "PREREG.md",
+            plan,
+            weight_table,
+        )
 
 
 def test_jnd_replication_accepts_realized_same_order_side_bits(tmp_path: Path) -> None:
