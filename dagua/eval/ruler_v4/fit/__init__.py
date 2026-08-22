@@ -14,6 +14,7 @@ from dagua.eval.ruler_v4.fit.bank import (
     JudgmentMetadata,
     JudgmentRow,
     ScheduledPair,
+    SideSwapAuditRow,
     SplitPurpose,
     load_bank,
     load_schedule,
@@ -23,11 +24,13 @@ from dagua.eval.ruler_v4.fit.diagnostics import (
     EvaluationMetrics,
     JNDCellCalibration,
     OrderedCalibrationBin,
+    SideSwapAuditResult,
     era_robustness,
     evaluate_objective,
     facet_weight_paths,
     jnd_band_calibration,
     ordered_response_calibration,
+    side_swap_audit,
 )
 from dagua.eval.ruler_v4.fit.driver import (
     FitConvergenceError,
@@ -132,6 +135,8 @@ __all__ = [
     "SceneRescorer",
     "SceneResolver",
     "ScheduledPair",
+    "SideSwapAuditResult",
+    "SideSwapAuditRow",
     "SplitPurpose",
     "SplitHalfStability",
     "TestHoldoutConsumedError",
@@ -156,6 +161,7 @@ __all__ = [
     "partition_fit_ord_lines",
     "profile_jnd_block",
     "ordered_response_calibration",
+    "side_swap_audit",
     "synthetic_fit_pair",
     "run_freeze1_fit",
 ]

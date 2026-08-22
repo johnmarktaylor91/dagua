@@ -172,6 +172,50 @@ class JudgmentRow:
 
 
 @dataclass(frozen=True)
+class SideSwapAuditRow:
+    """Carry one exchanged-order control leg outside every likelihood type.
+
+    Parameters
+    ----------
+    replicate_group_id, base_pair_id, session_id : str
+        Frozen join and presentation identities.
+    blind_id_a, blind_id_b : str
+        Schedule-owned displayed order for the control leg.
+    graded_verdict : int
+        A13 response in the control leg's displayed orientation.
+    """
+
+    replicate_group_id: str
+    base_pair_id: str
+    session_id: str
+    blind_id_a: str
+    blind_id_b: str
+    graded_verdict: int
+
+    def __post_init__(self) -> None:
+        """Validate the audit-only row without widening fitting schemas.
+
+        Raises
+        ------
+        ValueError
+            If an identity is empty or the verdict is outside ``[-3, 3]``.
+        """
+
+        if not all(
+            (
+                self.replicate_group_id,
+                self.base_pair_id,
+                self.session_id,
+                self.blind_id_a,
+                self.blind_id_b,
+            )
+        ):
+            raise ValueError("side-swap audit rows require complete join identities")
+        if self.graded_verdict not in range(-3, 4):
+            raise ValueError("side-swap audit verdict must lie in [-3, 3]")
+
+
+@dataclass(frozen=True)
 class JudgmentMetadata:
     """Expose only LOOK-LEDGER-whitelisted judgment metadata.
 
@@ -301,6 +345,8 @@ class BankLoadReport:
         Rows without an exact schedule join.
     excluded_era : int
         Rows removed by explicit era or instrument filters.
+    side_swap_audit_rows : int
+        Exchanged-order control legs retained only for FIT-ORD(b)'s audit.
     """
 
     files: int
@@ -311,6 +357,7 @@ class BankLoadReport:
     excluded_controls: int
     excluded_unscheduled: int
     excluded_era: int
+    side_swap_audit_rows: int
 
 
 @dataclass(frozen=True)
@@ -327,6 +374,8 @@ class JudgmentBank:
         Opaque uncapped labels whose reads are nevertheless ledgered.
     _test_refs : tuple[_SealedJudgmentRef, ...]
         Stable opaque TEST source references without verdict or tie fields.
+    _side_swap_audit_rows : tuple[SideSwapAuditRow, ...]
+        Train-role exchanged-order controls excluded from likelihood data.
     role_hash : str
         Frozen A15 role-assignment identity binding the TEST access record.
     expected_test_base_pairs : mapping[str, tuple[str, ...]]
@@ -347,6 +396,7 @@ class JudgmentBank:
     _reusable_refs: Tuple[_SealedJudgmentRef, ...]
     _diagnostic_refs: Tuple[_SealedJudgmentRef, ...]
     _test_refs: Tuple[_SealedJudgmentRef, ...]
+    _side_swap_audit_rows: Tuple[SideSwapAuditRow, ...]
     role_hash: str
     expected_test_base_pairs: Mapping[str, Tuple[str, ...]]
     expected_test_graphs: Mapping[str, Tuple[str, ...]]
@@ -375,6 +425,18 @@ class JudgmentBank:
         """
 
         return self._rows
+
+    @property
+    def side_swap_audit_rows(self) -> Tuple[SideSwapAuditRow, ...]:
+        """Return exchanged-order controls in their audit-only row type.
+
+        Returns
+        -------
+        tuple[SideSwapAuditRow, ...]
+            Stable audit rows that cannot enter the FIT-ORD objective.
+        """
+
+        return self._side_swap_audit_rows
 
     def metadata(
         self,
@@ -912,6 +974,7 @@ def load_bank(
     reusable_refs = []
     diagnostic_refs = []
     test_refs = []
+    side_swap_audit_rows = []
     scheduled_matches = 0
     counts = {
         "raw_rows": 0,
@@ -950,11 +1013,6 @@ def load_bank(
                 raise ValueError(f"bank/schedule identity mismatch: {key}")
             control_type = raw.get("control_type", scheduled.control_type)
             budget_line = str(raw.get("budget_line", scheduled.budget_line))
-            if control_type is not None or budget_line in _NON_FITTING_BUDGET_LINES:
-                counts["excluded_controls"] += 1
-                continue
-            row_era = _era(raw.get("judge_id", ""))
-            row_instrument = str(raw.get("instrument_hash", ""))
             graph = graph_map.get(scheduled.graph_hash)
             if graph is None:
                 raise ValueError(f"graph absent from frozen A15 map: {scheduled.graph_hash}")
@@ -962,6 +1020,26 @@ def load_bank(
             purpose = _ROLE_PURPOSE.get(role)
             if purpose is None:
                 raise ValueError(f"unknown frozen A15 role: {role!r}")
+            if control_type is not None or budget_line in _NON_FITTING_BUDGET_LINES:
+                if control_type == "side-swap-repeat" and purpose is SplitPurpose.FIT:
+                    if raw.get("malformed") is not True and raw.get("abstain") is not True:
+                        verdict = int(raw.get("verdict", 0))
+                        if verdict not in range(-3, 4):
+                            raise ValueError(f"verdict outside A13 range: {verdict}")
+                        side_swap_audit_rows.append(
+                            SideSwapAuditRow(
+                                replicate_group_id=scheduled.replicate_group_id,
+                                base_pair_id=scheduled.base_pair_id,
+                                session_id=key[0],
+                                blind_id_a=scheduled.blind_id_a,
+                                blind_id_b=scheduled.blind_id_b,
+                                graded_verdict=verdict,
+                            )
+                        )
+                counts["excluded_controls"] += 1
+                continue
+            row_era = _era(raw.get("judge_id", ""))
+            row_instrument = str(raw.get("instrument_hash", ""))
             if (era is not None and row_era != era) or (
                 instrument_hash is not None and row_instrument != instrument_hash
             ):
@@ -1057,6 +1135,7 @@ def load_bank(
         excluded_controls=counts["excluded_controls"],
         excluded_unscheduled=counts["excluded_unscheduled"],
         excluded_era=counts["excluded_era"],
+        side_swap_audit_rows=len(side_swap_audit_rows),
     )
 
     def ordered_refs(refs: list[_SealedJudgmentRef]) -> Tuple[_SealedJudgmentRef, ...]:
@@ -1090,6 +1169,12 @@ def load_bank(
         _reusable_refs=ordered_refs(reusable_refs),
         _diagnostic_refs=ordered_refs(diagnostic_refs),
         _test_refs=ordered_test_refs,
+        _side_swap_audit_rows=tuple(
+            sorted(
+                side_swap_audit_rows,
+                key=lambda row: (row.replicate_group_id, row.session_id, row.base_pair_id),
+            )
+        ),
         role_hash=role_hash,
         expected_test_base_pairs=expected_test_base_pairs,
         expected_test_graphs=expected_test_graphs,

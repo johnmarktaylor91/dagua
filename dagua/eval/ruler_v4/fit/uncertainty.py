@@ -1181,7 +1181,7 @@ def _profile_marginal_loss(
 
 
 def _validate_replication_rows(rows: Tuple[FitPair, ...]) -> Mapping[Tuple[str, str], int]:
-    """Validate anti-farming provenance and count distinct qualifying pairs.
+    """Apply REPL-SWAP(b)'s order-insensitive W-13 qualification.
 
     Parameters
     ----------
@@ -1196,8 +1196,8 @@ def _validate_replication_rows(rows: Tuple[FitPair, ...]) -> Mapping[Tuple[str, 
     Raises
     ------
     ValueError
-        If a row is non-replication, non-train, cross-stratum, or lacks a true
-        cross-session presentation of one drawing pair.
+        If a row is non-train, cross-stratum, or lacks two cross-session
+        presentations of one unordered drawing set and base-pair identity.
     """
 
     if not rows:
@@ -1221,7 +1221,9 @@ def _validate_replication_rows(rows: Tuple[FitPair, ...]) -> Mapping[Tuple[str, 
                 f"JND-HET replicate group {replicate_group_id} lacks cross-session replication"
             )
         if len(drawing_sets) != 1:
-            raise ValueError(f"JND-HET replicate group {replicate_group_id} crosses drawing pairs")
+            raise ValueError(
+                f"JND-HET replicate group {replicate_group_id} crosses unordered drawing sets"
+            )
         if len(base_pair_ids) != 1:
             raise ValueError(f"JND-HET replicate group {replicate_group_id} crosses base pairs")
         if len(cells) != 1:
