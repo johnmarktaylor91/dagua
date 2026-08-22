@@ -662,3 +662,16 @@ the production port; none of the entries below overrides a contract.
     the campaign ledger, so there was nothing to annul. `run_freeze1_fit` refuses the
     campaign root and every descendant; `evaluate_h_jnd_branch` requires an explicit
     ledger, so neither surface can silently construct the campaign ledger.
+59. The campaign runner has no concurrency guard: nothing prevents a second
+    `pilot_runner.py` instance from targeting the same `--run-dir`, and the
+    2026-08-21 MAINCAMP incident (see p3/stage/maincamp/STATERESTORE_FORENSICS.md
+    and the REMEDIATE addendum) shows the cost -- duplicate frozen-chain judge
+    dispatches, last-writer-wins artifact scatter, three shared-log byte
+    collisions, one contaminated verdict. The driver docstring's note-4 warning
+    (bare `pgrep -f pilot_runner` false-positives) is a detection caveat, not a
+    guard. OWNER (tooling): add a runner lockfile -- `flock` on RUN_STATE.json
+    (or a sibling `.lock`) held for the runner's whole lifetime, acquired
+    non-blocking at startup, with a clear "another runner holds the lock" abort;
+    relaunch/salvage tooling must fail closed on lock contention rather than
+    trusting process-table heuristics. Docketed by the REMEDIATE lane
+    (owner ruling R5, 2026-08-22).
