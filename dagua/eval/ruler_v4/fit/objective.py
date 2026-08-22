@@ -28,6 +28,45 @@ _FROZEN_LAPSE_MODE = 1.0 / 109.0
 
 
 @dataclass(frozen=True)
+class UnevaluableComponent:
+    """Publish one split-half component that cannot be evaluated.
+
+    Parameters
+    ----------
+    component : str
+        Fitted variance-component or outer-weight identity.
+    reason : str
+        Stable explanation of the structural or numerical half defect.
+    """
+
+    component: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        """Require a named component and reason.
+
+        Raises
+        ------
+        ValueError
+            If either publication field is empty.
+        """
+
+        if not self.component or not self.reason:
+            raise ValueError("UNEVALUABLE publications require a component and reason")
+
+    def __str__(self) -> str:
+        """Return the frozen human-readable publication form.
+
+        Returns
+        -------
+        str
+            ``UNEVALUABLE(<component>, <reason>)``.
+        """
+
+        return f"UNEVALUABLE({self.component}, {self.reason})"
+
+
+@dataclass(frozen=True)
 class WeightParameter:
     """Declare one independently adjustable outer-weight scalar.
 
