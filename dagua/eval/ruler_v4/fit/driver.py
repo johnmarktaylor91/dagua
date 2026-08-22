@@ -16,7 +16,12 @@ import numpy as np
 import torch
 
 from dagua.eval.ruler_v4.fit.access import AccessLedger
-from dagua.eval.ruler_v4.fit.bank import _FROZEN_A15_ROLE_HASH, SplitPurpose
+from dagua.eval.ruler_v4.fit.bank import (
+    _FROZEN_A15_ROLE_HASH,
+    SideSwapAuditRow,
+    SplitPurpose,
+)
+from dagua.eval.ruler_v4.fit.diagnostics import SideSwapAuditResult, side_swap_audit
 from dagua.eval.ruler_v4.fit.objective import (
     FitPair,
     FittingPlan,
@@ -31,13 +36,15 @@ from dagua.eval.ruler_v4.fit.optimize import (
     apply_outer_weight_split_half,
 )
 from dagua.eval.ruler_v4.fit.uncertainty import (
+    HalfAssignment,
     HJNDBranchResult,
     JNDFitConfig,
     JNDHeterogeneityFit,
     JNDProfileFit,
-    _synthetic_half_key,
+    _half_key,
     evaluate_h_jnd_branch,
     fit_jnd_heterogeneity,
+    load_half_assignment,
     profile_jnd_block,
 )
 from dagua.eval.ruler_v4.weight_table import REQUIRED_PRIOR_FLOOR_FACETS, WeightTable
@@ -150,11 +157,17 @@ class FitDriverConfig:
         Frozen convergence tolerance on the joint objective.
     maximum_iterations : int
         Fail-closed fixed-point iteration budget.
+    protocol_addendum : int
+        Landed addendum number deriving the lapse-prior gate.
+    expected_map_sha256 : str
+        Frozen ADDENDUM-19 map digest checked without opening the map.
     """
 
     seed: int = field(default=20260811, init=False)
     joint_tolerance: float = field(default=_JOINT_TOLERANCE, init=False)
     maximum_iterations: int = field(default=_MAX_FIXED_POINT_ITERATIONS, init=False)
+    protocol_addendum: int = field(default=_LANDED_PRIOR_ADDENDUM, init=False)
+    expected_map_sha256: str = field(default=_EXPECTED_MAP_SHA256, init=False)
 
 
 @dataclass(frozen=True)
@@ -202,7 +215,7 @@ class FitDriverIteration:
 
 @dataclass(frozen=True)
 class Freeze1FitResult:
-    """Publish the complete guarded FREEZE-1 synthetic run.
+    """Publish the complete guarded FREEZE-1 run.
 
     Parameters
     ----------
@@ -216,6 +229,12 @@ class Freeze1FitResult:
         Final W-13 point and uncertainty publications.
     h_jnd_branch : HJNDBranchResult
         Once-only ledgered H-JND branch decision.
+    side_swap : SideSwapAuditResult or None
+        FIT-ORD(b) audit for real runs; absent only for synthetic fixtures.
+    start_conditions : RealFitStartConditions
+        Six derived gates used for this run.
+    half_assignment_digest : str or None
+        Frozen real partition digest, absent only for synthetic fixtures.
     trajectory : tuple[FitDriverIteration, ...]
         Frozen joint-objective fixed-point trajectory.
     access_budget_before, access_budget_after : mapping[str, int]
@@ -229,6 +248,9 @@ class Freeze1FitResult:
     lapse_rate: float
     jnd_fit: JNDHeterogeneityFit
     h_jnd_branch: HJNDBranchResult
+    side_swap: Optional[SideSwapAuditResult]
+    start_conditions: RealFitStartConditions
+    half_assignment_digest: Optional[str]
     trajectory: Tuple[FitDriverIteration, ...]
     access_budget_before: Mapping[str, int]
     access_budget_after: Mapping[str, int]
@@ -829,18 +851,12 @@ def _require_real_start_conditions(
     ------
     FitStartConditionError
         If any required start condition is absent.
-    NotImplementedError
-        After gates pass because real adapters remain deliberately inactive.
     """
 
     if conditions is None or not conditions.ready:
         raise FitStartConditionError(
             "real FREEZE-1 requires campaign completion and every protocol start condition"
         )
-    raise NotImplementedError(
-        "real FREEZE-1 activation remains disabled until the frozen lapse prior and "
-        "graph-half artifacts replace the synthetic-only implementations"
-    )
 
 
 def run_freeze1_fit(
@@ -851,8 +867,16 @@ def run_freeze1_fit(
     ledger_root: Path,
     config: Optional[FitDriverConfig] = None,
     real_start_conditions: Optional[RealFitStartConditions] = None,
+    family_map_path: Optional[Path] = None,
+    dof_declaration_path: Optional[Path] = None,
+    dof_declaration_sha256: Optional[str] = None,
+    dof_source_path: Optional[Path] = None,
+    weight_table: Optional[WeightTable] = None,
+    blind_attestation_path: Optional[Path] = None,
+    blind_attestation_sha256: Optional[str] = None,
+    side_swap_audit_rows: Sequence[SideSwapAuditRow] = (),
 ) -> Freeze1FitResult:
-    """Run guarded synthetic FREEZE-1 fitting and write complete artifacts.
+    """Run guarded FREEZE-1 fitting and write complete artifacts.
 
     Parameters
     ----------
@@ -865,11 +889,26 @@ def run_freeze1_fit(
     run_dir : pathlib.Path
         New, non-existing output directory.
     ledger_root : pathlib.Path
-        Explicit non-campaign ledger root for this synthetic-only run.
+        Explicit ledger root; campaign state is legal only for a real run.
     config : FitDriverConfig or None
         Frozen driver configuration; ``None`` constructs the only valid values.
     real_start_conditions : RealFitStartConditions or None
-        Required owner gates for real data. Real activation remains disabled.
+        Campaign-complete and owner-authorization inputs. The remaining four
+        fields are recomputed from frozen artifacts rather than trusted.
+    family_map_path : pathlib.Path or None
+        Frozen A15 family map required by real ``v4-half-1`` splitting.
+    dof_declaration_path, dof_source_path : pathlib.Path or None
+        Frozen declaration and live A18 allocation source required by DOF-DECL.
+    dof_declaration_sha256 : str or None
+        Latest landed declaration digest.
+    weight_table : WeightTable or None
+        Complete realized table for the external fitted-identity cross-check.
+    blind_attestation_path : pathlib.Path or None
+        Append-only attestation record containing the run's exact line.
+    blind_attestation_sha256 : str or None
+        Run parameter digest of the exact attesting line bytes.
+    side_swap_audit_rows : sequence[SideSwapAuditRow]
+        Audit-only exchanged-order controls, never likelihood rows.
 
     Returns
     -------
@@ -881,7 +920,7 @@ def run_freeze1_fit(
     FitStartConditionError
         If real rows arrive before campaign and protocol start gates.
     FitConvergenceError
-        If the synthetic profiled fixed point misses the frozen tolerance.
+        If the profiled fixed point misses the frozen tolerance.
     FileExistsError
         If ``run_dir`` already exists.
     ValueError
@@ -894,27 +933,93 @@ def run_freeze1_fit(
         raise ValueError("FREEZE-1 driver requires nonempty train rows")
     if any(pair.purpose is not SplitPurpose.FIT for pair in rows):
         raise ValueError("FREEZE-1 driver accepts train-role rows only")
-    if any(not pair.synthetic for pair in rows):
-        _require_real_start_conditions(real_start_conditions)
     driver_config = FitDriverConfig() if config is None else config
+    synthetic_only = all(pair.synthetic for pair in rows)
+    if not synthetic_only and any(pair.synthetic for pair in rows):
+        raise ValueError("FREEZE-1 cannot mix synthetic and real rows")
+    input_digest = _input_digest(rows)
+    half_assignment: Optional[HalfAssignment] = None
+    dof_declaration: Optional[Mapping[str, object]] = None
+    blind_attestation: Optional[Mapping[str, object]] = None
+    side_swap_result: Optional[SideSwapAuditResult] = None
+    start_conditions = RealFitStartConditions(False, False, False, False, False, False)
+    if not synthetic_only:
+        if (
+            real_start_conditions is None
+            or not real_start_conditions.campaign_complete
+            or not real_start_conditions.protocol_start_authorized
+        ):
+            _require_real_start_conditions(real_start_conditions)
+        required = {
+            "family_map_path": family_map_path,
+            "dof_declaration_path": dof_declaration_path,
+            "dof_declaration_sha256": dof_declaration_sha256,
+            "dof_source_path": dof_source_path,
+            "weight_table": weight_table,
+            "blind_attestation_path": blind_attestation_path,
+            "blind_attestation_sha256": blind_attestation_sha256,
+        }
+        missing = sorted(name for name, value in required.items() if value is None)
+        if missing:
+            raise FitStartConditionError(f"real FREEZE-1 gate artifacts are missing: {missing}")
+        assert family_map_path is not None
+        assert dof_declaration_path is not None
+        assert dof_declaration_sha256 is not None
+        assert dof_source_path is not None
+        assert weight_table is not None
+        assert blind_attestation_path is not None
+        assert blind_attestation_sha256 is not None
+        try:
+            half_assignment = load_half_assignment(family_map_path)
+            dof_declaration = _verify_dof_declaration(
+                dof_declaration_path,
+                dof_declaration_sha256,
+                dof_source_path,
+                plan,
+                weight_table,
+            )
+            blind_attestation = _verify_blind_attestation(
+                blind_attestation_path,
+                blind_attestation_sha256,
+                driver_config.expected_map_sha256,
+                input_digest,
+            )
+            side_swap_result = side_swap_audit(rows, side_swap_audit_rows)
+        except (OSError, ValueError) as error:
+            raise FitStartConditionError(f"real FREEZE-1 artifact gate failed: {error}") from error
+        start_conditions = RealFitStartConditions(
+            campaign_complete=real_start_conditions.campaign_complete,
+            protocol_start_authorized=real_start_conditions.protocol_start_authorized,
+            lapse_prior_frozen=driver_config.protocol_addendum >= _LANDED_PRIOR_ADDENDUM,
+            graph_half_assignment_frozen=True,
+            fitted_dof_declaration_verified=True,
+            blind_map_attested=True,
+        )
+        _require_real_start_conditions(start_conditions)
     lines = partition_fit_ord_lines(rows)
     output = Path(run_dir)
     ledger = AccessLedger(ledger_root)
-    if ledger.is_campaign_root:
+    if synthetic_only and ledger.is_campaign_root:
         raise ValueError("synthetic FREEZE-1 cannot target the campaign ledger root")
     output.mkdir(parents=False, exist_ok=False)
     budget_before = ledger.budget_usage(_FROZEN_A15_ROLE_HASH)
     _atomic_write_json(
         output / "manifest.json",
         {
-            "input_digest": _input_digest(rows),
+            "input_digest": input_digest,
             "row_count": len(rows),
             "replication_row_count": len(lines.replication),
             "role_hash": _FROZEN_A15_ROLE_HASH,
             "seed": driver_config.seed,
             "joint_tolerance": driver_config.joint_tolerance,
             "maximum_iterations": driver_config.maximum_iterations,
-            "synthetic_only": True,
+            "synthetic_only": synthetic_only,
+            "start_conditions": asdict(start_conditions),
+            "half_assignment_digest": (
+                None if half_assignment is None else half_assignment.table_sha256
+            ),
+            "dof_declaration": None if dof_declaration is None else dict(dof_declaration),
+            "blind_attestation": None if blind_attestation is None else dict(blind_attestation),
             "access_budget_before": dict(budget_before),
         },
     )
@@ -932,6 +1037,7 @@ def run_freeze1_fit(
                 current_weights,
                 jnd_config,
                 previous_profile=profile,
+                half_assignment=half_assignment,
             )
             profiled_train = _pairs_with_profile(lines.train, profile, current_lapse)
             weight_fit, current_lapse, train_mean = _fit_weight_lapse_block(
@@ -980,6 +1086,7 @@ def run_freeze1_fit(
             plan,
             current_weights,
             jnd_config,
+            half_assignment=half_assignment,
         )
         final_train = tuple(
             replace(
@@ -992,11 +1099,11 @@ def run_freeze1_fit(
             for pair in lines.train
         )
         halves = tuple(
-            tuple(pair for pair in final_train if _synthetic_half_key(pair.graph_hash) == half)
+            tuple(pair for pair in final_train if _half_key(pair, half_assignment) == half)
             for half in (0, 1)
         )
         if any(not half for half in halves):
-            raise ValueError("synthetic graph split leaves an empty outer-weight half")
+            raise ValueError("v4-half-1 graph split leaves an empty outer-weight half")
         half_one, _, _ = _fit_weight_lapse_block(halves[0], plan, driver_config)
         half_two, _, _ = _fit_weight_lapse_block(halves[1], plan, driver_config)
         outer_stability = apply_outer_weight_split_half(weight_fit, half_one, half_two, plan)
@@ -1004,7 +1111,7 @@ def run_freeze1_fit(
             raise ValueError(
                 f"rotation-envelope guard blocks classes: {list(jnd_fit.uncalibrated_classes)}"
             )
-        branch = evaluate_h_jnd_branch(jnd_fit, ledger=ledger, synthetic_only=True)
+        branch = evaluate_h_jnd_branch(jnd_fit, ledger=ledger, synthetic_only=synthetic_only)
         budget_after = ledger.budget_usage(_FROZEN_A15_ROLE_HASH)
         trajectory_rows = [
             {
@@ -1054,6 +1161,11 @@ def run_freeze1_fit(
                     "c06_partial_declaration": jnd_fit.c06_partial_declaration,
                 },
                 "h_jnd_branch": asdict(branch),
+                "side_swap_audit": (None if side_swap_result is None else asdict(side_swap_result)),
+                "start_conditions": asdict(start_conditions),
+                "half_assignment_digest": (
+                    None if half_assignment is None else half_assignment.table_sha256
+                ),
                 "access_budget_after": dict(budget_after),
                 "ledger_annulments": list(ledger.annulment_lines(_FROZEN_A15_ROLE_HASH)),
                 "ledger_defects": list(ledger.ledger_defects(_FROZEN_A15_ROLE_HASH)),
@@ -1068,6 +1180,11 @@ def run_freeze1_fit(
             lapse_rate=current_lapse,
             jnd_fit=jnd_fit,
             h_jnd_branch=branch,
+            side_swap=side_swap_result,
+            start_conditions=start_conditions,
+            half_assignment_digest=(
+                None if half_assignment is None else half_assignment.table_sha256
+            ),
             trajectory=tuple(trajectory),
             access_budget_before=budget_before,
             access_budget_after=budget_after,
