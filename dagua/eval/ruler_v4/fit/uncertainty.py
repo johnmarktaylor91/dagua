@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import DefaultDict, Mapping, Optional, Sequence, Tuple
+from typing import DefaultDict, FrozenSet, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -39,8 +39,7 @@ _FROZEN_HALF_ASSIGNMENT_SHA256 = (
     "4041736f049333ca031409e8201b98343b28afb93dd521382762f8072fd69b88"  # pragma: allowlist secret
 )
 _HALF_BANDS = ("le30", "31-100", "101-300", "301-1000", "1001-2000", "gt2000")
-_C06_GRANTED_PARAMETERS = 2
-_C06_NAMED_PARAMETERS = frozenset({"mu", "tau_class", "tau_band"})
+_DEFAULT_GROUP_MODEL_IDENTITIES = frozenset({"mu", "tau_class", "tau_band", "lapse_rate"})
 _TAU_BOUNDARY_LOG_ATOL = 1.0e-7
 
 
@@ -453,6 +452,8 @@ class JNDHeterogeneityFit:
         Per-component smoother traces paired with realized-level ceilings.
     n_jnd : int
         Free JND-block parameter count compared with the granted allocation.
+    n_jnd_membership : tuple[str, ...]
+        Declared ``N_g`` variance coordinates that remain free after responses.
     variance_boundary_disclosures : tuple[VarianceBoundaryDisclosure, ...]
         Components fitted at the frozen variance upper bound.
     shrink_actions : tuple[str, ...]
@@ -498,6 +499,7 @@ class JNDHeterogeneityFit:
     effective_dof: float
     c06_component_audit: Mapping[str, C06ComponentAudit]
     n_jnd: int
+    n_jnd_membership: Tuple[str, ...]
     variance_boundary_disclosures: Tuple[VarianceBoundaryDisclosure, ...]
     shrink_actions: Tuple[str, ...]
     c06_shrink_actions: Tuple[str, ...]
@@ -581,6 +583,8 @@ class JNDProfileFit:
         Per-component smoother traces paired with realized-level ceilings.
     n_jnd : int
         Free JND-block parameter count compared with the granted allocation.
+    n_jnd_membership : tuple[str, ...]
+        Declared ``N_g`` variance coordinates that remain free after responses.
     variance_boundary_disclosures : tuple[VarianceBoundaryDisclosure, ...]
         Components fitted at the frozen variance upper bound.
     split_half_frozen, c06_shrink_actions : tuple[str, ...]
@@ -604,6 +608,7 @@ class JNDProfileFit:
     effective_dof: float
     c06_component_audit: Mapping[str, C06ComponentAudit]
     n_jnd: int
+    n_jnd_membership: Tuple[str, ...]
     variance_boundary_disclosures: Tuple[VarianceBoundaryDisclosure, ...]
     split_half_frozen: Tuple[str, ...]
     split_half_unevaluable: Tuple[UnevaluableComponent, ...]
@@ -904,6 +909,7 @@ def _apply_c06_shrink(
     eligible_bands: frozenset[str],
     fitted: _MetaFit,
     already_frozen: frozenset[str],
+    declared_group_parameters: FrozenSet[str],
 ) -> Tuple[_MetaFit, Tuple[str, ...], bool]:
     """Audit free JND coordinates and freeze implementation-drift offenders.
 
@@ -917,6 +923,8 @@ def _apply_c06_shrink(
         Fit after any split-half stability response.
     already_frozen : frozenset[str]
         Components already frozen by the split-half gate.
+    declared_group_parameters : frozenset[str]
+        Verified ``N_g.filled`` membership governing the C-06 audit.
 
     Returns
     -------
@@ -931,11 +939,12 @@ def _apply_c06_shrink(
     frozen = set(already_frozen)
     actions = []
     partial_declaration = False
-    while _c06_parameter_count(current) > _C06_GRANTED_PARAMETERS:
+    declared_variance = declared_group_parameters - {"mu", "lapse_rate"}
+    while set(current.active_components) - declared_variance:
         contributions = {
             component: _c06_trace_contribution(current, component)
             for component in current.active_components
-            if component not in frozen and component not in _C06_NAMED_PARAMETERS
+            if component not in frozen and component not in declared_variance
         }
         if not contributions:
             partial_declaration = True
@@ -1012,22 +1021,42 @@ def _c06_offender_frozen_at_null(fitted: _MetaFit, component: str) -> bool:
     )
 
 
-def _c06_parameter_count(fitted: _MetaFit) -> int:
-    """Count free JND-block coordinates under the conservative ledger rule.
+def _declared_n_jnd(
+    fitted: _MetaFit,
+    declared_group_parameters: FrozenSet[str],
+    frozen_components: FrozenSet[str],
+) -> Tuple[str, ...]:
+    """Audit the realized JND vector against verified ``N_g`` membership.
 
     Parameters
     ----------
     fitted : _MetaFit
-        Marginal-likelihood fit whose vector contains ``mu`` followed by all
-        free JND-block coordinates.
+        Post-response marginal-likelihood fit.
+    declared_group_parameters : frozenset[str]
+        Verified ``N_g.filled`` identities.
+    frozen_components : frozenset[str]
+        Components frozen by W-13-EST(e) or C-06.
 
     Returns
     -------
-    int
-        Free coordinate count excluding the base JND location ``mu``.
+    tuple[str, ...]
+        Declared free variance-coordinate membership counted by ``N_JND``.
+
+    Raises
+    ------
+    ValueError
+        If the realized JND vector differs from declared membership after the
+        named frozen responses.
     """
 
-    return max(int(fitted.parameter_vector.size) - 1, 0)
+    expected = (declared_group_parameters - {"lapse_rate"}) - frozen_components
+    realized = frozenset({"mu", *fitted.active_components})
+    if realized != expected:
+        raise ValueError(
+            "realized JND coordinates differ from declared N_g membership; "
+            f"expected={sorted(expected)}, realized={sorted(realized)}"
+        )
+    return tuple(sorted(expected - {"mu"}))
 
 
 def _c06_component_publication(
@@ -1938,6 +1967,7 @@ def profile_jnd_block(
     config: JNDFitConfig,
     previous_profile: Optional[JNDProfileFit] = None,
     half_assignment: Optional[HalfAssignment] = None,
+    declared_group_parameters: FrozenSet[str] = _DEFAULT_GROUP_MODEL_IDENTITIES,
 ) -> JNDProfileFit:
     """Profile the post-guard JND block without final bootstrap publications.
 
@@ -1955,6 +1985,9 @@ def profile_jnd_block(
         Prior fixed-point profile used only to account the block decrease.
     half_assignment : HalfAssignment or None
         Verified ``v4-half-1`` table for real rows.
+    declared_group_parameters : frozenset[str]
+        Verified ``N_g.filled`` membership; the frozen default is for synthetic
+        fixtures only.
 
     Returns
     -------
@@ -2008,12 +2041,17 @@ def profile_jnd_block(
     stability_fit = (
         initial_fit if not split_frozen else _meta_fit(observations, eligible_bands, split_frozen)
     )
-    n_jnd = _c06_parameter_count(stability_fit)
     fitted, c06_actions, c06_partial_declaration = _apply_c06_shrink(
         observations,
         eligible_bands,
         stability_fit,
         split_frozen,
+        declared_group_parameters,
+    )
+    n_jnd_membership = _declared_n_jnd(
+        fitted,
+        declared_group_parameters,
+        split_frozen | frozenset(c06_actions),
     )
     previous_loss = (
         None
@@ -2042,7 +2080,8 @@ def profile_jnd_block(
             eligible_bands,
             initial_fit,
         ),
-        n_jnd=n_jnd,
+        n_jnd=len(n_jnd_membership),
+        n_jnd_membership=n_jnd_membership,
         variance_boundary_disclosures=_variance_boundary_disclosures(fitted),
         split_half_frozen=tuple(sorted(split_frozen)),
         split_half_unevaluable=split.unevaluable,
@@ -2058,6 +2097,7 @@ def fit_jnd_heterogeneity(
     weights: Mapping[str, float],
     config: JNDFitConfig,
     half_assignment: Optional[HalfAssignment] = None,
+    declared_group_parameters: FrozenSet[str] = _DEFAULT_GROUP_MODEL_IDENTITIES,
 ) -> JNDHeterogeneityFit:
     """Fit and publish the frozen W-13 hierarchical uncertainty procedure.
 
@@ -2073,6 +2113,9 @@ def fit_jnd_heterogeneity(
         Realized quota and rotation-envelope inputs with frozen constants.
     half_assignment : HalfAssignment or None
         Verified ``v4-half-1`` table for real rows.
+    declared_group_parameters : frozenset[str]
+        Verified ``N_g.filled`` membership; the frozen default is for synthetic
+        fixtures only.
 
     Returns
     -------
@@ -2126,14 +2169,19 @@ def fit_jnd_heterogeneity(
         if not split_frozen_components
         else _meta_fit(observations, eligible_bands, split_frozen_components)
     )
-    n_jnd = _c06_parameter_count(stability_fit)
     fitted, c06_shrink_actions, c06_partial_declaration = _apply_c06_shrink(
         observations,
         eligible_bands,
         stability_fit,
         split_frozen_components,
+        declared_group_parameters,
     )
     frozen_components = split_frozen_components | frozenset(c06_shrink_actions)
+    n_jnd_membership = _declared_n_jnd(
+        fitted,
+        declared_group_parameters,
+        frozen_components,
+    )
     mu_ci_log, tau_class_ci, tau_band_ci = _meta_profile_intervals(
         observations, eligible_bands, fitted
     )
@@ -2218,7 +2266,8 @@ def fit_jnd_heterogeneity(
             eligible_bands,
             initial_fit,
         ),
-        n_jnd=n_jnd,
+        n_jnd=len(n_jnd_membership),
+        n_jnd_membership=n_jnd_membership,
         variance_boundary_disclosures=_variance_boundary_disclosures(fitted),
         shrink_actions=tuple(sorted(frozen_components)),
         c06_shrink_actions=c06_shrink_actions,

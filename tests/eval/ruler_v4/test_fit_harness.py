@@ -66,7 +66,7 @@ from dagua.eval.ruler_v4.fit import (
     TestHoldoutGuard as HoldoutGuard,
 )
 from dagua.eval.ruler_v4.scene import Scene
-from dagua.eval.ruler_v4.weight_table import WeightTable
+from dagua.eval.ruler_v4.weight_table import ParameterProvenance, WeightTable
 from tests.eval.ruler_v4.test_score import _complete_table, _profiles, _scorable_scene
 
 
@@ -2098,6 +2098,9 @@ def test_dof_declaration_gate_is_complete_external_and_realized(tmp_path: Path) 
         weights=tuple(SimpleNamespace(name=identity) for identity in universal + semantic),
         prior_floors=weight_table.prior_floors,
     )
+    profiles = SimpleNamespace(
+        parameter_provenance={"profile_scalar": ParameterProvenance("fitted", "mu")}
+    )
     with patch.object(driver_module, "_allocation_block_sha256", return_value=source_digest):
         verified = driver_module._verify_dof_declaration(
             declaration_path,
@@ -2105,9 +2108,27 @@ def test_dof_declaration_gate_is_complete_external_and_realized(tmp_path: Path) 
             tmp_path / "PREREG.md",
             plan,
             weight_table,
+            profiles,
         )
 
     assert verified["assignment_complete"] is True
+    undeclared_profiles = SimpleNamespace(
+        parameter_provenance={
+            "profile_scalar": ParameterProvenance("fitted", "undeclared-profile-scalar")
+        }
+    )
+    with (
+        patch.object(driver_module, "_allocation_block_sha256", return_value=source_digest),
+        pytest.raises(FitStartConditionError, match="fitted profile scalars"),
+    ):
+        driver_module._verify_dof_declaration(
+            declaration_path,
+            expected_digest,
+            tmp_path / "PREREG.md",
+            plan,
+            weight_table,
+            undeclared_profiles,
+        )
     declaration["assignment_complete"] = False
     declaration_path.write_text(json.dumps(declaration), encoding="utf-8")
     with (
@@ -2120,6 +2141,7 @@ def test_dof_declaration_gate_is_complete_external_and_realized(tmp_path: Path) 
             tmp_path / "PREREG.md",
             plan,
             weight_table,
+            profiles,
         )
 
 
@@ -2213,16 +2235,38 @@ def test_c06_audits_free_coordinates_without_shrinking_heterogeneity() -> None:
         frozenset(band_effects),
         initial,
         frozenset(),
+        uncertainty_module._DEFAULT_GROUP_MODEL_IDENTITIES,
     )
 
     assert initial.effective_dof_class + initial.effective_dof_band > 2.0
-    assert uncertainty_module._c06_parameter_count(initial) == 2
+    assert set(initial.active_components) == {"tau_class", "tau_band"}
     assert actions == ()
     assert not partial_declaration
     assert fitted.tau_class > 0.0
     assert fitted.tau_band > 0.0
     assert fitted is initial
     assert len(set(fitted.cell_logs.values())) > 1
+
+
+def test_n_jnd_is_audited_against_declared_group_membership() -> None:
+    """RIDER-1 counts the verified ``N_g`` identities, not a fit-vector length."""
+
+    fitted = SimpleNamespace(active_components=("tau_class", "tau_band"))
+    declaration = frozenset({"mu", "tau_class", "tau_band", "lapse_rate"})
+
+    membership = uncertainty_module._declared_n_jnd(
+        fitted,
+        declaration,
+        frozenset(),
+    )
+
+    assert membership == ("tau_band", "tau_class")
+    with pytest.raises(ValueError, match="declared N_g membership"):
+        uncertainty_module._declared_n_jnd(
+            fitted,
+            frozenset({"mu", "tau_class", "tau_generator", "lapse_rate"}),
+            frozenset(),
+        )
 
 
 def test_c06_heterogeneous_block_does_not_collapse_to_pooled() -> None:
@@ -2245,11 +2289,12 @@ def test_c06_heterogeneous_block_does_not_collapse_to_pooled() -> None:
         frozenset(band_effects),
         initial,
         frozenset(),
+        uncertainty_module._DEFAULT_GROUP_MODEL_IDENTITIES,
     )
 
     assert actions == ()
     assert not partial_declaration
-    assert uncertainty_module._c06_parameter_count(fitted) == 2
+    assert set(fitted.active_components) == {"tau_class", "tau_band"}
     assert len(set(fitted.cell_logs.values())) > 1
 
 
@@ -2303,6 +2348,7 @@ def test_c06_shrinks_only_the_largest_trace_unnamed_drift_coordinate() -> None:
             frozenset(),
             initial,
             frozenset(),
+            uncertainty_module._DEFAULT_GROUP_MODEL_IDENTITIES,
         )
 
     assert fitted is refitted
@@ -2335,12 +2381,13 @@ def test_c06_point_effects_drift_publishes_partial_declaration() -> None:
             frozenset(),
             initial,
             frozenset(),
+            uncertainty_module._DEFAULT_GROUP_MODEL_IDENTITIES,
         )
 
     assert fitted is initial
     assert actions == ()
     assert partial_declaration
-    assert uncertainty_module._c06_parameter_count(fitted) == 7
+    assert len(fitted.active_components) == 7
 
 
 def test_c06_boundary_disclosure_covers_unnamed_block_component() -> None:
