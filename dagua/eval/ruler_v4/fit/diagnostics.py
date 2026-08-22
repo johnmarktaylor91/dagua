@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -9,8 +10,120 @@ from typing import DefaultDict, Dict, Mapping, Optional, Sequence, Tuple
 
 import torch
 
+from dagua.eval.ruler_v4.fit.bank import SideSwapAuditRow
 from dagua.eval.ruler_v4.fit.objective import FitPair, FittingPlan, PairwiseObjective
 from dagua.eval.ruler_v4.fit.optimize import FitResult
+
+
+@dataclass(frozen=True)
+class SideSwapAuditResult:
+    """Publish FIT-ORD(b)'s audit-only displayed-order diagnostic.
+
+    Parameters
+    ----------
+    control_legs, resolved_legs, exact_reversals : int
+        Input, successful join, and exact exchanged-order counts.
+    order_effect : float
+        Mean control-minus-base verdict after aligning panel orientation.
+    interval : tuple[float, float]
+        Normal 95% interval for the mean measured order effect.
+    likelihood_row_count : int
+        Constitutional containment proof, always zero.
+    """
+
+    control_legs: int
+    resolved_legs: int
+    exact_reversals: int
+    order_effect: float
+    interval: Tuple[float, float]
+    likelihood_row_count: int = 0
+
+    def __post_init__(self) -> None:
+        """Validate finite audit publication and zero likelihood consumption.
+
+        Raises
+        ------
+        ValueError
+            If counts disagree, values are nonfinite, or containment is broken.
+        """
+
+        if not 0 <= self.exact_reversals <= self.resolved_legs <= self.control_legs:
+            raise ValueError("side-swap audit counts must be ordered subsets")
+        if not math.isfinite(self.order_effect) or not all(
+            math.isfinite(value) for value in self.interval
+        ):
+            raise ValueError("side-swap audit effect and interval must be finite")
+        if self.interval[0] > self.order_effect or self.interval[1] < self.order_effect:
+            raise ValueError("side-swap audit interval must bracket the effect")
+        if self.likelihood_row_count != 0:
+            raise ValueError("side-swap controls may enter no likelihood term")
+
+
+def side_swap_audit(
+    pairs: Sequence[FitPair], controls: Sequence[SideSwapAuditRow]
+) -> SideSwapAuditResult:
+    """Join exchanged control legs to base replication groups for audit only.
+
+    Parameters
+    ----------
+    pairs : sequence[FitPair]
+        FIT-ORD train rows. They are read for join context but not refitted.
+    controls : sequence[SideSwapAuditRow]
+        Exchanged-order control legs emitted by the bank loader's separate
+        audit channel.
+
+    Returns
+    -------
+    SideSwapAuditResult
+        Join counts and measured order effect with zero likelihood rows.
+
+    Raises
+    ------
+    ValueError
+        If the audit is empty, a leg cannot resolve, or displayed orders are
+        not exact reversals of one constant drawing set.
+    """
+
+    audit_rows = tuple(controls)
+    if not audit_rows:
+        raise ValueError("FIT-ORD(b) side-swap audit requires exchanged control legs")
+    by_group: DefaultDict[str, list[FitPair]] = defaultdict(list)
+    for pair in pairs:
+        by_group[pair.replicate_group_id].append(pair)
+    effects = []
+    for control in audit_rows:
+        members = by_group.get(control.replicate_group_id, [])
+        if not members:
+            raise ValueError(
+                f"side-swap control group does not resolve: {control.replicate_group_id}"
+            )
+        drawing_sets = {frozenset((pair.blind_id_a, pair.blind_id_b)) for pair in members}
+        if drawing_sets != {frozenset((control.blind_id_a, control.blind_id_b))}:
+            raise ValueError("side-swap audit group crosses drawing sets")
+        base_order = (members[0].blind_id_a, members[0].blind_id_b)
+        if (control.blind_id_a, control.blind_id_b) != tuple(reversed(base_order)):
+            raise ValueError("side-swap control is not the exact reverse of its base order")
+        base_verdicts = [
+            pair.graded_verdict
+            if (pair.blind_id_a, pair.blind_id_b) == base_order
+            else -pair.graded_verdict
+            for pair in members
+        ]
+        aligned_control = -control.graded_verdict
+        effects.append(aligned_control - math.fsum(base_verdicts) / len(base_verdicts))
+    effect = math.fsum(effects) / len(effects)
+    if len(effects) == 1:
+        margin = 0.0
+    else:
+        variance = math.fsum((value - effect) ** 2 for value in effects) / (len(effects) - 1)
+        margin = 1.96 * math.sqrt(variance / len(effects))
+    return SideSwapAuditResult(
+        control_legs=len(audit_rows),
+        resolved_legs=len(audit_rows),
+        exact_reversals=len(audit_rows),
+        order_effect=effect,
+        interval=(effect - margin, effect + margin),
+    )
 
 
 @dataclass(frozen=True)
