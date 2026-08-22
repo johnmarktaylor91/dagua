@@ -73,6 +73,7 @@ from dagua.eval.ruler_v4.fit.rescoring import (
 from dagua.eval.ruler_v4.fit.uncertainty import (
     BootstrapDropRate,
     C06ComponentAudit,
+    HalfAssignment,
     HJNDBranchResult,
     JNDFitConfig,
     JNDHeterogeneityFit,
@@ -83,6 +84,7 @@ from dagua.eval.ruler_v4.fit.uncertainty import (
     VarianceComponentCI,
     evaluate_h_jnd_branch,
     fit_jnd_heterogeneity,
+    load_half_assignment,
     profile_jnd_block,
 )
 
@@ -109,6 +111,7 @@ __all__ = [
     "HoldoutPartitions",
     "H_JND_LEDGER_KEY",
     "HJNDBranchResult",
+    "HalfAssignment",
     "JNDCellCalibration",
     "JNDFitConfig",
     "JNDHeterogeneityFit",
@@ -147,6 +150,7 @@ __all__ = [
     "fit_weights",
     "jnd_band_calibration",
     "load_bank",
+    "load_half_assignment",
     "load_schedule",
     "partition_holdouts",
     "partition_fit_ord_lines",

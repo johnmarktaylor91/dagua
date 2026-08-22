@@ -32,6 +32,7 @@ from dagua.eval.ruler_v4.fit import (
     FitPair,
     FitStartConditionError,
     FittingPlan,
+    HalfAssignment,
     JNDFitConfig,
     JudgmentRow,
     OptimizerConfig,
@@ -48,6 +49,7 @@ from dagua.eval.ruler_v4.fit import (
     fit_weights,
     jnd_band_calibration,
     load_bank,
+    load_half_assignment,
     ordered_response_calibration,
     partition_fit_ord_lines,
     partition_holdouts,
@@ -2177,6 +2179,91 @@ def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
     assert branch.pooled_ratio == pytest.approx(1.1)
     with pytest.raises(RuntimeError, match="once-only"):
         evaluate_h_jnd_branch(branch_fit, branch_ledger)
+
+
+def test_v4_half_1_reproduces_frozen_table_anchor() -> None:
+    """The landed A15 family map reproduces the frozen 102-unit partition."""
+
+    family_map = (
+        Path.home()
+        / ".claude"
+        / "research"
+        / "dagua"
+        / "ruler_v4"
+        / "p3"
+        / "frozen"
+        / "A15_FAMILY_MAP.json"
+    )
+    if not family_map.exists():
+        pytest.skip("campaign A15 family map is not installed")
+
+    assignment = load_half_assignment(family_map)
+
+    expected_digest = "".join(
+        (
+            "4041736f049333ca031409e8201b9834",  # pragma: allowlist secret
+            "3b28afb93dd521382762f8072fd69b88",  # pragma: allowlist secret
+        )
+    )
+    assert assignment.table_sha256 == expected_digest
+    assert len(assignment.unit_halves) == 102
+    assert len(assignment.graph_halves) == 116
+    assert tuple(assignment.unit_halves.values()).count(0) == 52
+    assert tuple(assignment.unit_halves.values()).count(1) == 50
+
+
+def test_one_half_assignment_reaches_jnd_and_outer_weight_call_sites() -> None:
+    """Both W-13 calls consume one shared partition also usable by weights."""
+
+    rows = _jnd_success_rows()
+    graphs = sorted({row.graph_hash for row in rows})
+    assignment = HalfAssignment(
+        graph_halves={graph: index % 2 for index, graph in enumerate(graphs)},
+        unit_halves={f"unit-{index}": index % 2 for index in range(len(graphs))},
+        table_sha256="0" * 64,
+        family_map_sha256="1" * 64,
+    )
+    plan = FittingPlan(_weight_parameters())
+    weights = {"w_structure": 0.6, "w_neighborhood": 1.6}
+    config = JNDFitConfig(
+        role_hash=bank_module._FROZEN_A15_ROLE_HASH,
+        top_composite_pair_counts={"band-1": 67, "band-2": 67},
+        rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
+    )
+    with (
+        patch.object(
+            uncertainty_module,
+            "_split_half_fit",
+            wraps=uncertainty_module._split_half_fit,
+        ) as split_fit,
+        patch.object(
+            uncertainty_module,
+            "_bootstrap_spread",
+            return_value=((1.0, 1.0), 0.0, (1.0, 1.0)),
+        ),
+    ):
+        uncertainty_module.profile_jnd_block(
+            rows,
+            plan,
+            weights,
+            config,
+            half_assignment=assignment,
+        )
+        fit_jnd_heterogeneity(
+            rows,
+            plan,
+            weights,
+            config,
+            half_assignment=assignment,
+        )
+
+    assert split_fit.call_count == 2
+    assert all(call.args[3] is assignment for call in split_fit.call_args_list)
+    outer_halves = tuple(
+        tuple(row for row in rows if assignment.graph_halves[row.graph_hash] == half)
+        for half in (0, 1)
+    )
+    assert all(outer_halves)
 
 
 def test_heterogeneous_w13_fit_reaches_class_conditional_branch(
