@@ -1716,8 +1716,11 @@ def test_weight_fit_refuses_nonfit_but_consumes_train_replication_rows() -> None
                 rotation_envelopes={"synthetic": 0.01},
             ),
         )
-    with pytest.raises(NotImplementedError, match="lapse prior"):
-        fit_weights(PairwiseObjective((replace(replication, synthetic=False),), plan), config)
+    real_result = fit_weights(
+        PairwiseObjective((replace(replication, synthetic=False),), plan),
+        config,
+    )
+    assert real_result.steps_completed == 1
     with pytest.raises(ValueError, match="non-train"):
         partition_fit_ord_lines((replace(original, purpose=SplitPurpose.VALIDATE), replication))
 
@@ -2333,7 +2336,7 @@ def test_w13_estimator_publishes_uncertainty_guards_and_one_shot_branch(
         top_composite_pair_counts={"band-1": 67, "band-2": 67, "band-sparse": 0},
         rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
     )
-    with pytest.raises(NotImplementedError, match="graph-to-half"):
+    with pytest.raises(ValueError, match="verified assignment"):
         fit_jnd_heterogeneity(
             tuple(replace(row, synthetic=False) for row in rows),
             plan,
@@ -2521,7 +2524,7 @@ def test_heterogeneous_w13_fit_reaches_class_conditional_branch(
 
 
 def test_freeze1_driver_fails_closed_for_holdouts_and_real_rows(tmp_path: Path) -> None:
-    """The orchestration boundary refuses holdouts and never activates real fitting."""
+    """Real activation opens only after all six gates and artifacts verify."""
 
     rows = _jnd_success_rows()
     plan = FittingPlan(_weight_parameters())
@@ -2552,9 +2555,14 @@ def test_freeze1_driver_fails_closed_for_holdouts_and_real_rows(tmp_path: Path) 
         protocol_start_authorized=True,
         lapse_prior_frozen=True,
         graph_half_assignment_frozen=True,
+        fitted_dof_declaration_verified=True,
         blind_map_attested=True,
     )
-    with pytest.raises(NotImplementedError, match="activation remains disabled"):
+    driver_module._require_real_start_conditions(ready)
+    for gate in asdict(ready):
+        with pytest.raises(FitStartConditionError, match="every protocol start condition"):
+            driver_module._require_real_start_conditions(replace(ready, **{gate: False}))
+    with pytest.raises(FitStartConditionError, match="gate artifacts are missing"):
         run_freeze1_fit(
             real_rows,
             plan,
