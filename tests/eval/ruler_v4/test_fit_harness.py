@@ -40,6 +40,7 @@ from dagua.eval.ruler_v4.fit import (
     RealFitStartConditions,
     ReusableJudgmentGuard,
     SceneRescorer,
+    SideSwapAuditRow,
     SplitPurpose,
     WeightParameter,
     apply_outer_weight_split_half,
@@ -54,6 +55,7 @@ from dagua.eval.ruler_v4.fit import (
     partition_fit_ord_lines,
     partition_holdouts,
     run_freeze1_fit,
+    side_swap_audit,
     synthetic_fit_pair,
 )
 from dagua.eval.ruler_v4.fit import (
@@ -1816,37 +1818,96 @@ def test_jnd_heterogeneity_requires_actual_cross_session_repeats() -> None:
             ),
         )
 
-    same_displayed_order = (
-        replace(
-            source[0],
-            is_replication=True,
-            base_pair_id="shared",
-            replicate_group_id="shared",
-            session_id="session-a",
-            blind_id_a="drawing-a",
-            blind_id_b="drawing-b",
-        ),
-        replace(
-            source[1],
-            is_replication=True,
-            base_pair_id="shared",
-            replicate_group_id="shared",
-            session_id="session-b",
-            blind_id_a="drawing-a",
-            blind_id_b="drawing-b",
-        ),
+
+def test_repl_swap_qualifies_same_displayed_order_cross_session() -> None:
+    """W-13 qualification does not invent a two-displayed-orders requirement."""
+
+    source = _synthetic_recovery_rows(count=1)[0]
+    first = replace(
+        source,
+        is_replication=True,
+        replicate_group_id="same-order-group",
+        base_pair_id="same-order-pair",
+        session_id="session-a",
+        blind_id_a="drawing-a",
+        blind_id_b="drawing-b",
     )
-    with pytest.raises(ValueError, match="25-pair minimum"):
-        fit_jnd_heterogeneity(
-            same_displayed_order,
-            plan,
-            {"w_structure": 0.6, "w_neighborhood": 1.6},
-            JNDFitConfig(
-                role_hash=bank_module._FROZEN_A15_ROLE_HASH,
-                top_composite_pair_counts={"synthetic": 67},
-                rotation_envelopes={"synthetic": 0.01},
-            ),
-        )
+    second = replace(first, session_id="session-b")
+
+    counts = uncertainty_module._validate_replication_rows((first, second))
+
+    assert counts == {(first.primary_class, first.size_band): 1}
+
+
+def test_side_swap_controls_are_audit_only_and_join_by_group(tmp_path: Path) -> None:
+    """Exchanged controls survive only in the typed FIT-ORD(b) audit channel."""
+
+    _, bank_path, schedule_path, family_path = _loaded_holdout_fixture(tmp_path)
+    schedule_rows = [
+        json.loads(line) for line in schedule_path.read_text(encoding="utf-8").splitlines()
+    ]
+    bank_rows = [json.loads(line) for line in bank_path.read_text(encoding="utf-8").splitlines()]
+    schedule_rows.append(
+        {
+            "presentation_id": "presentation-swap",
+            "session_id": "session-swap",
+            "base_pair_id": "pair-fit",
+            "replicate_group_id": "pair-fit",
+            "graph_hash": "fit-graph",
+            "blind_id_A": "B-fit",
+            "blind_id_B": "A-fit",
+            "profile_opaque_id": "profile",
+            "budget_line": "CONTROLS",
+            "control_type": "side-swap-repeat",
+            "partition": "train",
+        }
+    )
+    bank_rows.append(
+        {
+            "presentation_id": "presentation-swap",
+            "session_id": "session-swap",
+            "base_pair_id": "pair-fit",
+            "replicate_group_id": "pair-fit",
+            "graph_hash": "fit-graph",
+            "session_accepted": True,
+            "instrument_hash": "instrument",
+            "judge_id": "judge/CF@4",
+            "verdict": 2,
+            "tie": False,
+            "confidence": 2,
+            "side_bit": 1,
+            "budget_line": "CONTROLS",
+            "control_type": "side-swap-repeat",
+        }
+    )
+    schedule_path.write_text(
+        "".join(f"{json.dumps(row)}\n" for row in schedule_rows), encoding="utf-8"
+    )
+    bank_path.write_text("".join(f"{json.dumps(row)}\n" for row in bank_rows), encoding="utf-8")
+
+    bank = _load_synthetic_bank((bank_path,), (schedule_path,), family_path, schedule_path)
+
+    assert bank.report.side_swap_audit_rows == 1
+    assert len(bank.side_swap_audit_rows) == 1
+    assert isinstance(bank.side_swap_audit_rows[0], SideSwapAuditRow)
+    assert all(row.session_id != "session-swap" for row in bank.rows)
+    source = _synthetic_recovery_rows(count=1)[0]
+    base = replace(
+        source,
+        replicate_group_id="pair-fit",
+        base_pair_id="pair-fit",
+        session_id="session-fit",
+        blind_id_a="A-fit",
+        blind_id_b="B-fit",
+        graded_verdict=-2,
+        outcome=-1,
+    )
+    repeat = replace(base, session_id="session-repeat")
+    result = side_swap_audit((base, repeat), bank.side_swap_audit_rows)
+
+    assert result.control_legs == result.resolved_legs == result.exact_reversals == 1
+    assert result.order_effect == pytest.approx(0.0)
+    assert result.likelihood_row_count == 0
 
 
 def test_jnd_replication_accepts_realized_same_order_side_bits(tmp_path: Path) -> None:
