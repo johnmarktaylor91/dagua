@@ -53,6 +53,8 @@ _JOINT_TOLERANCE = 1.0e-10
 _MAX_FIXED_POINT_ITERATIONS = 25
 _LAPSE_BOUNDS = (0.0, 0.25)
 _LAPSE_INITIAL = 1.0 / 109.0
+_LAPSE_BOUNDARY_ATOL = 1.0e-8
+_PROFILE_DROP = 1.920729410347062
 _LANDED_PRIOR_ADDENDUM = 29
 _EXPECTED_MAP_SHA256 = (
     "fd6f7659c011f985bdbcb44686a782af6505f6ea83a61ab7f1f69925722d418a"  # pragma: allowlist secret
@@ -214,6 +216,62 @@ class FitDriverIteration:
 
 
 @dataclass(frozen=True)
+class LapseBoundaryDisclosure:
+    """Publish a fitted lapse that reaches a frozen optimizer boundary.
+
+    Parameters
+    ----------
+    bound : str
+        ``lower`` or ``upper``.
+    fitted_value : float
+        Fitted scalar within ``1e-8`` of that bound.
+    penalized_objective, unpenalized_objective : float
+        Summed train objectives at the same optimum.
+    """
+
+    bound: str
+    fitted_value: float
+    penalized_objective: float
+    unpenalized_objective: float
+
+    def __post_init__(self) -> None:
+        """Validate the named finite boundary publication.
+
+        Raises
+        ------
+        ValueError
+            If the bound is unknown or a publication value is nonfinite.
+        """
+
+        if self.bound not in {"lower", "upper"}:
+            raise ValueError("lapse boundary disclosure must name lower or upper")
+        if not all(
+            math.isfinite(value)
+            for value in (
+                self.fitted_value,
+                self.penalized_objective,
+                self.unpenalized_objective,
+            )
+        ):
+            raise ValueError("lapse boundary disclosure values must be finite")
+
+
+@dataclass(frozen=True)
+class LapsePriorFreeSensitivity:
+    """Publish the mandatory fit with only LAPSE-PRIOR removed.
+
+    Parameters
+    ----------
+    lapse_rate, mu, maximum_absolute_weight_change : float
+        Prior-free lapse, associated JND location, and largest outer-weight delta.
+    """
+
+    lapse_rate: float
+    mu: float
+    maximum_absolute_weight_change: float
+
+
+@dataclass(frozen=True)
 class Freeze1FitResult:
     """Publish the complete guarded FREEZE-1 run.
 
@@ -225,6 +283,14 @@ class Freeze1FitResult:
         Graph-disjoint split-half response and shipped weights.
     lapse_rate : float
         Fitted synthetic seven-category lapse rate.
+    lapse_interval : tuple[float, float]
+        Penalized 95% profile-likelihood interval.
+    lapse_prior_weight : float
+        Realized ``111 / (111 + n_train_informative)`` prior weight.
+    lapse_boundary_disclosure : LapseBoundaryDisclosure or None
+        Named disclosure when the fitted lapse reaches either frozen bound.
+    lapse_prior_free_sensitivity : LapsePriorFreeSensitivity
+        Required refit with only the lapse prior removed.
     jnd_fit : JNDHeterogeneityFit
         Final W-13 point and uncertainty publications.
     h_jnd_branch : HJNDBranchResult
@@ -246,6 +312,10 @@ class Freeze1FitResult:
     weight_fit: FitResult
     outer_weight_stability: OuterWeightStability
     lapse_rate: float
+    lapse_interval: Tuple[float, float]
+    lapse_prior_weight: float
+    lapse_boundary_disclosure: Optional[LapseBoundaryDisclosure]
+    lapse_prior_free_sensitivity: LapsePriorFreeSensitivity
     jnd_fit: JNDHeterogeneityFit
     h_jnd_branch: HJNDBranchResult
     side_swap: Optional[SideSwapAuditResult]
@@ -691,6 +761,8 @@ def _fit_weight_lapse_block(
     config: FitDriverConfig,
     initial_weights: Optional[Mapping[str, float]] = None,
     initial_lapse: Optional[float] = None,
+    include_lapse_prior: bool = True,
+    lapse_bounds: Tuple[float, float] = _LAPSE_BOUNDS,
 ) -> Tuple[FitResult, float, float]:
     """Jointly optimize synthetic outer weights and the uniform lapse.
 
@@ -706,6 +778,10 @@ def _fit_weight_lapse_block(
         Prior fixed-point weights, defaulting to frozen literature priors.
     initial_lapse : float or None
         Prior fixed-point lapse, defaulting to the frozen Beta-prior mode.
+    include_lapse_prior : bool
+        Whether to include LAPSE-PRIOR(d); false only for sensitivity reporting.
+    lapse_bounds : tuple[float, float]
+        Projected lapse interval for this fit.
 
     Returns
     -------
@@ -736,7 +812,7 @@ def _fit_weight_lapse_block(
     initial = np.asarray(
         [starting_weights[name] for name in names] + [starting_lapse], dtype=np.float64
     )
-    bounds = parameter_bounds + [_LAPSE_BOUNDS]
+    bounds = parameter_bounds + [lapse_bounds]
 
     def evaluate(candidate: np.ndarray) -> float:
         """Evaluate one joint synthetic weight/lapse candidate.
@@ -757,7 +833,12 @@ def _fit_weight_lapse_block(
             plan,
         )
         vector = torch.tensor(candidate[:-1], dtype=torch.float64)
-        return float(objective.loss(vector))
+        loss = (
+            objective.loss(vector)
+            if include_lapse_prior
+            else objective.loss_without_lapse_prior(vector)
+        )
+        return float(loss)
 
     accepted = [initial.copy()]
     losses = [evaluate(initial)]
@@ -835,6 +916,146 @@ def _fit_weight_lapse_block(
         seed=config.seed,
     )
     return fit, lapse_rate, float(result.fun)
+
+
+def _profile_lapse_interval(
+    pairs: Sequence[FitPair],
+    plan: FittingPlan,
+    fitted_weights: Mapping[str, float],
+    fitted_lapse: float,
+) -> Tuple[float, float]:
+    """Profile outer weights for the penalized lapse interval.
+
+    Parameters
+    ----------
+    pairs : sequence[FitPair]
+        Final profiled train rows.
+    plan : FittingPlan
+        Frozen fitting plan.
+    fitted_weights : mapping[str, float]
+        Joint optimum used to initialize every profile solve.
+    fitted_lapse : float
+        Penalized lapse optimum.
+
+    Returns
+    -------
+    tuple[float, float]
+        Two-sided 95% penalized profile interval inside ``[0, 0.25]``.
+
+    Raises
+    ------
+    RuntimeError
+        If a profile optimization fails.
+    """
+
+    from scipy.optimize import brentq, minimize
+
+    rows = tuple(pairs)
+    names = plan.parameter_names
+    initial = np.asarray([fitted_weights[name] for name in names], dtype=np.float64)
+    bounds = [(float(parameter.lower), float(parameter.upper)) for parameter in plan.weights]
+    optimum_objective = PairwiseObjective(
+        tuple(replace(pair, lapse_rate=fitted_lapse) for pair in rows),
+        plan,
+    )
+    optimum = float(optimum_objective.loss(torch.tensor(initial, dtype=torch.float64)))
+    target = optimum + _PROFILE_DROP / len(rows)
+
+    def profile(lapse: float) -> float:
+        """Return the profiled mean objective minus the LR target.
+
+        Parameters
+        ----------
+        lapse : float
+            Fixed lapse candidate.
+
+        Returns
+        -------
+        float
+            Signed distance from the profile-likelihood target.
+        """
+
+        objective = PairwiseObjective(
+            tuple(replace(pair, lapse_rate=lapse) for pair in rows),
+            plan,
+        )
+
+        def evaluate(candidate: np.ndarray) -> float:
+            """Evaluate one free outer-weight profile candidate.
+
+            Parameters
+            ----------
+            candidate : numpy.ndarray
+                Free outer weights.
+
+            Returns
+            -------
+            float
+                Penalized mean train objective.
+            """
+
+            return float(objective.loss(torch.tensor(candidate, dtype=torch.float64)))
+
+        result = minimize(evaluate, initial, method="L-BFGS-B", bounds=bounds)
+        if not result.success:
+            raise RuntimeError(f"lapse profile optimization failed: {result.message}")
+        return float(result.fun) - target
+
+    lower_endpoint = 1.0e-12
+    lower = (
+        0.0
+        if profile(lower_endpoint) <= 0.0
+        else float(brentq(profile, lower_endpoint, fitted_lapse))
+    )
+    upper = (
+        _LAPSE_BOUNDS[1]
+        if profile(_LAPSE_BOUNDS[1]) <= 0.0
+        else float(brentq(profile, fitted_lapse, _LAPSE_BOUNDS[1]))
+    )
+    return lower, upper
+
+
+def _lapse_boundary_disclosure(
+    pairs: Sequence[FitPair],
+    plan: FittingPlan,
+    weights: Mapping[str, float],
+    lapse_rate: float,
+) -> Optional[LapseBoundaryDisclosure]:
+    """Build RIDER-1-style lapse boundary evidence when required.
+
+    Parameters
+    ----------
+    pairs : sequence[FitPair]
+        Final train rows.
+    plan : FittingPlan
+        Frozen fitting plan.
+    weights : mapping[str, float]
+        Final outer weights.
+    lapse_rate : float
+        Final fitted lapse.
+
+    Returns
+    -------
+    LapseBoundaryDisclosure or None
+        Named disclosure within ``1e-8`` of a bound, otherwise ``None``.
+    """
+
+    bound = None
+    if abs(lapse_rate - _LAPSE_BOUNDS[0]) <= _LAPSE_BOUNDARY_ATOL:
+        bound = "lower"
+    elif abs(lapse_rate - _LAPSE_BOUNDS[1]) <= _LAPSE_BOUNDARY_ATOL:
+        bound = "upper"
+    if bound is None:
+        return None
+    rows = tuple(replace(pair, lapse_rate=lapse_rate) for pair in pairs)
+    objective = PairwiseObjective(rows, plan)
+    vector = torch.tensor([weights[name] for name in plan.parameter_names], dtype=torch.float64)
+    return LapseBoundaryDisclosure(
+        bound=bound,
+        fitted_value=lapse_rate,
+        penalized_objective=float(objective.loss(vector)) * len(rows),
+        unpenalized_objective=float(objective.loss_without_lapse_prior(vector)) * len(rows),
+    )
 
 
 def _require_real_start_conditions(
@@ -1098,6 +1319,38 @@ def run_freeze1_fit(
             )
             for pair in lines.train
         )
+        lapse_interval = _profile_lapse_interval(
+            final_train,
+            plan,
+            current_weights,
+            current_lapse,
+        )
+        lapse_boundary = _lapse_boundary_disclosure(
+            final_train,
+            plan,
+            current_weights,
+            current_lapse,
+        )
+        sensitivity_fit, sensitivity_lapse, _ = _fit_weight_lapse_block(
+            final_train,
+            plan,
+            driver_config,
+            current_weights,
+            current_lapse,
+            include_lapse_prior=False,
+            lapse_bounds=(1.0e-6, _LAPSE_BOUNDS[1]),
+        )
+        lapse_sensitivity = LapsePriorFreeSensitivity(
+            lapse_rate=sensitivity_lapse,
+            mu=jnd_fit.mu,
+            maximum_absolute_weight_change=max(
+                abs(sensitivity_fit.weights[name] - current_weights[name])
+                for name in plan.parameter_names
+            ),
+        )
+        lapse_prior_weight = (plan.lapse_prior_alpha + plan.lapse_prior_beta) / (
+            plan.lapse_prior_alpha + plan.lapse_prior_beta + len(final_train)
+        )
         halves = tuple(
             tuple(pair for pair in final_train if _half_key(pair, half_assignment) == half)
             for half in (0, 1)
@@ -1140,6 +1393,12 @@ def run_freeze1_fit(
                     name: list(interval) for name, interval in weight_fit.intervals.items()
                 },
                 "lapse_rate": current_lapse,
+                "lapse_interval": list(lapse_interval),
+                "lapse_prior_weight": lapse_prior_weight,
+                "lapse_boundary_disclosure": (
+                    None if lapse_boundary is None else asdict(lapse_boundary)
+                ),
+                "lapse_prior_free_sensitivity": asdict(lapse_sensitivity),
                 "jnd": {
                     "mu": jnd_fit.mu,
                     "tau_class": jnd_fit.tau_class,
@@ -1178,6 +1437,10 @@ def run_freeze1_fit(
             weight_fit=weight_fit,
             outer_weight_stability=outer_stability,
             lapse_rate=current_lapse,
+            lapse_interval=lapse_interval,
+            lapse_prior_weight=lapse_prior_weight,
+            lapse_boundary_disclosure=lapse_boundary,
+            lapse_prior_free_sensitivity=lapse_sensitivity,
             jnd_fit=jnd_fit,
             h_jnd_branch=branch,
             side_swap=side_swap_result,

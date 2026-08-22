@@ -38,6 +38,8 @@ from dagua.eval.ruler_v4.fit.driver import (
     FitDriverIteration,
     FitStartConditionError,
     Freeze1FitResult,
+    LapseBoundaryDisclosure,
+    LapsePriorFreeSensitivity,
     RealFitStartConditions,
     run_freeze1_fit,
 )
@@ -123,6 +125,8 @@ __all__ = [
     "JudgmentBank",
     "JudgmentMetadata",
     "JudgmentRow",
+    "LapseBoundaryDisclosure",
+    "LapsePriorFreeSensitivity",
     "LedgerAnnulment",
     "LookReservation",
     "OptimizerConfig",
