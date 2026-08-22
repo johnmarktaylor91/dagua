@@ -42,8 +42,8 @@ from dagua.eval.ruler_v4.fit.uncertainty import (
 
 _JOINT_TOLERANCE = 1.0e-10
 _MAX_FIXED_POINT_ITERATIONS = 25
-_SYNTHETIC_LAPSE_BOUNDS = (0.0, 0.25)
-_SYNTHETIC_LAPSE_INITIAL = 0.01
+_LAPSE_BOUNDS = (0.0, 0.25)
+_LAPSE_INITIAL = 1.0 / 109.0
 
 
 class FitStartConditionError(RuntimeError):
@@ -325,7 +325,7 @@ def _fit_weight_lapse_block(
     initial_weights : mapping[str, float] or None
         Prior fixed-point weights, defaulting to frozen literature priors.
     initial_lapse : float or None
-        Prior fixed-point lapse, defaulting to the synthetic initializer.
+        Prior fixed-point lapse, defaulting to the frozen Beta-prior mode.
 
     Returns
     -------
@@ -352,11 +352,11 @@ def _fit_weight_lapse_block(
     bounds_by_name = {
         parameter.name: parameter_bounds[index] for index, parameter in enumerate(plan.weights)
     }
-    starting_lapse = _SYNTHETIC_LAPSE_INITIAL if initial_lapse is None else initial_lapse
+    starting_lapse = _LAPSE_INITIAL if initial_lapse is None else initial_lapse
     initial = np.asarray(
         [starting_weights[name] for name in names] + [starting_lapse], dtype=np.float64
     )
-    bounds = parameter_bounds + [_SYNTHETIC_LAPSE_BOUNDS]
+    bounds = parameter_bounds + [_LAPSE_BOUNDS]
 
     def evaluate(candidate: np.ndarray) -> float:
         """Evaluate one joint synthetic weight/lapse candidate.
@@ -563,7 +563,7 @@ def run_freeze1_fit(
     _atomic_write_json(output / "status.json", {"state": "RUNNING"})
     try:
         current_weights = {parameter.name: float(parameter.prior) for parameter in plan.weights}
-        current_lapse = _SYNTHETIC_LAPSE_INITIAL
+        current_lapse = _LAPSE_INITIAL
         trajectory = []
         weight_fit: Optional[FitResult] = None
         profile: Optional[JNDProfileFit] = None
