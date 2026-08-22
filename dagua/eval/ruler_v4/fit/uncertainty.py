@@ -16,7 +16,12 @@ import torch
 
 from dagua.eval.ruler_v4.fit.access import H_JND_LEDGER_KEY, AccessLedger
 from dagua.eval.ruler_v4.fit.bank import _FROZEN_A15_ROLE_HASH
-from dagua.eval.ruler_v4.fit.objective import FitPair, FittingPlan, PairwiseObjective
+from dagua.eval.ruler_v4.fit.objective import (
+    FitPair,
+    FittingPlan,
+    PairwiseObjective,
+    UnevaluableComponent,
+)
 
 _MINIMUM_CELL_COUNT = 25
 _Q_BAND = 67
@@ -53,12 +58,18 @@ class HalfAssignment:
         Digest of the canonical complete unit-to-half table.
     family_map_sha256 : str
         Digest of the A15 family map used to derive the table.
+    graph_units : mapping[str, str]
+        Train graph hashes mapped to their A15 sweep units.
+    graph_cells : mapping[str, tuple[str, str]]
+        Train graph hashes mapped to their frozen class and size-band cells.
     """
 
     graph_halves: Mapping[str, int]
     unit_halves: Mapping[str, int]
     table_sha256: str
     family_map_sha256: str
+    graph_units: Mapping[str, str] = field(default_factory=dict)
+    graph_cells: Mapping[str, Tuple[str, str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Freeze mappings and validate the complete two-way partition.
@@ -71,14 +82,24 @@ class HalfAssignment:
 
         graph_halves = dict(self.graph_halves)
         unit_halves = dict(self.unit_halves)
+        graph_units = dict(self.graph_units)
+        graph_cells = dict(self.graph_cells)
         if not graph_halves or not unit_halves:
             raise ValueError("v4-half-1 requires nonempty graph and sweep-unit mappings")
         if any(value not in (0, 1) for value in (*graph_halves.values(), *unit_halves.values())):
             raise ValueError("v4-half-1 values must be zero or one")
         if len(self.table_sha256) != 64 or len(self.family_map_sha256) != 64:
             raise ValueError("v4-half-1 digests must be lowercase SHA-256 hex")
+        if graph_units and set(graph_units) != set(graph_halves):
+            raise ValueError("v4-half-1 graph-to-unit metadata is incomplete")
+        if graph_cells and set(graph_cells) != set(graph_halves):
+            raise ValueError("v4-half-1 graph-cell metadata is incomplete")
+        if graph_units and any(unit not in unit_halves for unit in graph_units.values()):
+            raise ValueError("v4-half-1 graph metadata names an unknown sweep unit")
         object.__setattr__(self, "graph_halves", MappingProxyType(graph_halves))
         object.__setattr__(self, "unit_halves", MappingProxyType(unit_halves))
+        object.__setattr__(self, "graph_units", MappingProxyType(graph_units))
+        object.__setattr__(self, "graph_cells", MappingProxyType(graph_cells))
 
 
 def load_half_assignment(family_map_path: Path) -> HalfAssignment:
@@ -204,11 +225,22 @@ def load_half_assignment(family_map_path: Path) -> HalfAssignment:
         for unit, members in units.items()
         for graph_hash, _ in members
     }
+    graph_units = {graph_hash: unit for unit, members in units.items() for graph_hash, _ in members}
+    graph_cells = {
+        graph_hash: (
+            str(metadata.get("primary_class", "")),
+            str(metadata.get("size_band", "")),
+        )
+        for members in units.values()
+        for graph_hash, metadata in members
+    }
     return HalfAssignment(
         graph_halves=graph_halves,
         unit_halves=unit_halves,
         table_sha256=table_digest,
         family_map_sha256=family_digest,
+        graph_units=graph_units,
+        graph_cells=graph_cells,
     )
 
 
@@ -313,17 +345,22 @@ class SplitHalfStability:
         Half-sample ``tau_class`` and ``tau_band`` estimates.
     frozen_components : tuple[str, ...]
         Components set to their null prior after the stability gate.
+    unevaluable : tuple[UnevaluableComponent, ...]
+        Named components taking the frozen failure response.
     """
 
     half_one: Mapping[str, float]
     half_two: Mapping[str, float]
     frozen_components: Tuple[str, ...]
+    unevaluable: Tuple[UnevaluableComponent, ...] = ()
 
     def __post_init__(self) -> None:
         """Freeze half-estimate mappings."""
 
         object.__setattr__(self, "half_one", MappingProxyType(dict(self.half_one)))
         object.__setattr__(self, "half_two", MappingProxyType(dict(self.half_two)))
+        if len({item.component for item in self.unevaluable}) != len(self.unevaluable):
+            raise ValueError("split-half UNEVALUABLE components must be unique")
 
 
 @dataclass(frozen=True)
@@ -548,6 +585,8 @@ class JNDProfileFit:
         Components fitted at the frozen variance upper bound.
     split_half_frozen, c06_shrink_actions : tuple[str, ...]
         Separately attributed mandatory shrink responses.
+    split_half_unevaluable : tuple[UnevaluableComponent, ...]
+        Components whose half estimates could not both be computed.
     c06_partial_declaration : bool
         Whether C-06 fired but could not name and freeze an offender.
     loss_path : tuple[float, ...]
@@ -567,6 +606,7 @@ class JNDProfileFit:
     n_jnd: int
     variance_boundary_disclosures: Tuple[VarianceBoundaryDisclosure, ...]
     split_half_frozen: Tuple[str, ...]
+    split_half_unevaluable: Tuple[UnevaluableComponent, ...]
     c06_shrink_actions: Tuple[str, ...]
     c06_partial_declaration: bool
     loss_path: Tuple[float, ...]
@@ -1717,12 +1757,21 @@ def _half_key(pair: FitPair, assignment: Optional[HalfAssignment]) -> int:
         ) from error
 
 
+@dataclass(frozen=True)
+class _SplitHalfFits:
+    """Hold optional half fits and typed failure publications."""
+
+    half_one: Optional[_MetaFit]
+    half_two: Optional[_MetaFit]
+    unevaluable: Tuple[UnevaluableComponent, ...]
+
+
 def _split_half_fit(
     rows: Tuple[FitPair, ...],
     differences: np.ndarray,
     eligible_bands: frozenset[str],
     half_assignment: Optional[HalfAssignment] = None,
-) -> Tuple[_MetaFit, _MetaFit]:
+) -> _SplitHalfFits:
     """Fit graph-disjoint A15-salted replication halves.
 
     Parameters
@@ -1738,26 +1787,106 @@ def _split_half_fit(
 
     Returns
     -------
-    tuple[_MetaFit, _MetaFit]
-        Independent half-sample variance-component fits.
-
-    Raises
-    ------
-    ValueError
-        If the graph census cannot populate both halves.
+    _SplitHalfFits
+        Independent half fits plus frozen ``UNEVALUABLE`` publications. An
+        empty half is represented here instead of raising during the fit.
     """
 
-    fits = []
+    half_indices = tuple(
+        tuple(index for index, pair in enumerate(rows) if _half_key(pair, half_assignment) == half)
+        for half in (0, 1)
+    )
+    reasons: dict[str, str] = {}
+    empty_halves = tuple("AB"[half] for half, indices in enumerate(half_indices) if not indices)
+    if empty_halves:
+        reason = f"replication half {'/'.join(empty_halves)} is empty"
+        reasons.update({"tau_class": reason, "tau_band": reason})
+    else:
+        class_sets = tuple(
+            {rows[index].primary_class for index in indices} for indices in half_indices
+        )
+        one_sided_classes = sorted(class_sets[0] ^ class_sets[1])
+        if one_sided_classes:
+            reasons["tau_class"] = f"classes present in only one half: {one_sided_classes}"
+        band_sets = tuple(
+            {rows[index].size_band for index in indices if rows[index].size_band in eligible_bands}
+            for indices in half_indices
+        )
+        one_sided_bands = sorted(band_sets[0] ^ band_sets[1])
+        if one_sided_bands:
+            reasons["tau_band"] = f"bands present in only one half: {one_sided_bands}"
+
+    fits: list[Optional[_MetaFit]] = []
     for half in (0, 1):
-        indices = [
-            index for index, pair in enumerate(rows) if _half_key(pair, half_assignment) == half
-        ]
+        indices = half_indices[half]
         if not indices:
-            raise ValueError("A15-salted graph split leaves an empty JND half")
+            fits.append(None)
+            continue
         half_rows = tuple(rows[index] for index in indices)
-        half_differences = differences[indices]
-        fits.append(_meta_fit(_cell_observations(half_rows, half_differences), eligible_bands))
-    return fits[0], fits[1]
+        half_differences = differences[list(indices)]
+        fitted = _meta_fit(_cell_observations(half_rows, half_differences), eligible_bands)
+        for component in ("tau_class", "tau_band"):
+            if not math.isfinite(float(getattr(fitted, component))):
+                reasons.setdefault(component, f"half {'AB'[half]} estimate is non-finite")
+        fits.append(fitted)
+    return _SplitHalfFits(
+        half_one=fits[0],
+        half_two=fits[1],
+        unevaluable=tuple(
+            UnevaluableComponent(component, reason) for component, reason in sorted(reasons.items())
+        ),
+    )
+
+
+def _split_half_response(
+    split: _SplitHalfFits,
+    intervals: Mapping[str, Tuple[float, float]],
+) -> Tuple[frozenset[str], Mapping[str, float], Mapping[str, float]]:
+    """Apply HALF-ASSIGN(g)'s component failure and disagreement responses.
+
+    Parameters
+    ----------
+    split : _SplitHalfFits
+        Optional half estimates and structural failure publications.
+    intervals : mapping[str, tuple[float, float]]
+        Full-data component intervals used for evaluable comparisons.
+
+    Returns
+    -------
+    tuple[frozenset[str], mapping[str, float], mapping[str, float]]
+        Components frozen at zero and finite half-estimate publications.
+    """
+
+    unevaluable = {item.component for item in split.unevaluable}
+    half_one_values = (
+        {}
+        if split.half_one is None
+        else {
+            component: float(getattr(split.half_one, component))
+            for component in intervals
+            if component not in unevaluable
+        }
+    )
+    half_two_values = (
+        {}
+        if split.half_two is None
+        else {
+            component: float(getattr(split.half_two, component))
+            for component in intervals
+            if component not in unevaluable
+        }
+    )
+    disagreements = {
+        component
+        for component, interval in intervals.items()
+        if component not in unevaluable
+        and abs(half_one_values[component] - half_two_values[component]) > interval[1] - interval[0]
+    }
+    return (
+        frozenset(unevaluable | disagreements),
+        MappingProxyType(half_one_values),
+        MappingProxyType(half_two_values),
+    )
 
 
 def _tie_rates(
@@ -1868,27 +1997,23 @@ def profile_jnd_block(
     _, tau_class_ci, tau_band_ci = _meta_profile_intervals(
         observations, eligible_bands, initial_fit
     )
-    half_one, half_two = _split_half_fit(rows, differences, eligible_bands, half_assignment)
-    split_frozen = {
-        component
-        for component, interval in (
-            ("tau_class", tau_class_ci.ratio_scale),
-            ("tau_band", tau_band_ci.ratio_scale),
-        )
-        if abs(getattr(half_one, component) - getattr(half_two, component))
-        > interval[1] - interval[0]
-    }
+    split = _split_half_fit(rows, differences, eligible_bands, half_assignment)
+    split_frozen, _, _ = _split_half_response(
+        split,
+        {
+            "tau_class": tau_class_ci.ratio_scale,
+            "tau_band": tau_band_ci.ratio_scale,
+        },
+    )
     stability_fit = (
-        initial_fit
-        if not split_frozen
-        else _meta_fit(observations, eligible_bands, frozenset(split_frozen))
+        initial_fit if not split_frozen else _meta_fit(observations, eligible_bands, split_frozen)
     )
     n_jnd = _c06_parameter_count(stability_fit)
     fitted, c06_actions, c06_partial_declaration = _apply_c06_shrink(
         observations,
         eligible_bands,
         stability_fit,
-        frozenset(split_frozen),
+        split_frozen,
     )
     previous_loss = (
         None
@@ -1920,6 +2045,7 @@ def profile_jnd_block(
         n_jnd=n_jnd,
         variance_boundary_disclosures=_variance_boundary_disclosures(fitted),
         split_half_frozen=tuple(sorted(split_frozen)),
+        split_half_unevaluable=split.unevaluable,
         c06_shrink_actions=c06_actions,
         c06_partial_declaration=c06_partial_declaration,
         loss_path=initial_fit.loss_path + (() if fitted is initial_fit else fitted.loss_path),
@@ -1983,32 +2109,31 @@ def fit_jnd_heterogeneity(
     differences = objective.score_differences(vector).detach().numpy()
     observations = _cell_observations(rows, differences)
     initial_fit = _meta_fit(observations, eligible_bands)
-    half_one, half_two = _split_half_fit(rows, differences, eligible_bands, half_assignment)
-    split_frozen_components = set()
+    split = _split_half_fit(rows, differences, eligible_bands, half_assignment)
     _, initial_tau_class_ci, initial_tau_band_ci = _meta_profile_intervals(
         observations, eligible_bands, initial_fit
     )
-    for component, interval in (
-        ("tau_class", initial_tau_class_ci.ratio_scale),
-        ("tau_band", initial_tau_band_ci.ratio_scale),
-    ):
-        difference = abs(getattr(half_one, component) - getattr(half_two, component))
-        if difference > interval[1] - interval[0]:
-            split_frozen_components.add(component)
+    split_frozen_components, half_one_values, half_two_values = _split_half_response(
+        split,
+        {
+            "tau_class": initial_tau_class_ci.ratio_scale,
+            "tau_band": initial_tau_band_ci.ratio_scale,
+        },
+    )
     effective_dof = initial_fit.effective_dof_class + initial_fit.effective_dof_band
     stability_fit = (
         initial_fit
         if not split_frozen_components
-        else _meta_fit(observations, eligible_bands, frozenset(split_frozen_components))
+        else _meta_fit(observations, eligible_bands, split_frozen_components)
     )
     n_jnd = _c06_parameter_count(stability_fit)
     fitted, c06_shrink_actions, c06_partial_declaration = _apply_c06_shrink(
         observations,
         eligible_bands,
         stability_fit,
-        frozenset(split_frozen_components),
+        split_frozen_components,
     )
-    frozen_components = frozenset(split_frozen_components) | frozenset(c06_shrink_actions)
+    frozen_components = split_frozen_components | frozenset(c06_shrink_actions)
     mu_ci_log, tau_class_ci, tau_band_ci = _meta_profile_intervals(
         observations, eligible_bands, fitted
     )
@@ -2100,9 +2225,10 @@ def fit_jnd_heterogeneity(
         c06_partial_declaration=c06_partial_declaration,
         k_jnd_disclosures=disclosures,
         split_half=SplitHalfStability(
-            half_one={"tau_class": half_one.tau_class, "tau_band": half_one.tau_band},
-            half_two={"tau_class": half_two.tau_class, "tau_band": half_two.tau_band},
+            half_one=half_one_values,
+            half_two=half_two_values,
             frozen_components=tuple(sorted(split_frozen_components)),
+            unevaluable=split.unevaluable,
         ),
         uncalibrated_classes=uncalibrated,
         tie_rates_by_class=_tie_rates(rows, differences, pooled_jnd, cell_jnd),

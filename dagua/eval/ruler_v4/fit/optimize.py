@@ -5,13 +5,17 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping, Tuple
+from typing import Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 
 from dagua.eval.ruler_v4.fit.bank import SplitPurpose
-from dagua.eval.ruler_v4.fit.objective import FittingPlan, PairwiseObjective
+from dagua.eval.ruler_v4.fit.objective import (
+    FittingPlan,
+    PairwiseObjective,
+    UnevaluableComponent,
+)
 
 
 @dataclass(frozen=True)
@@ -155,12 +159,15 @@ class OuterWeightStability:
         Graph-disjoint half-sample estimates.
     frozen_at_prior : tuple[str, ...]
         Weight identities failing the interval-width comparison.
+    unevaluable : tuple[UnevaluableComponent, ...]
+        Weight identities taking HALF-ASSIGN(g)'s frozen-prior response.
     """
 
     weights: Mapping[str, float]
     half_one: Mapping[str, float]
     half_two: Mapping[str, float]
     frozen_at_prior: Tuple[str, ...]
+    unevaluable: Tuple[UnevaluableComponent, ...] = ()
 
     def __post_init__(self) -> None:
         """Freeze split-half publication mappings."""
@@ -168,13 +175,16 @@ class OuterWeightStability:
         object.__setattr__(self, "weights", MappingProxyType(dict(self.weights)))
         object.__setattr__(self, "half_one", MappingProxyType(dict(self.half_one)))
         object.__setattr__(self, "half_two", MappingProxyType(dict(self.half_two)))
+        if len({item.component for item in self.unevaluable}) != len(self.unevaluable):
+            raise ValueError("outer-weight UNEVALUABLE components must be unique")
 
 
 def apply_outer_weight_split_half(
     fitted: FitResult,
-    half_one: FitResult,
-    half_two: FitResult,
+    half_one: Optional[FitResult],
+    half_two: Optional[FitResult],
     plan: FittingPlan,
+    unevaluable: Sequence[UnevaluableComponent] = (),
 ) -> OuterWeightStability:
     """Freeze outer weights whose graph-half estimates differ beyond their CI.
 
@@ -182,10 +192,13 @@ def apply_outer_weight_split_half(
     ----------
     fitted : FitResult
         Full-data fit carrying profile-likelihood intervals.
-    half_one, half_two : FitResult
-        Graph-disjoint half-sample fits under the frozen A15 assignment.
+    half_one, half_two : FitResult or None
+        Graph-disjoint half-sample fits, or ``None`` for a structurally empty
+        half governed by HALF-ASSIGN(g).
     plan : FittingPlan
         Frozen weight priors.
+    unevaluable : sequence[UnevaluableComponent]
+        Named half-estimation defects whose weights must freeze at prior.
 
     Returns
     -------
@@ -199,25 +212,37 @@ def apply_outer_weight_split_half(
     """
 
     names = set(plan.parameter_names)
-    if any(set(result.weights) != names for result in (fitted, half_one, half_two)):
+    available_fits = tuple(result for result in (half_one, half_two) if result is not None)
+    if set(fitted.weights) != names or any(
+        set(result.weights) != names for result in available_fits
+    ):
         raise ValueError("outer split-half fit identities do not match the plan")
-    frozen = tuple(
-        sorted(
+    unavailable = {item.component for item in unevaluable}
+    if not unavailable <= names:
+        raise ValueError("outer split-half UNEVALUABLE identity is absent from the plan")
+    if (half_one is None or half_two is None) and unavailable != names:
+        raise ValueError("an empty outer-weight half makes every weight UNEVALUABLE")
+    disagreements = (
+        set()
+        if half_one is None or half_two is None
+        else {
             name
-            for name in names
+            for name in names - unavailable
             if abs(half_one.weights[name] - half_two.weights[name])
             > fitted.intervals[name][1] - fitted.intervals[name][0]
-        )
+        }
     )
+    frozen = tuple(sorted(unavailable | disagreements))
     priors = {parameter.name: parameter.prior for parameter in plan.weights}
     shipped = {
         name: priors[name] if name in frozen else fitted.weights[name] for name in sorted(names)
     }
     return OuterWeightStability(
         weights=shipped,
-        half_one=half_one.weights,
-        half_two=half_two.weights,
+        half_one={} if half_one is None else half_one.weights,
+        half_two={} if half_two is None else half_two.weights,
         frozen_at_prior=frozen,
+        unevaluable=tuple(unevaluable),
     )
 
 
