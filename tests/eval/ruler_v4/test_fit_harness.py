@@ -2486,6 +2486,75 @@ def test_v4_half_1_reproduces_frozen_table_anchor() -> None:
     assert tuple(assignment.unit_halves.values()).count(1) == 50
 
 
+def test_v4_half_1_publishes_realized_ten_one_sided_cells() -> None:
+    """HALF-ASSIGN(h) publishes the frozen map's live 10/24 trigger population."""
+
+    family_map = (
+        Path.home()
+        / ".claude"
+        / "research"
+        / "dagua"
+        / "ruler_v4"
+        / "p3"
+        / "frozen"
+        / "A15_FAMILY_MAP.json"
+    )
+    if not family_map.exists():
+        pytest.skip("campaign A15 family map is not installed")
+
+    support = driver_module._half_support((), (), load_half_assignment(family_map))
+
+    assert (support.half_a.units, support.half_b.units) == (52, 50)
+    assert (support.half_a.graphs, support.half_b.graphs) == (60, 56)
+    assert len(set(support.half_a.occupied_cells) | set(support.half_b.occupied_cells)) == 24
+    assert len(support.one_sided_cells) == 10
+
+
+def test_empty_half_publishes_unevaluable_and_takes_failure_responses() -> None:
+    """Both former empty-half exceptions freeze components in the safe direction."""
+
+    rows = _jnd_success_rows()
+    graphs = sorted({row.graph_hash for row in rows})
+    assignment = HalfAssignment(
+        graph_halves={graph: 0 for graph in graphs},
+        unit_halves={f"unit-{index}": 0 for index in range(len(graphs))},
+        table_sha256="0" * 64,
+        family_map_sha256="1" * 64,
+    )
+    plan = FittingPlan(_weight_parameters())
+    weights = {"w_structure": 0.6, "w_neighborhood": 1.6}
+    config = JNDFitConfig(
+        role_hash=bank_module._FROZEN_A15_ROLE_HASH,
+        top_composite_pair_counts={"band-1": 67, "band-2": 67},
+        rotation_envelopes={"class-1": 0.001, "class-2": 0.001},
+    )
+
+    profile = uncertainty_module.profile_jnd_block(
+        rows,
+        plan,
+        weights,
+        config,
+        half_assignment=assignment,
+    )
+    fitted, _, _ = driver_module._fit_weight_lapse_block(rows, plan, FitDriverConfig())
+    outer = driver_module._outer_weight_split_half(
+        fitted,
+        rows,
+        plan,
+        FitDriverConfig(),
+        assignment,
+    )
+
+    assert profile.tau_class == profile.tau_band == 0.0
+    assert {item.component for item in profile.split_half_unevaluable} == {
+        "tau_class",
+        "tau_band",
+    }
+    assert set(outer.frozen_at_prior) == set(plan.parameter_names)
+    assert {item.component for item in outer.unevaluable} == set(plan.parameter_names)
+    assert all(outer.weights[name] == 1.0 for name in plan.parameter_names)
+
+
 def test_one_half_assignment_reaches_jnd_and_outer_weight_call_sites() -> None:
     """Both W-13 calls consume one shared partition also usable by weights."""
 

@@ -26,6 +26,7 @@ from dagua.eval.ruler_v4.fit.objective import (
     FitPair,
     FittingPlan,
     PairwiseObjective,
+    UnevaluableComponent,
     partition_fit_ord_lines,
 )
 from dagua.eval.ruler_v4.fit.optimize import (
@@ -272,6 +273,43 @@ class LapsePriorFreeSensitivity:
 
 
 @dataclass(frozen=True)
+class HalfSupportCounts:
+    """Publish realized support for one frozen graph half.
+
+    Parameters
+    ----------
+    units, graphs, base_pairs, replication_presentations : int
+        Distinct assignment units, graphs, train base pairs, and replication
+        rows realized in this half.
+    occupied_cells : tuple[tuple[str, str], ...]
+        Frozen graph-level class and size-band cells represented in this half.
+    """
+
+    units: int
+    graphs: int
+    base_pairs: int
+    replication_presentations: int
+    occupied_cells: Tuple[Tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class HalfSupport:
+    """Publish HALF-ASSIGN(h)'s complete realized support summary.
+
+    Parameters
+    ----------
+    half_a, half_b : HalfSupportCounts
+        Support for the two fixed halves.
+    one_sided_cells : tuple[tuple[str, str], ...]
+        Graph-level cells represented in exactly one half.
+    """
+
+    half_a: HalfSupportCounts
+    half_b: HalfSupportCounts
+    one_sided_cells: Tuple[Tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class Freeze1FitResult:
     """Publish the complete guarded FREEZE-1 run.
 
@@ -301,6 +339,8 @@ class Freeze1FitResult:
         Six derived gates used for this run.
     half_assignment_digest : str or None
         Frozen real partition digest, absent only for synthetic fixtures.
+    half_support : HalfSupport
+        Realized per-half assignment and presentation support.
     trajectory : tuple[FitDriverIteration, ...]
         Frozen joint-objective fixed-point trajectory.
     access_budget_before, access_budget_after : mapping[str, int]
@@ -321,6 +361,7 @@ class Freeze1FitResult:
     side_swap: Optional[SideSwapAuditResult]
     start_conditions: RealFitStartConditions
     half_assignment_digest: Optional[str]
+    half_support: HalfSupport
     trajectory: Tuple[FitDriverIteration, ...]
     access_budget_before: Mapping[str, int]
     access_budget_after: Mapping[str, int]
@@ -1058,6 +1099,111 @@ def _lapse_boundary_disclosure(
     )
 
 
+def _half_support(
+    train_rows: Sequence[FitPair],
+    replication_rows: Sequence[FitPair],
+    assignment: Optional[HalfAssignment],
+) -> HalfSupport:
+    """Compute HALF-ASSIGN(h) support before either half fit runs.
+
+    Parameters
+    ----------
+    train_rows : sequence[FitPair]
+        Complete train likelihood line.
+    replication_rows : sequence[FitPair]
+        Realized cross-session replication presentations.
+    assignment : HalfAssignment or None
+        Verified real assignment or the deterministic synthetic fixture seam.
+
+    Returns
+    -------
+    HalfSupport
+        Units, graphs, base pairs, presentations, cells, and one-sided cells.
+    """
+
+    rows = tuple(train_rows)
+    replications = tuple(replication_rows)
+    if assignment is None:
+        graph_halves = {row.graph_hash: _half_key(row, None) for row in rows}
+        unit_halves = dict(graph_halves)
+        graph_cells = {row.graph_hash: (row.primary_class, row.size_band) for row in rows}
+    else:
+        graph_halves = dict(assignment.graph_halves)
+        unit_halves = dict(assignment.unit_halves)
+        graph_cells = dict(assignment.graph_cells)
+        if not graph_cells:
+            graph_cells = {row.graph_hash: (row.primary_class, row.size_band) for row in rows}
+    cells_by_half = tuple(
+        {
+            graph_cells[graph_hash]
+            for graph_hash, assigned_half in graph_halves.items()
+            if assigned_half == half and graph_hash in graph_cells
+        }
+        for half in (0, 1)
+    )
+    counts = []
+    for half in (0, 1):
+        half_rows = tuple(row for row in rows if _half_key(row, assignment) == half)
+        half_replications = tuple(row for row in replications if _half_key(row, assignment) == half)
+        counts.append(
+            HalfSupportCounts(
+                units=sum(value == half for value in unit_halves.values()),
+                graphs=sum(value == half for value in graph_halves.values()),
+                base_pairs=len({row.base_pair_id for row in half_rows}),
+                replication_presentations=len(half_replications),
+                occupied_cells=tuple(sorted(cells_by_half[half])),
+            )
+        )
+    return HalfSupport(
+        half_a=counts[0],
+        half_b=counts[1],
+        one_sided_cells=tuple(sorted(cells_by_half[0] ^ cells_by_half[1])),
+    )
+
+
+def _outer_weight_split_half(
+    fitted: FitResult,
+    pairs: Sequence[FitPair],
+    plan: FittingPlan,
+    config: FitDriverConfig,
+    assignment: Optional[HalfAssignment],
+) -> OuterWeightStability:
+    """Apply the outer-weight split with HALF-ASSIGN(g)'s failure response.
+
+    Parameters
+    ----------
+    fitted : FitResult
+        Full-data outer-weight fit.
+    pairs : sequence[FitPair]
+        Final profiled train rows.
+    plan : FittingPlan
+        Frozen outer-weight plan and priors.
+    config : FitDriverConfig
+        Deterministic half-fit configuration.
+    assignment : HalfAssignment or None
+        Shared graph partition used by the JND block.
+
+    Returns
+    -------
+    OuterWeightStability
+        Evaluable comparisons plus prior-frozen ``UNEVALUABLE`` weights.
+    """
+
+    halves = tuple(
+        tuple(pair for pair in pairs if _half_key(pair, assignment) == half) for half in (0, 1)
+    )
+    empty_halves = tuple("AB"[half] for half, rows in enumerate(halves) if not rows)
+    if empty_halves:
+        reason = f"outer-weight half {'/'.join(empty_halves)} is empty"
+        unevaluable = tuple(
+            UnevaluableComponent(name, reason) for name in sorted(plan.parameter_names)
+        )
+        return apply_outer_weight_split_half(fitted, None, None, plan, unevaluable)
+    half_one, _, _ = _fit_weight_lapse_block(halves[0], plan, config)
+    half_two, _, _ = _fit_weight_lapse_block(halves[1], plan, config)
+    return apply_outer_weight_split_half(fitted, half_one, half_two, plan)
+
+
 def _require_real_start_conditions(
     conditions: Optional[RealFitStartConditions],
 ) -> None:
@@ -1218,6 +1364,7 @@ def run_freeze1_fit(
         )
         _require_real_start_conditions(start_conditions)
     lines = partition_fit_ord_lines(rows)
+    half_support = _half_support(lines.train, lines.replication, half_assignment)
     output = Path(run_dir)
     ledger = AccessLedger(ledger_root)
     if synthetic_only and ledger.is_campaign_root:
@@ -1239,6 +1386,7 @@ def run_freeze1_fit(
             "half_assignment_digest": (
                 None if half_assignment is None else half_assignment.table_sha256
             ),
+            "half_support": asdict(half_support),
             "dof_declaration": None if dof_declaration is None else dict(dof_declaration),
             "blind_attestation": None if blind_attestation is None else dict(blind_attestation),
             "access_budget_before": dict(budget_before),
@@ -1351,15 +1499,13 @@ def run_freeze1_fit(
         lapse_prior_weight = (plan.lapse_prior_alpha + plan.lapse_prior_beta) / (
             plan.lapse_prior_alpha + plan.lapse_prior_beta + len(final_train)
         )
-        halves = tuple(
-            tuple(pair for pair in final_train if _half_key(pair, half_assignment) == half)
-            for half in (0, 1)
+        outer_stability = _outer_weight_split_half(
+            weight_fit,
+            final_train,
+            plan,
+            driver_config,
+            half_assignment,
         )
-        if any(not half for half in halves):
-            raise ValueError("v4-half-1 graph split leaves an empty outer-weight half")
-        half_one, _, _ = _fit_weight_lapse_block(halves[0], plan, driver_config)
-        half_two, _, _ = _fit_weight_lapse_block(halves[1], plan, driver_config)
-        outer_stability = apply_outer_weight_split_half(weight_fit, half_one, half_two, plan)
         if jnd_fit.uncalibrated_classes:
             raise ValueError(
                 f"rotation-envelope guard blocks classes: {list(jnd_fit.uncalibrated_classes)}"
@@ -1416,6 +1562,9 @@ def run_freeze1_fit(
                         asdict(disclosure) for disclosure in jnd_fit.variance_boundary_disclosures
                     ],
                     "split_half_frozen": list(jnd_fit.split_half.frozen_components),
+                    "split_half_unevaluable": [
+                        asdict(item) for item in jnd_fit.split_half.unevaluable
+                    ],
                     "c06_shrink_actions": list(jnd_fit.c06_shrink_actions),
                     "c06_partial_declaration": jnd_fit.c06_partial_declaration,
                 },
@@ -1425,6 +1574,11 @@ def run_freeze1_fit(
                 "half_assignment_digest": (
                     None if half_assignment is None else half_assignment.table_sha256
                 ),
+                "half_support": asdict(half_support),
+                "outer_weight_split_half": {
+                    "frozen_at_prior": list(outer_stability.frozen_at_prior),
+                    "unevaluable": [asdict(item) for item in outer_stability.unevaluable],
+                },
                 "access_budget_after": dict(budget_after),
                 "ledger_annulments": list(ledger.annulment_lines(_FROZEN_A15_ROLE_HASH)),
                 "ledger_defects": list(ledger.ledger_defects(_FROZEN_A15_ROLE_HASH)),
@@ -1448,6 +1602,7 @@ def run_freeze1_fit(
             half_assignment_digest=(
                 None if half_assignment is None else half_assignment.table_sha256
             ),
+            half_support=half_support,
             trajectory=tuple(trajectory),
             access_budget_before=budget_before,
             access_budget_after=budget_after,
