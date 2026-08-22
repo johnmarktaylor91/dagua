@@ -10,7 +10,7 @@ import re
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, Optional, Sequence, Tuple
+from typing import Any, FrozenSet, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -37,6 +37,7 @@ from dagua.eval.ruler_v4.fit.optimize import (
     apply_outer_weight_split_half,
 )
 from dagua.eval.ruler_v4.fit.uncertainty import (
+    _DEFAULT_GROUP_MODEL_IDENTITIES,
     HalfAssignment,
     HJNDBranchResult,
     JNDFitConfig,
@@ -48,7 +49,12 @@ from dagua.eval.ruler_v4.fit.uncertainty import (
     load_half_assignment,
     profile_jnd_block,
 )
-from dagua.eval.ruler_v4.weight_table import REQUIRED_PRIOR_FLOOR_FACETS, WeightTable
+from dagua.eval.ruler_v4.score import ScoringProfiles
+from dagua.eval.ruler_v4.weight_table import (
+    REQUIRED_PRIOR_FLOOR_FACETS,
+    ParameterProvenance,
+    WeightTable,
+)
 
 _JOINT_TOLERANCE = 1.0e-10
 _MAX_FIXED_POINT_ITERATIONS = 25
@@ -546,6 +552,7 @@ def _verify_dof_declaration(
     source_path: Path,
     plan: FittingPlan,
     weight_table: WeightTable,
+    scoring_profiles: ScoringProfiles,
 ) -> Mapping[str, object]:
     """Verify DOF-DECL content and reconcile it with the realized fit ledger.
 
@@ -561,6 +568,8 @@ def _verify_dof_declaration(
         Realized fit plan.
     weight_table : WeightTable
         Complete shipped table whose fitted identities must match the declaration.
+    scoring_profiles : ScoringProfiles
+        Active score profile whose fitted scalar provenance must be declared.
 
     Returns
     -------
@@ -606,6 +615,18 @@ def _verify_dof_declaration(
         all_identities.extend(filled)
     if len(all_identities) != len(set(all_identities)):
         raise FitStartConditionError("fitted identity appears in more than one DOF bucket")
+    provenance = tuple(scoring_profiles.parameter_provenance.values())
+    if any(not isinstance(item, ParameterProvenance) for item in provenance):
+        raise FitStartConditionError("profile scalar provenance contains an invalid record")
+    profile_fitted_identities = {
+        item.fitted_identity for item in provenance if item.fitted_identity is not None
+    }
+    undeclared_profile_identities = sorted(profile_fitted_identities - set(all_identities))
+    if undeclared_profile_identities:
+        raise FitStartConditionError(
+            "fitted profile scalars differ from the DOF declaration: "
+            f"{undeclared_profile_identities}"
+        )
     if raw.get("sum") != 20 or raw.get("allowed_fitted_dof") != 20:
         raise FitStartConditionError("fitted DOF declaration cap arithmetic differs from A18")
     if raw.get("controlled_stimulus_fitted_dof") != 0:
@@ -640,6 +661,38 @@ def _verify_dof_declaration(
     if dict(weight_table.prior_floors) != dict(plan.prior_floors):
         raise FitStartConditionError("realized plan changes a declared prior floor")
     return MappingProxyType(raw)
+
+
+def _declared_dof_bucket(declaration: Mapping[str, object], bucket_name: str) -> FrozenSet[str]:
+    """Return one already-verified DOF bucket's declared membership.
+
+    Parameters
+    ----------
+    declaration : mapping[str, object]
+        Payload returned by :func:`_verify_dof_declaration`.
+    bucket_name : str
+        Frozen bucket code such as ``N_g``.
+
+    Returns
+    -------
+    frozenset[str]
+        Exact declared ``filled[]`` membership.
+
+    Raises
+    ------
+    FitStartConditionError
+        If the verified payload cannot supply the named bucket.
+    """
+
+    buckets = declaration.get("buckets")
+    if not isinstance(buckets, list):
+        raise FitStartConditionError("verified DOF declaration lost its bucket table")
+    for entry in buckets:
+        if isinstance(entry, dict) and entry.get("bucket") == bucket_name:
+            filled = entry.get("filled")
+            if isinstance(filled, list) and all(isinstance(item, str) for item in filled):
+                return frozenset(filled)
+    raise FitStartConditionError(f"verified DOF declaration lacks bucket {bucket_name}")
 
 
 def _forbidden_attestation_key(key: str) -> bool:
@@ -1239,6 +1292,7 @@ def run_freeze1_fit(
     dof_declaration_sha256: Optional[str] = None,
     dof_source_path: Optional[Path] = None,
     weight_table: Optional[WeightTable] = None,
+    scoring_profiles: Optional[ScoringProfiles] = None,
     blind_attestation_path: Optional[Path] = None,
     blind_attestation_sha256: Optional[str] = None,
     side_swap_audit_rows: Sequence[SideSwapAuditRow] = (),
@@ -1270,6 +1324,8 @@ def run_freeze1_fit(
         Latest landed declaration digest.
     weight_table : WeightTable or None
         Complete realized table for the external fitted-identity cross-check.
+    scoring_profiles : ScoringProfiles or None
+        Active scalar profile for the ``ParameterProvenance`` cross-check.
     blind_attestation_path : pathlib.Path or None
         Append-only attestation record containing the run's exact line.
     blind_attestation_sha256 : str or None
@@ -1323,6 +1379,7 @@ def run_freeze1_fit(
             "dof_declaration_sha256": dof_declaration_sha256,
             "dof_source_path": dof_source_path,
             "weight_table": weight_table,
+            "scoring_profiles": scoring_profiles,
             "blind_attestation_path": blind_attestation_path,
             "blind_attestation_sha256": blind_attestation_sha256,
         }
@@ -1334,6 +1391,7 @@ def run_freeze1_fit(
         assert dof_declaration_sha256 is not None
         assert dof_source_path is not None
         assert weight_table is not None
+        assert scoring_profiles is not None
         assert blind_attestation_path is not None
         assert blind_attestation_sha256 is not None
         try:
@@ -1344,6 +1402,7 @@ def run_freeze1_fit(
                 dof_source_path,
                 plan,
                 weight_table,
+                scoring_profiles,
             )
             blind_attestation = _verify_blind_attestation(
                 blind_attestation_path,
@@ -1365,6 +1424,11 @@ def run_freeze1_fit(
         _require_real_start_conditions(start_conditions)
     lines = partition_fit_ord_lines(rows)
     half_support = _half_support(lines.train, lines.replication, half_assignment)
+    declared_group_parameters = (
+        _DEFAULT_GROUP_MODEL_IDENTITIES
+        if dof_declaration is None
+        else _declared_dof_bucket(dof_declaration, "N_g")
+    )
     output = Path(run_dir)
     ledger = AccessLedger(ledger_root)
     if synthetic_only and ledger.is_campaign_root:
@@ -1407,6 +1471,7 @@ def run_freeze1_fit(
                 jnd_config,
                 previous_profile=profile,
                 half_assignment=half_assignment,
+                declared_group_parameters=declared_group_parameters,
             )
             profiled_train = _pairs_with_profile(lines.train, profile, current_lapse)
             weight_fit, current_lapse, train_mean = _fit_weight_lapse_block(
@@ -1456,6 +1521,7 @@ def run_freeze1_fit(
             current_weights,
             jnd_config,
             half_assignment=half_assignment,
+            declared_group_parameters=declared_group_parameters,
         )
         final_train = tuple(
             replace(
@@ -1558,6 +1624,7 @@ def run_freeze1_fit(
                         name: asdict(audit) for name, audit in jnd_fit.c06_component_audit.items()
                     },
                     "n_jnd": jnd_fit.n_jnd,
+                    "n_jnd_membership": list(jnd_fit.n_jnd_membership),
                     "variance_boundary_disclosures": [
                         asdict(disclosure) for disclosure in jnd_fit.variance_boundary_disclosures
                     ],
