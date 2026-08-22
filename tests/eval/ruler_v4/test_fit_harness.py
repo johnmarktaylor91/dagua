@@ -161,6 +161,8 @@ def _synthetic_recovery_rows(count: int = 1500) -> tuple[FitPair, ...]:
             ]
         )
         probabilities = np.diff(np.concatenate(([0.0], cdf, [1.0])))
+        lapse = 1.0 / 109.0
+        probabilities = (1.0 - lapse) * probabilities + lapse / 7.0
         verdict = int(generator.choice(tuple(range(-3, 4)), p=probabilities))
         rows.append(
             synthetic_fit_pair(
@@ -462,8 +464,8 @@ def test_synthetic_judgments_recover_known_weights_deterministically() -> None:
     assert first == second
     # These are sample-MLE regression pins, not claims about one draw recovering
     # population truth more tightly than its measured sampling error.
-    assert first.weights["w_structure"] == pytest.approx(0.6431144, abs=1.0e-6)
-    assert first.weights["w_neighborhood"] == pytest.approx(1.5997255, abs=1.0e-6)
+    assert first.weights["w_structure"] == pytest.approx(0.6465448, abs=1.0e-6)
+    assert first.weights["w_neighborhood"] == pytest.approx(1.5967943, abs=1.0e-6)
     assert first.losses[-1] < first.losses[0]
     assert first.information_rank == 2
     assert first.condition_number >= 1.0
@@ -517,7 +519,7 @@ def test_weight_fit_preserves_host_rng_and_determinism_state() -> None:
 
 
 def test_prior_penalty_scales_as_one_dataset_prior_not_per_row() -> None:
-    """A fixed prior contribution vanishes relative to growing evidence."""
+    """Both fixed priors enter once over the shared train-row denominator."""
 
     rows = _synthetic_recovery_rows(count=8)
     plan = FittingPlan(_weight_parameters())
@@ -525,11 +527,47 @@ def test_prior_penalty_scales_as_one_dataset_prior_not_per_row() -> None:
     weights = torch.tensor((0.5, 2.0), dtype=torch.float64)
     penalty = objective.loss(weights) - objective.negative_log_likelihood(weights)
     expected_sum = sum((math.log(value) / math.log(4.0)) ** 2 for value in (0.5, 2.0))
+    lapse = rows[0].lapse_rate
+    lapse_penalty = -math.log(lapse) - 108.0 * math.log1p(-lapse)
 
     assert plan.prior_strength == 2.0
-    assert float(penalty) == pytest.approx(2.0 * expected_sum / len(rows))
+    assert plan.lapse_prior_alpha == 2.0
+    assert plan.lapse_prior_beta == 109.0
+    assert float(penalty) == pytest.approx((2.0 * expected_sum + lapse_penalty) / len(rows))
+    assert float(objective.lapse_prior_penalty()) == pytest.approx(lapse_penalty)
+    assert float(objective.loss_without_lapse_prior(weights)) == pytest.approx(
+        float(objective.negative_log_likelihood(weights)) + 2.0 * expected_sum / len(rows)
+    )
     with pytest.raises(TypeError, match="prior_strength"):
         FittingPlan(_weight_parameters(), prior_strength=0.1)
+
+
+def test_lapse_prior_is_train_only_and_real_lapse_is_one_scalar() -> None:
+    """LAPSE-PRIOR never enters JND NLL and real rows cannot vary lapse by row."""
+
+    rows = _synthetic_recovery_rows(count=4)
+    plan = FittingPlan(_weight_parameters())
+    objective = PairwiseObjective(rows, plan)
+    weights = torch.tensor((0.6, 1.6), dtype=torch.float64)
+    differences = objective.score_differences(weights).detach().numpy()
+    verdicts = np.asarray([row.graded_verdict for row in rows], dtype=np.int64)
+    lapses = np.asarray([row.lapse_rate for row in rows])
+
+    jnd_nll = uncertainty_module._ordered_nll(rows[0].jnd, differences, verdicts, lapses)
+    doubled_jnd_nll = uncertainty_module._ordered_nll(
+        rows[0].jnd,
+        np.concatenate((differences, differences)),
+        np.concatenate((verdicts, verdicts)),
+        np.concatenate((lapses, lapses)),
+    )
+
+    assert doubled_jnd_nll == pytest.approx(2.0 * jnd_nll)
+    real_rows = tuple(replace(row, synthetic=False) for row in rows)
+    with pytest.raises(ValueError, match="one broadcast lapse"):
+        PairwiseObjective(
+            (real_rows[0], replace(real_rows[1], lapse_rate=0.03)),
+            plan,
+        )
 
 
 def test_objective_consumes_all_seven_graded_verdicts_with_probit_cutpoints() -> None:
@@ -547,6 +585,7 @@ def test_objective_consumes_all_seven_graded_verdicts_with_probit_cutpoints() ->
             _synthetic_recovery_rows(count=1)[0],
             outcome=0 if verdict == 0 else (1 if verdict > 0 else -1),
             graded_verdict=verdict,
+            lapse_rate=0.0,
         )
         for verdict in range(-3, 4)
     )

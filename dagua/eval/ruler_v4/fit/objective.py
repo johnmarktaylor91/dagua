@@ -22,6 +22,9 @@ from dagua.eval.ruler_v4.weight_table import (
 
 _MIN_PROBABILITY = 1.0e-12
 _FROZEN_PRIOR_STRENGTH = 2.0
+_FROZEN_LAPSE_PRIOR_ALPHA = 2.0
+_FROZEN_LAPSE_PRIOR_BETA = 109.0
+_FROZEN_LAPSE_MODE = 1.0 / 109.0
 
 
 @dataclass(frozen=True)
@@ -104,12 +107,16 @@ class FittingPlan:
         Frozen positive floors for any traceability facets present in ``weights``.
     prior_strength : float
         Frozen inverse prior variance on the ``log_4`` scale.
+    lapse_prior_alpha, lapse_prior_beta : float
+        Frozen Beta prior constants for the single seven-category lapse.
     """
 
     weights: Tuple[WeightParameter, ...]
     other_fitted_parameter_buckets: Mapping[str, str] = field(default_factory=dict)
     prior_floors: Mapping[str, float] = field(default_factory=dict)
     prior_strength: float = field(default=_FROZEN_PRIOR_STRENGTH, init=False)
+    lapse_prior_alpha: float = field(default=_FROZEN_LAPSE_PRIOR_ALPHA, init=False)
+    lapse_prior_beta: float = field(default=_FROZEN_LAPSE_PRIOR_BETA, init=False)
 
     def __post_init__(self) -> None:
         """Freeze declarations and refuse off-ledger degrees of freedom.
@@ -327,7 +334,7 @@ def synthetic_fit_pair(
     fixed_mass: float = 0.0,
     composition_power: float = 1.0,
     jnd: float = 0.1,
-    lapse_rate: float = 0.0,
+    lapse_rate: float = _FROZEN_LAPSE_MODE,
     primary_class: str = "synthetic",
     size_band: str = "synthetic",
     graph_hash: str = "synthetic",
@@ -634,6 +641,9 @@ class PairwiseObjective:
         strata = {(row.instrument_hash, row.era, row.observation_profile) for row in rows}
         if len(strata) != 1:
             raise ValueError("one likelihood may not cross instrument/era/profile/purpose strata")
+        real_lapses = {row.lapse_rate for row in rows if not row.synthetic}
+        if len(real_lapses) > 1:
+            raise ValueError("a real FIT-ORD row set must carry one broadcast lapse value")
         self.pairs = rows
         self.plan = plan
         self.dtype = dtype
@@ -740,7 +750,7 @@ class PairwiseObjective:
         return -torch.log(selected).mean()
 
     def loss(self, weights: torch.Tensor) -> torch.Tensor:
-        """Return likelihood plus preregistered log-prior shrinkage.
+        """Return likelihood plus both preregistered prior penalties.
 
         Parameters
         ----------
@@ -753,9 +763,65 @@ class PairwiseObjective:
             Scalar regularized fitting objective.
         """
 
+        return self._loss(weights, include_lapse_prior=True)
+
+    def loss_without_lapse_prior(self, weights: torch.Tensor) -> torch.Tensor:
+        """Return the frozen prior-free lapse sensitivity objective.
+
+        Parameters
+        ----------
+        weights : torch.Tensor
+            Positive fitted weights with shape ``[P]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Mean objective retaining weight shrinkage but omitting only the
+            Beta lapse penalty.
+        """
+
+        return self._loss(weights, include_lapse_prior=False)
+
+    def lapse_prior_penalty(self) -> torch.Tensor:
+        """Return the once-per-dataset negative log Beta density.
+
+        Returns
+        -------
+        torch.Tensor
+            Scalar penalty with the additive normalizing constant omitted.
+        """
+
+        lapse = self._lapse[0]
+        return -(
+            (self.plan.lapse_prior_alpha - 1.0) * torch.log(lapse)
+            + (self.plan.lapse_prior_beta - 1.0) * torch.log1p(-lapse)
+        )
+
+    def _loss(self, weights: torch.Tensor, include_lapse_prior: bool) -> torch.Tensor:
+        """Evaluate the mean-scale objective with explicit lapse-prior control.
+
+        Parameters
+        ----------
+        weights : torch.Tensor
+            Positive fitted weights with shape ``[P]``.
+        include_lapse_prior : bool
+            Whether to include LAPSE-PRIOR(d); false is reserved for the
+            mandatory prior-free sensitivity refit.
+
+        Returns
+        -------
+        torch.Tensor
+            Scalar mean regularized objective.
+        """
+
         nll = self.negative_log_likelihood(weights)
         shrinkage = torch.square(torch.log(weights / self._priors) / math.log(4.0)).sum()
-        return nll + self.plan.prior_strength * shrinkage / len(self.pairs)
+        prior = self.plan.prior_strength * shrinkage
+        if include_lapse_prior:
+            prior = prior + self.lapse_prior_penalty()
+        # Both priors are added once to the summed train NLL, so the shipped
+        # mean-scale objective divides their sum by the train-row denominator.
+        return nll + prior / len(self.pairs)
 
 
 @dataclass(frozen=True)
