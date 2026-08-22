@@ -575,6 +575,56 @@ def test_lapse_prior_is_train_only_and_real_lapse_is_one_scalar() -> None:
         )
 
 
+def test_exact_duplication_weakens_one_dataset_lapse_prior() -> None:
+    """Duplicating evidence moves lapse toward data rather than duplicating its prior."""
+
+    fixed = WeightParameter(
+        "fixed-weight",
+        "universal",
+        1.0,
+        {"synthetic": 1.0},
+        ("U01",),
+        lower=1.0,
+        upper=1.0,
+    )
+    plan = FittingPlan((fixed,))
+    outlier = synthetic_fit_pair(
+        numerator_a=(0.0,),
+        numerator_b=(10.0,),
+        mass_coefficients=(1.0,),
+        graded_verdict=3,
+        fixed_mass=1.0,
+    )
+
+    _, sparse_lapse, _ = driver_module._fit_weight_lapse_block(
+        (outlier,) * 2,
+        plan,
+        FitDriverConfig(),
+    )
+    _, duplicated_lapse, _ = driver_module._fit_weight_lapse_block(
+        (outlier,) * 20,
+        plan,
+        FitDriverConfig(),
+    )
+
+    assert 1.0 / 109.0 < sparse_lapse < duplicated_lapse < 0.25
+
+
+def test_lapse_boundary_disclosure_publishes_both_objectives() -> None:
+    """A bound-pinned lapse names the bound and penalized/unpenalized objectives."""
+
+    rows = tuple(replace(row, lapse_rate=0.25) for row in _synthetic_recovery_rows(count=4))
+    plan = FittingPlan(_weight_parameters())
+    weights = {parameter.name: parameter.prior for parameter in plan.weights}
+
+    disclosure = driver_module._lapse_boundary_disclosure(rows, plan, weights, 0.25)
+
+    assert disclosure is not None
+    assert disclosure.bound == "upper"
+    assert disclosure.fitted_value == 0.25
+    assert disclosure.penalized_objective > disclosure.unpenalized_objective
+
+
 def test_objective_consumes_all_seven_graded_verdicts_with_probit_cutpoints() -> None:
     """The full A13 scale reaches the fixed-ratio ordered-probit likelihood."""
 
@@ -2646,6 +2696,10 @@ def test_freeze1_driver_runs_synthetic_fit_with_ledgered_artifacts(
         for iteration in result.trajectory
     )
     assert 0.0 <= result.lapse_rate <= 0.25
+    assert result.lapse_interval[0] <= result.lapse_rate <= result.lapse_interval[1]
+    assert result.lapse_prior_weight == pytest.approx(111.0 / (111.0 + len(rows)))
+    assert result.lapse_boundary_disclosure is None
+    assert 1.0e-6 <= result.lapse_prior_free_sensitivity.lapse_rate <= 0.25
     assert result.access_budget_before["test-h-jnd-branch"] == 0
     assert result.access_budget_after["test-h-jnd-branch"] == 1
     assert not result.jnd_fit.uncalibrated_classes
@@ -2672,6 +2726,9 @@ def test_freeze1_driver_runs_synthetic_fit_with_ledgered_artifacts(
     assert publication["ledger_annulments"] == []
     assert publication["ledger_defects"] == []
     assert publication["jnd"]["c06_partial_declaration"] is False
+    assert publication["lapse_interval"] == list(result.lapse_interval)
+    assert publication["lapse_prior_weight"] == pytest.approx(result.lapse_prior_weight)
+    assert publication["lapse_boundary_disclosure"] is None
     assert publication["iterations"] == len(result.trajectory) == len(trajectory)
     assert status == {"state": "COMPLETE"}
     with pytest.raises(FileExistsError):
