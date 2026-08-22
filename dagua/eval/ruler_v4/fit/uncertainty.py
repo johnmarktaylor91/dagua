@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import DefaultDict, Mapping, Optional, Sequence, Tuple
 
@@ -23,10 +25,191 @@ _FROZEN_SEED = 20260811
 _PROFILE_DROP = 1.920729410347062
 _LOG_JND_BOUNDS = (math.log(1.0e-6), math.log(100.0))
 _LOG_TAU_BOUNDS = (math.log(1.0e-6), math.log(10.0))
-_A15_HALF_SALT = "v4-split-2|within"
+_SYNTHETIC_HALF_SALT = "v4-split-2|within"
+_HALF_ASSIGNMENT_SALT = "v4-split-2|within|w13-half"
+_FROZEN_FAMILY_MAP_SHA256 = (
+    "32852df2a9c737d513469dff4df84ad91aec4893cb39cbc96d9f26e71bd28ebe"  # pragma: allowlist secret
+)
+_FROZEN_HALF_ASSIGNMENT_SHA256 = (
+    "4041736f049333ca031409e8201b98343b28afb93dd521382762f8072fd69b88"  # pragma: allowlist secret
+)
+_HALF_BANDS = ("le30", "31-100", "101-300", "301-1000", "1001-2000", "gt2000")
 _C06_GRANTED_PARAMETERS = 2
 _C06_NAMED_PARAMETERS = frozenset({"mu", "tau_class", "tau_band"})
 _TAU_BOUNDARY_LOG_ATOL = 1.0e-7
+
+
+@dataclass(frozen=True)
+class HalfAssignment:
+    """Publish the frozen ``v4-half-1`` graph partition.
+
+    Parameters
+    ----------
+    graph_halves : mapping[str, int]
+        Train graph hashes mapped to zero (A) or one (B).
+    unit_halves : mapping[str, int]
+        A15 sweep units mapped to the same two halves.
+    table_sha256 : str
+        Digest of the canonical complete unit-to-half table.
+    family_map_sha256 : str
+        Digest of the A15 family map used to derive the table.
+    """
+
+    graph_halves: Mapping[str, int]
+    unit_halves: Mapping[str, int]
+    table_sha256: str
+    family_map_sha256: str
+
+    def __post_init__(self) -> None:
+        """Freeze mappings and validate the complete two-way partition.
+
+        Raises
+        ------
+        ValueError
+            If a mapping is empty, carries an invalid half, or has a bad digest.
+        """
+
+        graph_halves = dict(self.graph_halves)
+        unit_halves = dict(self.unit_halves)
+        if not graph_halves or not unit_halves:
+            raise ValueError("v4-half-1 requires nonempty graph and sweep-unit mappings")
+        if any(value not in (0, 1) for value in (*graph_halves.values(), *unit_halves.values())):
+            raise ValueError("v4-half-1 values must be zero or one")
+        if len(self.table_sha256) != 64 or len(self.family_map_sha256) != 64:
+            raise ValueError("v4-half-1 digests must be lowercase SHA-256 hex")
+        object.__setattr__(self, "graph_halves", MappingProxyType(graph_halves))
+        object.__setattr__(self, "unit_halves", MappingProxyType(unit_halves))
+
+
+def load_half_assignment(family_map_path: Path) -> HalfAssignment:
+    """Derive and verify the frozen ``v4-half-1`` assignment exactly once.
+
+    Parameters
+    ----------
+    family_map_path : pathlib.Path
+        Frozen ``A15_FAMILY_MAP.json`` path.
+
+    Returns
+    -------
+    HalfAssignment
+        Verified graph and sweep-unit partition anchored by ``4041736f...``.
+
+    Raises
+    ------
+    ValueError
+        If the family map, schema, population, or canonical table differs from
+        the frozen ADDENDUM-29 anchors.
+    """
+
+    payload = Path(family_map_path).read_bytes()
+    family_digest = hashlib.sha256(payload).hexdigest()
+    if family_digest != _FROZEN_FAMILY_MAP_SHA256:
+        raise ValueError("v4-half-1 family-map digest does not match A15 V-16")
+    raw = json.loads(payload)
+    graphs = raw.get("graphs") if isinstance(raw, dict) else None
+    if not isinstance(graphs, dict):
+        raise ValueError("v4-half-1 family map lacks the graph mapping")
+    units: DefaultDict[str, list[Tuple[str, Mapping[str, object]]]] = defaultdict(list)
+    for graph_hash, metadata in graphs.items():
+        if not isinstance(metadata, dict) or metadata.get("role") != "train":
+            continue
+        unit = metadata.get("sweep_unit")
+        if not isinstance(unit, str) or not unit:
+            raise ValueError(f"train graph {graph_hash} lacks an A15 sweep unit")
+        units[unit].append((str(graph_hash), metadata))
+    if not units:
+        raise ValueError("v4-half-1 family map has no train sweep units")
+
+    def unit_class(members: Sequence[Tuple[str, Mapping[str, object]]]) -> str:
+        """Return the modal primary class with lexical tie breaking.
+
+        Parameters
+        ----------
+        members : sequence[tuple[str, mapping[str, object]]]
+            Graph hash and A15 metadata rows for one sweep unit.
+
+        Returns
+        -------
+        str
+            Frozen modal class accessor.
+        """
+
+        counts = Counter(str(metadata.get("primary_class", "")) for _, metadata in members)
+        maximum = max(counts.values())
+        return min(name for name, count in counts.items() if count == maximum)
+
+    def unit_band(members: Sequence[Tuple[str, Mapping[str, object]]]) -> int:
+        """Return the minimum frozen size-band index for a sweep unit.
+
+        Parameters
+        ----------
+        members : sequence[tuple[str, mapping[str, object]]]
+            Graph hash and A15 metadata rows for one sweep unit.
+
+        Returns
+        -------
+        int
+            Minimum index into the frozen band ordering.
+        """
+
+        try:
+            return min(
+                _HALF_BANDS.index(str(metadata.get("size_band", ""))) for _, metadata in members
+            )
+        except ValueError as error:
+            raise ValueError("v4-half-1 encountered an unknown size band") from error
+
+    def unit_keyed(members: Sequence[Tuple[str, Mapping[str, object]]]) -> str:
+        """Return the minimum purpose-separated digest for a sweep unit.
+
+        Parameters
+        ----------
+        members : sequence[tuple[str, mapping[str, object]]]
+            Graph hash and A15 metadata rows for one sweep unit.
+
+        Returns
+        -------
+        str
+            Lowercase hexadecimal SHA-256 accessor.
+        """
+
+        return min(
+            hashlib.sha256(f"{_HALF_ASSIGNMENT_SALT}|{graph_hash}".encode("utf-8")).hexdigest()
+            for graph_hash, _ in members
+        )
+
+    strata: DefaultDict[str, list[str]] = defaultdict(list)
+    for unit, members in units.items():
+        strata[unit_class(members)].append(unit)
+    unit_halves: dict[str, int] = {}
+    for primary_class in sorted(strata):
+        members = sorted(
+            strata[primary_class],
+            key=lambda unit: (unit_band(units[unit]), unit_keyed(units[unit])),
+        )
+        offset_digest = hashlib.sha256(
+            f"{_HALF_ASSIGNMENT_SALT}|offset|{primary_class}".encode("utf-8")
+        ).hexdigest()
+        offset = int(offset_digest, 16) % 2
+        for index, unit in enumerate(members):
+            unit_halves[unit] = (index + offset) % 2
+    table = "".join(
+        f"{unit}\t{'A' if unit_halves[unit] == 0 else 'B'}\n" for unit in sorted(unit_halves)
+    )
+    table_digest = hashlib.sha256(table.encode("utf-8")).hexdigest()
+    if table_digest != _FROZEN_HALF_ASSIGNMENT_SHA256:
+        raise ValueError("v4-half-1 canonical table digest does not match ADDENDUM-29")
+    graph_halves = {
+        graph_hash: unit_halves[unit]
+        for unit, members in units.items()
+        for graph_hash, _ in members
+    }
+    return HalfAssignment(
+        graph_halves=graph_halves,
+        unit_halves=unit_halves,
+        table_sha256=table_digest,
+        family_map_sha256=family_digest,
+    )
 
 
 @dataclass(frozen=True)
@@ -1495,14 +1678,48 @@ def _synthetic_half_key(graph_hash: str) -> int:
         is fixture-only; ADDENDUM-27 does not freeze a real graph-half mapping.
     """
 
-    digest = hashlib.sha256(f"{_A15_HALF_SALT}|{graph_hash}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{_SYNTHETIC_HALF_SALT}|{graph_hash}".encode("utf-8")).digest()
     return digest[-1] & 1
+
+
+def _half_key(pair: FitPair, assignment: Optional[HalfAssignment]) -> int:
+    """Resolve one row through the supplied frozen partition or fixture seam.
+
+    Parameters
+    ----------
+    pair : FitPair
+        Replication or train row to assign.
+    assignment : HalfAssignment or None
+        Verified real assignment. ``None`` is legal only for synthetic rows.
+
+    Returns
+    -------
+    int
+        Zero for half A or one for half B.
+
+    Raises
+    ------
+    ValueError
+        If a real or unmapped graph reaches the split without a verified table.
+    """
+
+    if assignment is None:
+        if not pair.synthetic:
+            raise ValueError("real v4-half-1 splitting requires the verified assignment table")
+        return _synthetic_half_key(pair.graph_hash)
+    try:
+        return assignment.graph_halves[pair.graph_hash]
+    except KeyError as error:
+        raise ValueError(
+            f"graph absent from the verified v4-half-1 table: {pair.graph_hash}"
+        ) from error
 
 
 def _split_half_fit(
     rows: Tuple[FitPair, ...],
     differences: np.ndarray,
     eligible_bands: frozenset[str],
+    half_assignment: Optional[HalfAssignment] = None,
 ) -> Tuple[_MetaFit, _MetaFit]:
     """Fit graph-disjoint A15-salted replication halves.
 
@@ -1514,6 +1731,8 @@ def _split_half_fit(
         Score differences aligned with rows.
     eligible_bands : frozenset[str]
         Bands entering the random band component.
+    half_assignment : HalfAssignment or None
+        Verified real partition, or ``None`` for the synthetic fixture seam.
 
     Returns
     -------
@@ -1529,7 +1748,7 @@ def _split_half_fit(
     fits = []
     for half in (0, 1):
         indices = [
-            index for index, pair in enumerate(rows) if _synthetic_half_key(pair.graph_hash) == half
+            index for index, pair in enumerate(rows) if _half_key(pair, half_assignment) == half
         ]
         if not indices:
             raise ValueError("A15-salted graph split leaves an empty JND half")
@@ -1587,6 +1806,7 @@ def profile_jnd_block(
     weights: Mapping[str, float],
     config: JNDFitConfig,
     previous_profile: Optional[JNDProfileFit] = None,
+    half_assignment: Optional[HalfAssignment] = None,
 ) -> JNDProfileFit:
     """Profile the post-guard JND block without final bootstrap publications.
 
@@ -1602,6 +1822,8 @@ def profile_jnd_block(
         Frozen support, quota, seed, and role identity.
     previous_profile : JNDProfileFit or None
         Prior fixed-point profile used only to account the block decrease.
+    half_assignment : HalfAssignment or None
+        Verified ``v4-half-1`` table for real rows.
 
     Returns
     -------
@@ -1610,15 +1832,11 @@ def profile_jnd_block(
 
     Raises
     ------
-    NotImplementedError
-        If a real row reaches the synthetic-only activation boundary.
     ValueError
         If replication provenance or support is incomplete.
     """
 
     rows = tuple(pairs)
-    if any(not pair.synthetic for pair in rows):
-        raise NotImplementedError("real JND profiling remains behind the freeze-fit start gate")
     counts = _validate_replication_rows(rows)
     bands = {pair.size_band for pair in rows}
     classes = {pair.primary_class for pair in rows}
@@ -1648,7 +1866,7 @@ def profile_jnd_block(
     _, tau_class_ci, tau_band_ci = _meta_profile_intervals(
         observations, eligible_bands, initial_fit
     )
-    half_one, half_two = _split_half_fit(rows, differences, eligible_bands)
+    half_one, half_two = _split_half_fit(rows, differences, eligible_bands, half_assignment)
     split_frozen = {
         component
         for component, interval in (
@@ -1711,6 +1929,7 @@ def fit_jnd_heterogeneity(
     plan: FittingPlan,
     weights: Mapping[str, float],
     config: JNDFitConfig,
+    half_assignment: Optional[HalfAssignment] = None,
 ) -> JNDHeterogeneityFit:
     """Fit and publish the frozen W-13 hierarchical uncertainty procedure.
 
@@ -1724,6 +1943,8 @@ def fit_jnd_heterogeneity(
         Current profiled outer weights.
     config : JNDFitConfig
         Realized quota and rotation-envelope inputs with frozen constants.
+    half_assignment : HalfAssignment or None
+        Verified ``v4-half-1`` table for real rows.
 
     Returns
     -------
@@ -1735,17 +1956,9 @@ def fit_jnd_heterogeneity(
     ------
     ValueError
         If provenance, support, quota, or rotation inputs are incomplete.
-    NotImplementedError
-        If real rows reach the estimator before the graph-to-half assignment
-        rule under the named A15 salt is frozen.
     """
 
     rows = tuple(pairs)
-    if any(not pair.synthetic for pair in rows):
-        raise NotImplementedError(
-            "real W-13 split-half fitting is fail-closed because ADDENDUM-27 names "
-            "the A15 salt but does not freeze a graph-to-half assignment rule"
-        )
     counts = _validate_replication_rows(rows)
     bands = {pair.size_band for pair in rows}
     classes = {pair.primary_class for pair in rows}
@@ -1768,7 +1981,7 @@ def fit_jnd_heterogeneity(
     differences = objective.score_differences(vector).detach().numpy()
     observations = _cell_observations(rows, differences)
     initial_fit = _meta_fit(observations, eligible_bands)
-    half_one, half_two = _split_half_fit(rows, differences, eligible_bands)
+    half_one, half_two = _split_half_fit(rows, differences, eligible_bands, half_assignment)
     split_frozen_components = set()
     _, initial_tau_class_ci, initial_tau_band_ci = _meta_profile_intervals(
         observations, eligible_bands, initial_fit
