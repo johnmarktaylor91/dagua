@@ -11,6 +11,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import DefaultDict, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import torch
 
 from dagua.eval.ruler_v4._tracing import (
@@ -176,6 +177,10 @@ _U07_WORKED_EXAMPLE_GAMMA = 1.0
 _U07_WORKED_EXAMPLE_LAMBDA_T = 0.5
 _U11_TERMINAL_DISK_SIDES = 16
 _U11_TERMINAL_CLEAR_RADIUS = 0.5
+VECTORIZED_EXACT_SCORERS = False
+_U07_PAIR_BLOCK_SIZE = 262_144
+_U11_PAIR_OBSTACLE_BUDGET = 16_384
+_U11_OBSTACLE_SELECTION_BATCH_MIN = 128
 
 
 @dataclass(frozen=True)
@@ -387,6 +392,163 @@ def _crossing_events(scene: Scene, gamma: float) -> List[_CrossingEvent]:
     return results
 
 
+def _crossing_candidate_pairs_vectorized(
+    segments: Sequence[Tuple[int, int, torch.Tensor, torch.Tensor]],
+) -> List[Tuple[int, int]]:
+    """Find U07 event-bearing segment pairs with batched float64 decisions.
+
+    Parameters
+    ----------
+    segments : sequence[tuple[int, int, torch.Tensor, torch.Tensor]]
+        Flattened routes in the shipped scorer's canonical segment order.
+
+    Returns
+    -------
+    list[tuple[int, int]]
+        Segment-index pairs in the exact order of the scalar nested sweep.
+
+    Notes
+    -----
+    Only the event-presence decision is batched. The score-visible event point,
+    angle, proximity, density, and severity are rebuilt by the shipped scalar
+    arithmetic after this filter. Each batched predicate uses the same float64
+    operations in the same per-element order as :func:`_segment_event_point`.
+    """
+
+    if len(segments) < 2:
+        return []
+    edge_indices = torch.tensor([segment[0] for segment in segments], dtype=torch.int64)
+    starts = torch.stack([segment[2].detach().cpu() for segment in segments])
+    ends = torch.stack([segment[3].detach().cpu() for segment in segments])
+    pair_indices = torch.triu_indices(len(segments), len(segments), offset=1)
+    candidates: List[Tuple[int, int]] = []
+    for block_start in range(0, pair_indices.shape[1], _U07_PAIR_BLOCK_SIZE):
+        block = pair_indices[:, block_start : block_start + _U07_PAIR_BLOCK_SIZE]
+        left = block[0]
+        right = block[1]
+        direction_a = ends[left] - starts[left]
+        direction_b = ends[right] - starts[right]
+        offset = starts[right] - starts[left]
+        cross = direction_a[:, 0] * direction_b[:, 1] - direction_a[:, 1] * direction_b[:, 0]
+        nonparallel = cross != 0.0
+        safe_cross = torch.where(nonparallel, cross, torch.ones_like(cross))
+        parameter_a = (
+            offset[:, 0] * direction_b[:, 1] - offset[:, 1] * direction_b[:, 0]
+        ) / safe_cross
+        parameter_b = (
+            offset[:, 0] * direction_a[:, 1] - offset[:, 1] * direction_a[:, 0]
+        ) / safe_cross
+        transversal = (
+            nonparallel
+            & (parameter_a > 0.0)
+            & (parameter_a < 1.0)
+            & (parameter_b > 0.0)
+            & (parameter_b < 1.0)
+        )
+
+        collinear = ~nonparallel & (
+            direction_a[:, 0] * offset[:, 1] - direction_a[:, 1] * offset[:, 0] == 0.0
+        )
+        length_squared = (direction_a * direction_a).sum(dim=1)
+        safe_length_squared = torch.where(
+            length_squared != 0.0,
+            length_squared,
+            torch.ones_like(length_squared),
+        )
+        left_parameter = (offset * direction_a).sum(dim=1) / safe_length_squared
+        right_parameter = ((ends[right] - starts[left]) * direction_a).sum(
+            dim=1
+        ) / safe_length_squared
+        overlap_start = torch.maximum(
+            torch.zeros_like(left_parameter), torch.minimum(left_parameter, right_parameter)
+        )
+        overlap_end = torch.minimum(
+            torch.ones_like(left_parameter), torch.maximum(left_parameter, right_parameter)
+        )
+        overlap = collinear & (length_squared != 0.0) & (overlap_end > overlap_start)
+        selected = ((edge_indices[left] != edge_indices[right]) & (transversal | overlap)).nonzero(
+            as_tuple=False
+        )
+        candidates.extend(
+            (int(left[index]), int(right[index])) for index in selected[:, 0].tolist()
+        )
+    return candidates
+
+
+def _crossing_events_vectorized(scene: Scene, gamma: float) -> List[_CrossingEvent]:
+    """Compute U07 events after a vectorized, decision-only crossing sweep.
+
+    Parameters
+    ----------
+    scene : Scene
+        Validated route scene.
+    gamma : float
+        Positive fitted crossing-severity scale.
+
+    Returns
+    -------
+    list[_CrossingEvent]
+        Events with score-visible values rebuilt by the scalar exact formulas.
+    """
+
+    segments = route_segments(scene)
+    provisional: List[Tuple[int, int, torch.Tensor, Scalar, Scalar]] = []
+    for left_index, right_index in _crossing_candidate_pairs_vectorized(segments):
+        edge_a, _, start_a, end_a = segments[left_index]
+        edge_b, _, start_b, end_b = segments[right_index]
+        event = _segment_event_point(start_a, end_a, start_b, end_b)
+        if event is None:
+            # This guard is deliberately retained: the vectorized sweep is a
+            # decision accelerator, while the shipped scalar predicate remains
+            # the final authority for every published event.
+            continue
+        point, angle = event
+        terminals_a = scene.graph.edges[edge_a]
+        terminals_b = scene.graph.edges[edge_b]
+        terminal_points = scene.positions[list((*terminals_a, *terminals_b))]
+        proximity = keep(torch.min(torch.linalg.vector_norm(terminal_points - point, dim=1)))
+        if as_float(proximity) == 0.0:
+            proximity = 0.0
+        provisional.append((min(edge_a, edge_b), max(edge_a, edge_b), point, angle, proximity))
+
+    multiplicities = Counter((left, right) for left, right, _, _, _ in provisional)
+    results: List[_CrossingEvent] = []
+    for event_index, (edge_a, edge_b, point, angle, proximity) in enumerate(provisional):
+        sine_squared = _p_sin(angle) ** 2
+        density: Scalar = 0.0
+        for other_index, (_, _, other_point, other_angle, _) in enumerate(provisional):
+            if event_index == other_index:
+                continue
+            normalized_squared = (
+                keep(torch.sum((point - other_point) ** 2)) / (6.0 * scene.intrinsic_unit) ** 2
+            )
+            density += _p_sin(other_angle) ** 2 * p_max(0.0, 1.0 - normalized_squared) ** 2
+        multiplicity = multiplicities[(edge_a, edge_b)]
+        angle_term = _p_cos(angle) ** 2
+        proximity_ratio = proximity / scene.intrinsic_unit
+        proximity_term = p_max(0.0, 1.0 - proximity_ratio**2 / 16.0) ** 2
+        repeat_term = (multiplicity - 1.0) / multiplicity
+        density_term = density / (density + 3.0)
+        severity = gamma * (
+            0.50 * angle_term
+            + sine_squared * (0.20 * proximity_term + 0.15 * density_term)
+            + 0.15 * repeat_term
+        )
+        results.append(
+            _CrossingEvent(
+                edge_a,
+                edge_b,
+                point,
+                angle,
+                proximity_ratio,
+                multiplicity,
+                density,
+                severity,
+            )
+        )
+    return results
+
+
 def U07(
     scene: Scene,
     gamma: float = _U07_WORKED_EXAMPLE_GAMMA,
@@ -421,7 +583,11 @@ def U07(
     if not math.isfinite(lambda_T) or not 0.0 <= lambda_T <= 1.0:
         raise ValueError("U07 lambda_T must be finite and lie in [0, 1]")
 
-    events = _crossing_events(scene, gamma)
+    events = (
+        _crossing_events_vectorized(scene, gamma)
+        if VECTORIZED_EXACT_SCORERS
+        else _crossing_events(scene, gamma)
+    )
     eligible = 0
     for left in range(scene.edge_count):
         for right in range(left + 1, scene.edge_count):
@@ -1037,7 +1203,9 @@ def U11(scene: Scene) -> FacetResult:
         turns = _signed_route_turns(points)
         total_turn = p_sum([p_abs(turn) for turn in turns])
         wiggle = total_turn - p_abs(p_sum(turns))
-        baseline_length, baseline_turn = _route_baseline(scene, route)
+        baseline_length, baseline_turn = _route_baseline(
+            scene, route, vectorized=VECTORIZED_EXACT_SCORERS
+        )
         if scene.graph.edge_styles is not None and source != target:
             style = scene.graph.edge_styles[route.edge_index]
             excess_turn = _zero_hinge(total_turn - baseline_turn, 0.05)
@@ -1659,6 +1827,248 @@ def _segment_cleared_obstacle_interior_intersection(
     return False
 
 
+def _batched_boundary_parameters(
+    starts: np.ndarray,
+    ends: np.ndarray,
+    boundaries: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Evaluate segment-boundary parameters in one float64 batch.
+
+    Parameters
+    ----------
+    starts, ends : numpy.ndarray
+        Detached segment endpoints with shape ``[S, 2]``.
+    boundaries : numpy.ndarray
+        Boundary endpoints with shape ``[B, 4]`` or ``[O, B, 4]``.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        Query parameters and their validity mask, shaped ``[S, B]`` or
+        ``[S, O, B]`` respectively.
+    """
+
+    query = ends - starts
+    boundary = boundaries[..., 2:] - boundaries[..., :2]
+    if boundaries.ndim == 2:
+        query_x = query[:, None, 0]
+        query_y = query[:, None, 1]
+        boundary_x = boundary[None, :, 0]
+        boundary_y = boundary[None, :, 1]
+        offset = boundaries[None, :, :2] - starts[:, None, :]
+    else:
+        query_x = query[:, None, None, 0]
+        query_y = query[:, None, None, 1]
+        boundary_x = boundary[None, :, :, 0]
+        boundary_y = boundary[None, :, :, 1]
+        offset = boundaries[None, :, :, :2] - starts[:, None, None, :]
+    denominator = query_x * boundary_y - query_y * boundary_x
+    nonparallel = denominator != 0.0
+    safe_denominator = np.where(nonparallel, denominator, np.ones_like(denominator))
+    query_parameter = (offset[..., 0] * boundary_y - offset[..., 1] * boundary_x) / safe_denominator
+    boundary_parameter = (offset[..., 0] * query_y - offset[..., 1] * query_x) / safe_denominator
+    valid = (
+        nonparallel
+        & (query_parameter >= 0.0)
+        & (query_parameter <= 1.0)
+        & (boundary_parameter >= 0.0)
+        & (boundary_parameter <= 1.0)
+    )
+    return query_parameter, valid
+
+
+def _matched_boundary_parameters(
+    starts: np.ndarray,
+    ends: np.ndarray,
+    boundaries: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Evaluate one boundary collection per corresponding query segment.
+
+    Parameters
+    ----------
+    starts, ends : numpy.ndarray
+        Detached segment endpoints with shape ``[S, 2]``.
+    boundaries : numpy.ndarray
+        Corresponding boundary collections with shape ``[S, B, 4]``.
+
+    Returns
+    -------
+    tuple[numpy.ndarray, numpy.ndarray]
+        Query parameters and validity masks, both shaped ``[S, B]``.
+    """
+
+    query = ends - starts
+    boundary = boundaries[..., 2:] - boundaries[..., :2]
+    query_x = query[:, None, 0]
+    query_y = query[:, None, 1]
+    boundary_x = boundary[:, :, 0]
+    boundary_y = boundary[:, :, 1]
+    offset = boundaries[..., :2] - starts[:, None, :]
+    denominator = query_x * boundary_y - query_y * boundary_x
+    nonparallel = denominator != 0.0
+    safe_denominator = np.where(nonparallel, denominator, np.ones_like(denominator))
+    query_parameter = (offset[..., 0] * boundary_y - offset[..., 1] * boundary_x) / safe_denominator
+    boundary_parameter = (offset[..., 0] * query_y - offset[..., 1] * query_x) / safe_denominator
+    valid = (
+        nonparallel
+        & (query_parameter >= 0.0)
+        & (query_parameter <= 1.0)
+        & (boundary_parameter >= 0.0)
+        & (boundary_parameter <= 1.0)
+    )
+    return query_parameter, valid
+
+
+def _segments_blocked_vectorized(
+    starts: Sequence[_FloatPoint],
+    ends: Sequence[_FloatPoint],
+    snapshots: Sequence[_ObstacleSnapshot],
+    polygon_boundaries: Sequence[_FloatSegment],
+) -> List[bool]:
+    """Test many U11 visibility edges against all cleared obstacles.
+
+    Parameters
+    ----------
+    starts, ends : sequence[tuple[float, float]]
+        Detached query segment endpoints in matching order.
+    snapshots : sequence[_ObstacleSnapshot]
+        Detached obstacle geometry for one route.
+    polygon_boundaries : sequence[tuple[float, float, float, float]]
+        The two terminal-polygon boundaries shared by every obstacle.
+
+    Returns
+    -------
+    list[bool]
+        Blocked decisions in input segment order.
+
+    Notes
+    -----
+    Invalid intersections are represented by duplicate zero parameters before
+    sorting. The scalar path removes duplicates with ``set``; duplicates create
+    only zero-width intervals, which that path also skips. All score-visible
+    coordinates and shortest-path lengths remain on the shipped scalar path.
+    """
+
+    if not starts:
+        return []
+    if not snapshots:
+        return [False] * len(starts)
+    polygon_array = np.asarray(polygon_boundaries, dtype=np.float64)
+    polygon_points = np.asarray(snapshots[0].polygons, dtype=np.float64)
+    polygon_starts = polygon_points
+    polygon_edges = np.roll(polygon_points, shift=-1, axis=1) - polygon_points
+    box_boundaries = np.asarray(
+        [snapshot.box_boundaries for snapshot in snapshots], dtype=np.float64
+    )
+    centers = np.asarray([snapshot.center for snapshot in snapshots], dtype=np.float64)
+    half_extents = np.asarray([snapshot.half_extents for snapshot in snapshots], dtype=np.float64)
+    blocked = [False] * len(starts)
+    all_starts = np.asarray(starts, dtype=np.float64)
+    all_ends = np.asarray(ends, dtype=np.float64)
+    all_polygon_parameters, all_polygon_valid = _batched_boundary_parameters(
+        all_starts, all_ends, polygon_array
+    )
+    all_polygon_parameters = np.where(
+        all_polygon_valid,
+        all_polygon_parameters,
+        np.zeros_like(all_polygon_parameters),
+    )
+    segment_minimum = np.minimum(all_starts, all_ends)
+    segment_maximum = np.maximum(all_starts, all_ends)
+    box_minimum = centers - half_extents
+    box_maximum = centers + half_extents
+    broad_candidates = (
+        (segment_maximum[:, None, :] > box_minimum[None, :, :])
+        & (segment_minimum[:, None, :] < box_maximum[None, :, :])
+    ).all(axis=2)
+    candidate_indices = np.argwhere(broad_candidates)
+    for batch_start in range(0, candidate_indices.shape[0], _U11_PAIR_OBSTACLE_BUDGET):
+        batch = candidate_indices[batch_start : batch_start + _U11_PAIR_OBSTACLE_BUDGET]
+        segment_indices = batch[:, 0]
+        obstacle_indices = batch[:, 1]
+        start_tensor = all_starts[segment_indices]
+        end_tensor = all_ends[segment_indices]
+        polygon_parameters = all_polygon_parameters[segment_indices]
+        box_parameters, box_valid = _matched_boundary_parameters(
+            start_tensor, end_tensor, box_boundaries[obstacle_indices]
+        )
+        box_parameters = np.where(box_valid, box_parameters, np.zeros_like(box_parameters))
+        parameters = np.sort(
+            np.concatenate(
+                (
+                    np.zeros((batch.shape[0], 1), dtype=np.float64),
+                    np.ones((batch.shape[0], 1), dtype=np.float64),
+                    box_parameters,
+                    polygon_parameters,
+                ),
+                axis=1,
+            ),
+            axis=1,
+        )
+        lower = parameters[:, :-1]
+        upper = parameters[:, 1:]
+        midpoints = (lower + upper) / 2.0
+        direction = end_tensor - start_tensor
+        points = start_tensor[:, None, :] + midpoints[..., None] * direction[:, None, :]
+        active = (upper > lower) & (
+            np.abs(points - centers[obstacle_indices, None, :])
+            < half_extents[obstacle_indices, None, :]
+        ).all(axis=2)
+        active_indices = np.argwhere(active)
+        if active_indices.size == 0:
+            continue
+        active_points = points[active]
+        offsets = active_points[:, None, None, :] - polygon_starts[None, :, :, :]
+        crosses = (
+            polygon_edges[None, :, :, 0] * offsets[..., 1]
+            - polygon_edges[None, :, :, 1] * offsets[..., 0]
+        )
+        inside_terminal_polygon = (crosses >= -1e-12).all(axis=2).any(axis=1)
+        residual_candidates = np.unique(active_indices[~inside_terminal_polygon, 0])
+        residual_segments = np.unique(segment_indices[residual_candidates])
+        for index in residual_segments:
+            blocked[int(index)] = True
+    return blocked
+
+
+def _route_obstacles_vectorized(
+    scene: Scene,
+    route: Route,
+    cap: Scalar,
+) -> List[BoxGeometry]:
+    """Select U11 route obstacles with a batched detached distance test.
+
+    Parameters
+    ----------
+    scene : Scene
+        Validated scene with derived node boxes.
+    route : Route
+        Route whose terminal-owned boxes are exempt.
+    cap : float or torch.Tensor
+        Four-chord obstacle-search cap.
+
+    Returns
+    -------
+    list[BoxGeometry]
+        Eligible obstacles in canonical node-box order.
+    """
+
+    if not scene.node_boxes:
+        return []
+    source, target = scene.graph.edges[route.edge_index]
+    centers = torch.stack([box.center.detach().cpu() for box in scene.node_boxes])
+    start = route.points[0].detach().cpu()
+    end = route.points[-1].detach().cpu()
+    within_cap = torch.linalg.vector_norm(centers - start, dim=1) + torch.linalg.vector_norm(
+        centers - end, dim=1
+    ) <= as_float(cap)
+    return [
+        box
+        for index, box in enumerate(scene.node_boxes)
+        if box.owner not in {source, target} and bool(within_cap[index])
+    ]
+
+
 def _cleared_obstacle_vertices(
     box: BoxGeometry,
     terminal_polygons: Sequence[torch.Tensor],
@@ -1715,7 +2125,103 @@ def _cleared_obstacle_vertices(
     return [unique[key] for key in sorted(unique)]
 
 
-def _route_baseline(scene: Scene, route: Route) -> Tuple[Scalar, Scalar]:
+def _cleared_obstacle_vertices_vectorized(
+    box: BoxGeometry,
+    terminal_polygons: Sequence[torch.Tensor],
+    snapshot: _ObstacleSnapshot,
+) -> List[torch.Tensor]:
+    """Return U11 visibility vertices after batched intersection decisions.
+
+    Parameters
+    ----------
+    box : BoxGeometry
+        Uninflated node obstacle.
+    terminal_polygons : sequence[torch.Tensor]
+        Polygonized terminal disks removed from the box.
+    snapshot : _ObstacleSnapshot
+        Detached decision geometry of the same obstacle.
+
+    Returns
+    -------
+    list[torch.Tensor]
+        The scalar scorer's exact tensor coordinates in canonical sorted order.
+
+    Notes
+    -----
+    The batch identifies which of the 128 box/polygon boundary pairs intersect.
+    Every surviving intersection point is then rebuilt with
+    :func:`_segment_boundary_parameter`, preserving score-visible coordinates
+    and their traced autograd graph exactly.
+    """
+
+    box_segments = _box_boundary_segments(box)
+    candidates = [start for start, _ in box_segments]
+    center_x, center_y = snapshot.center
+    half_x, half_y = snapshot.half_extents
+    box_boundaries = np.asarray(snapshot.box_boundaries, dtype=np.float64)
+    box_starts = box_boundaries[:, :2]
+    box_directions = box_boundaries[:, 2:] - box_starts
+    for polygon_index, polygon in enumerate(terminal_polygons):
+        for point_index, point in enumerate(polygon):
+            point_x, point_y = snapshot.polygons[polygon_index][point_index]
+            if abs(point_x - center_x) <= half_x and abs(point_y - center_y) <= half_y:
+                candidates.append(point)
+        polygon_segments = _polygon_boundary_segments(polygon)
+        polygon_boundaries = np.asarray(
+            [
+                snapshot.polygons[polygon_index][segment_index]
+                + snapshot.polygons[polygon_index][(segment_index + 1) % len(polygon)]
+                for segment_index in range(len(polygon))
+            ],
+            dtype=np.float64,
+        )
+        polygon_starts = polygon_boundaries[:, :2]
+        polygon_directions = polygon_boundaries[:, 2:] - polygon_starts
+        denominator = (
+            box_directions[:, None, 0] * polygon_directions[None, :, 1]
+            - box_directions[:, None, 1] * polygon_directions[None, :, 0]
+        )
+        nonparallel = denominator != 0.0
+        safe_denominator = np.where(nonparallel, denominator, np.ones_like(denominator))
+        offset = polygon_starts[None, :, :] - box_starts[:, None, :]
+        box_parameter = (
+            offset[..., 0] * polygon_directions[None, :, 1]
+            - offset[..., 1] * polygon_directions[None, :, 0]
+        ) / safe_denominator
+        polygon_parameter = (
+            offset[..., 0] * box_directions[:, None, 1]
+            - offset[..., 1] * box_directions[:, None, 0]
+        ) / safe_denominator
+        intersects = (
+            nonparallel
+            & (box_parameter >= 0.0)
+            & (box_parameter <= 1.0)
+            & (polygon_parameter >= 0.0)
+            & (polygon_parameter <= 1.0)
+        )
+        for box_index, polygon_segment_index in np.argwhere(intersects):
+            intersection = _segment_boundary_parameter(
+                box_segments[int(box_index)][0],
+                box_segments[int(box_index)][1],
+                polygon_segments[int(polygon_segment_index)][0],
+                polygon_segments[int(polygon_segment_index)][1],
+            )
+            if intersection is not None:
+                candidates.append(intersection[1])
+    retained = [
+        point
+        for point in candidates
+        if not _cleared_obstacle_contains(float(point[0]), float(point[1]), snapshot)
+    ]
+    unique: Dict[Tuple[float, float], torch.Tensor] = {}
+    for point in retained:
+        unique[(float(point[0]), float(point[1]))] = point
+    return [unique[key] for key in sorted(unique)]
+
+
+def _route_baseline(
+    scene: Scene, route: Route, *, vectorized: bool = False
+) -> Tuple[Scalar, Scalar]:
     """Compute U11's obstacle-aware capped visibility-path baseline.
 
     Parameters
@@ -1724,6 +2230,9 @@ def _route_baseline(scene: Scene, route: Route) -> Tuple[Scalar, Scalar]:
         Validated scene with derived node boxes.
     route : Route
         Visible route whose endpoint obstacles are exempt.
+    vectorized : bool
+        Whether review-gated detached visibility decisions use batched float64
+        arithmetic. False retains the shipped scalar implementation.
 
     Returns
     -------
@@ -1749,21 +2258,26 @@ def _route_baseline(scene: Scene, route: Route) -> Tuple[Scalar, Scalar]:
         _regular_polygon(start, clear_radius, _U11_TERMINAL_DISK_SIDES),
         _regular_polygon(end, clear_radius, _U11_TERMINAL_DISK_SIDES),
     )
-    obstacles = [
-        box
-        for box in scene.node_boxes
-        if box.owner not in {source, target}
-        and float(torch.linalg.vector_norm(box.center - start))
-        + float(torch.linalg.vector_norm(box.center - end))
-        <= as_float(cap)
-    ]
+    if vectorized and len(scene.node_boxes) >= _U11_OBSTACLE_SELECTION_BATCH_MIN:
+        obstacles = _route_obstacles_vectorized(scene, route, cap)
+    else:
+        obstacles = [
+            box
+            for box in scene.node_boxes
+            if box.owner not in {source, target}
+            and float(torch.linalg.vector_norm(box.center - start))
+            + float(torch.linalg.vector_norm(box.center - end))
+            <= as_float(cap)
+        ]
     polygons_f = _polygon_floats(terminal_polygons)
     polygon_boundaries = _polygon_boundary_floats(polygons_f)
     snapshots = [_obstacle_snapshot(box, polygons_f) for box in obstacles]
     start_f = (float(start[0]), float(start[1]))
     end_f = (float(end[0]), float(end[1]))
     chord_polygon_parameters = _segment_parameters(start_f, end_f, polygon_boundaries)
-    if not any(
+    # One chord cannot amortize tensor construction; the vectorized path begins
+    # at the quadratic visibility graph after this identical scalar fast path.
+    chord_blocked = any(
         _segment_cleared_obstacle_interior_intersection(
             start_f,
             end_f,
@@ -1771,36 +2285,61 @@ def _route_baseline(scene: Scene, route: Route) -> Tuple[Scalar, Scalar]:
             chord_polygon_parameters,
         )
         for snapshot in snapshots
-    ):
+    )
+    if not chord_blocked:
         return chord, 0.0
     obstacle_vertices: List[torch.Tensor] = []
     for box, snapshot in zip(obstacles, snapshots):
-        obstacle_vertices.extend(_cleared_obstacle_vertices(box, terminal_polygons, snapshot))
+        if vectorized:
+            obstacle_vertices.extend(
+                _cleared_obstacle_vertices_vectorized(box, terminal_polygons, snapshot)
+            )
+        else:
+            obstacle_vertices.extend(_cleared_obstacle_vertices(box, terminal_polygons, snapshot))
     unique_vertices: Dict[Tuple[float, float], torch.Tensor] = {}
     for point in obstacle_vertices:
         unique_vertices[(float(point[0]), float(point[1]))] = point
     vertices = [start, end] + [unique_vertices[key] for key in sorted(unique_vertices)]
     vertices_f: List[_FloatPoint] = [(float(point[0]), float(point[1])) for point in vertices]
     neighbors: List[List[Tuple[int, float]]] = [[] for _ in vertices]
-    for left_index, left in enumerate(vertices):
-        left_f = vertices_f[left_index]
-        for right_index in range(left_index + 1, len(vertices)):
-            right = vertices[right_index]
-            right_f = vertices_f[right_index]
-            pair_polygon_parameters = _segment_parameters(left_f, right_f, polygon_boundaries)
-            if any(
-                _segment_cleared_obstacle_interior_intersection(
-                    left_f,
-                    right_f,
-                    snapshot,
-                    pair_polygon_parameters,
-                )
-                for snapshot in snapshots
-            ):
+    if vectorized:
+        vertex_pairs = [
+            (left_index, right_index)
+            for left_index in range(len(vertices))
+            for right_index in range(left_index + 1, len(vertices))
+        ]
+        blocked_pairs = _segments_blocked_vectorized(
+            [vertices_f[left] for left, _ in vertex_pairs],
+            [vertices_f[right] for _, right in vertex_pairs],
+            snapshots,
+            polygon_boundaries,
+        )
+        for (left_index, right_index), blocked in zip(vertex_pairs, blocked_pairs):
+            if blocked:
                 continue
-            distance = float(torch.linalg.vector_norm(right - left))
+            distance = float(torch.linalg.vector_norm(vertices[right_index] - vertices[left_index]))
             neighbors[left_index].append((right_index, distance))
             neighbors[right_index].append((left_index, distance))
+    else:
+        for left_index, left in enumerate(vertices):
+            left_f = vertices_f[left_index]
+            for right_index in range(left_index + 1, len(vertices)):
+                right = vertices[right_index]
+                right_f = vertices_f[right_index]
+                pair_polygon_parameters = _segment_parameters(left_f, right_f, polygon_boundaries)
+                if any(
+                    _segment_cleared_obstacle_interior_intersection(
+                        left_f,
+                        right_f,
+                        snapshot,
+                        pair_polygon_parameters,
+                    )
+                    for snapshot in snapshots
+                ):
+                    continue
+                distance = float(torch.linalg.vector_norm(right - left))
+                neighbors[left_index].append((right_index, distance))
+                neighbors[right_index].append((left_index, distance))
     distances = [math.inf] * len(vertices)
     paths: List[Tuple[int, ...]] = [tuple() for _ in vertices]
     distances[0] = 0.0
