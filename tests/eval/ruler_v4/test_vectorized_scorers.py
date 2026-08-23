@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+from dataclasses import replace
 from typing import Callable, Iterator, List, Mapping, Sequence, Tuple
 
 import pytest
@@ -13,6 +14,7 @@ import torch
 import dagua.eval.ruler_v4.edges as edge_scorers
 from dagua.eval.ruler_v4.ingestion import ingest
 from dagua.eval.ruler_v4.scene import (
+    BoxGeometry,
     DrawingScene,
     FacetResult,
     GraphSemantics,
@@ -264,6 +266,53 @@ def _size_band_battery() -> Iterator[Tuple[str, Scene]]:
             yield f"{band_name}/{node_count}/{seed}", _size_band_scene(node_count, seed)
 
 
+def _translated_scene(scene: Scene, offset: Tuple[float, float]) -> Scene:
+    """Translate every producer and derived coordinate in a validated scene.
+
+    Parameters
+    ----------
+    scene : Scene
+        Validated source scene.
+    offset : tuple[float, float]
+        Extreme-coordinate translation applied without changing scene scale.
+
+    Returns
+    -------
+    Scene
+        Coordinate-translated scene with the original semantic hashes and unit.
+    """
+
+    translation = torch.tensor(offset, dtype=torch.float64)
+
+    def translate_box(box: BoxGeometry) -> BoxGeometry:
+        """Translate one derived axis-aligned box.
+
+        Parameters
+        ----------
+        box : BoxGeometry
+            Derived primitive box.
+
+        Returns
+        -------
+        BoxGeometry
+            Box translated by the scene offset.
+        """
+
+        return replace(box, center=box.center + translation)
+
+    return replace(
+        scene,
+        positions=scene.positions + translation,
+        routes=tuple(replace(route, points=route.points + translation) for route in scene.routes),
+        node_boxes=tuple(translate_box(box) for box in scene.node_boxes),
+        node_label_boxes=tuple(translate_box(box) for box in scene.node_label_boxes),
+        edge_label_boxes=tuple(translate_box(box) for box in scene.edge_label_boxes),
+        cluster_label_boxes={
+            key: translate_box(box) for key, box in scene.cluster_label_boxes.items()
+        },
+    )
+
+
 def _scalar_crossing_pairs(
     segments: Sequence[Tuple[int, int, torch.Tensor, torch.Tensor]],
 ) -> List[Tuple[int, int]]:
@@ -366,6 +415,29 @@ def test_40_scene_all_size_band_vectorized_hex_battery(
         for seed in range(8)
     }
     assert actual == expected
+
+
+def test_extreme_coordinate_u11_vectorized_full_record_hex_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep U11 scalar/vector records identical beyond the AABB ULP threshold."""
+
+    scenes = dict(_original_battery())
+    extreme_cases = (
+        ("chain/small/4", (0.0, 2.0e14)),
+        ("tree/small/5", (0.0, 2.0e14)),
+        ("clustered/small/4", (0.0, 2.0e14)),
+        ("tree/medium/0", (0.0, 2.0e14)),
+        ("tree/medium/1", (0.0, 2.0e14)),
+        ("chain/small/4", (0.0, 3.0e14)),
+        ("tree/small/5", (0.0, 3.0e14)),
+        ("tree/small/4", (1.3e15, 0.0)),
+    )
+    translated = [_translated_scene(scenes[scene_id], offset) for scene_id, offset in extreme_cases]
+    scalar = [_facet_digest(edge_scorers.U11(scene)) for scene in translated]
+    monkeypatch.setattr(edge_scorers, "VECTORIZED_EXACT_SCORERS", True)
+    vectorized = [_facet_digest(edge_scorers.U11(scene)) for scene in translated]
+    assert vectorized == scalar
 
 
 @pytest.mark.parametrize(

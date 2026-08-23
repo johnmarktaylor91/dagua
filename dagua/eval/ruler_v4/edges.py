@@ -1975,8 +1975,10 @@ def _segments_blocked_vectorized(
     )
     segment_minimum = np.minimum(all_starts, all_ends)
     segment_maximum = np.maximum(all_starts, all_ends)
-    box_minimum = centers - half_extents
-    box_maximum = centers + half_extents
+    # One ULP keeps the broad phase conservative when extreme coordinates
+    # round a boundary-adjacent segment onto the reconstructed AABB edge.
+    box_minimum = np.nextafter(centers - half_extents, -np.inf)
+    box_maximum = np.nextafter(centers + half_extents, np.inf)
     broad_candidates = (
         (segment_maximum[:, None, :] > box_minimum[None, :, :])
         & (segment_minimum[:, None, :] < box_maximum[None, :, :])
