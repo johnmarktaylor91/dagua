@@ -342,15 +342,19 @@ def _scalar_crossing_pairs(
     return pairs
 
 
-def test_vectorized_scorers_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the shipped scalar scorers authoritative until review adoption."""
+def test_vectorized_scorers_default_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the review-adopted vectorized scorers as the shipped default path."""
 
-    assert edge_scorers.VECTORIZED_EXACT_SCORERS is False
+    assert edge_scorers.VECTORIZED_EXACT_SCORERS is True
 
-    def fail_if_called(scene: Scene, gamma: float) -> List[object]:
-        """Fail if the default U07 call reaches the gated implementation."""
+    original_events = edge_scorers._crossing_events_vectorized
+    event_calls: List[int] = []
 
-        raise AssertionError(f"vectorized U07 unexpectedly enabled: {scene}, {gamma}")
+    def record_events(scene: Scene, gamma: float) -> List[object]:
+        """Record that the default U07 call reaches the adopted implementation."""
+
+        event_calls.append(1)
+        return original_events(scene, gamma)
 
     original_baseline = edge_scorers._route_baseline
     baseline_flags: List[bool] = []
@@ -364,11 +368,12 @@ def test_vectorized_scorers_default_off(monkeypatch: pytest.MonkeyPatch) -> None
         return original_baseline(scene, route, vectorized=vectorized)
 
     scene = _size_band_scene(24, 0)
-    monkeypatch.setattr(edge_scorers, "_crossing_events_vectorized", fail_if_called)
+    monkeypatch.setattr(edge_scorers, "_crossing_events_vectorized", record_events)
     monkeypatch.setattr(edge_scorers, "_route_baseline", record_baseline_flag)
     edge_scorers.U07(scene)
     edge_scorers.U11(scene)
-    assert baseline_flags and not any(baseline_flags)
+    assert event_calls
+    assert baseline_flags and all(baseline_flags)
 
 
 def test_vectorized_u07_pair_decisions_match_scalar_random_battery() -> None:
@@ -434,6 +439,7 @@ def test_extreme_coordinate_u11_vectorized_full_record_hex_identity(
         ("tree/small/4", (1.3e15, 0.0)),
     )
     translated = [_translated_scene(scenes[scene_id], offset) for scene_id, offset in extreme_cases]
+    monkeypatch.setattr(edge_scorers, "VECTORIZED_EXACT_SCORERS", False)
     scalar = [_facet_digest(edge_scorers.U11(scene)) for scene in translated]
     monkeypatch.setattr(edge_scorers, "VECTORIZED_EXACT_SCORERS", True)
     vectorized = [_facet_digest(edge_scorers.U11(scene)) for scene in translated]
