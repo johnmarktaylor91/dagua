@@ -179,7 +179,8 @@ _U11_TERMINAL_DISK_SIDES = 16
 _U11_TERMINAL_CLEAR_RADIUS = 0.5
 VECTORIZED_EXACT_SCORERS = True
 _U07_PAIR_BLOCK_SIZE = 262_144
-_U11_PAIR_OBSTACLE_BUDGET = 16_384
+_U07_DENSITY_BLOCK_ELEMENTS = 4_194_304
+_U11_PAIR_OBSTACLE_BUDGET = 262_144
 _U11_OBSTACLE_SELECTION_BATCH_MIN = 128
 
 
@@ -475,6 +476,68 @@ def _crossing_candidate_pairs_vectorized(
     return candidates
 
 
+def _event_densities_exact(
+    provisional: Sequence[Tuple[int, int, torch.Tensor, Scalar, Scalar]],
+    intrinsic_unit: float,
+) -> Optional[List[float]]:
+    """Accumulate every U07 event density on the exact path, bit-identically.
+
+    The historical per-pair loop computes, for event ``i`` over events
+    ``j != i`` in ascending order,
+
+        density_i += sin(angle_j)^2 * max(0, 1 - |p_i - p_j|^2 / (6 iu)^2)^2
+
+    with each operation a single IEEE-754 double op (``keep`` casts the torch
+    squared distance to float before the divide). This helper computes the
+    same terms as float64 tensor blocks -- each elementwise op is the same
+    IEEE double op on the same operands -- and accumulates columns ``j`` in
+    ascending order with elementwise tensor adds, so every event's addition
+    sequence is the loop's. The skipped ``j == i`` term is zeroed before
+    accumulation; all terms are non-negative, so adding ``+0.0`` at that slot
+    leaves the accumulator bit-identical.
+
+    Parameters
+    ----------
+    provisional : sequence[tuple]
+        Provisional U07 events ``(edge_a, edge_b, point, angle, proximity)``.
+    intrinsic_unit : float
+        Scene intrinsic unit.
+
+    Returns
+    -------
+    list[float] or None
+        Per-event densities, or ``None`` when the inputs are not the float64
+        exact-path geometry (the caller then runs the historical loop).
+    """
+
+    points = [point for _, _, point, _, _ in provisional]
+    stacked = torch.stack([point.detach() for point in points])
+    if stacked.dtype != torch.float64:
+        return None
+    weights = torch.tensor(
+        [float(_p_sin(angle) ** 2) for _, _, _, angle, _ in provisional],
+        dtype=torch.float64,
+    )
+    denominator = (6.0 * intrinsic_unit) ** 2
+    count = len(points)
+    column_block = max(1, _U07_DENSITY_BLOCK_ELEMENTS // count)
+    accumulator = torch.zeros(count, dtype=torch.float64)
+    with torch.no_grad():
+        for column_start in range(0, count, column_block):
+            column_end = min(count, column_start + column_block)
+            difference = stacked[:, None, :] - stacked[None, column_start:column_end, :]
+            squared = (difference**2).sum(dim=2)
+            normalized = squared / denominator
+            terms = (
+                torch.clamp(1.0 - normalized, min=0.0) ** 2 * weights[None, column_start:column_end]
+            )
+            diagonal = torch.arange(column_start, column_end)
+            terms[diagonal, diagonal - column_start] = 0.0
+            for column_offset in range(column_end - column_start):
+                accumulator += terms[:, column_offset]
+    return [float(value) for value in accumulator.tolist()]
+
+
 def _crossing_events_vectorized(scene: Scene, gamma: float) -> List[_CrossingEvent]:
     """Compute U07 events after a vectorized, decision-only crossing sweep.
 
@@ -512,17 +575,28 @@ def _crossing_events_vectorized(scene: Scene, gamma: float) -> List[_CrossingEve
         provisional.append((min(edge_a, edge_b), max(edge_a, edge_b), point, angle, proximity))
 
     multiplicities = Counter((left, right) for left, right, _, _, _ in provisional)
+    # The traced path keeps the historical per-pair loop (density gradients
+    # flow through it); the exact path accumulates the same terms in the same
+    # order from float64 tensor blocks -- see _event_densities_exact.
+    densities = (
+        _event_densities_exact(provisional, scene.intrinsic_unit)
+        if provisional and not tracing_active()
+        else None
+    )
     results: List[_CrossingEvent] = []
     for event_index, (edge_a, edge_b, point, angle, proximity) in enumerate(provisional):
         sine_squared = _p_sin(angle) ** 2
-        density: Scalar = 0.0
-        for other_index, (_, _, other_point, other_angle, _) in enumerate(provisional):
-            if event_index == other_index:
-                continue
-            normalized_squared = (
-                keep(torch.sum((point - other_point) ** 2)) / (6.0 * scene.intrinsic_unit) ** 2
-            )
-            density += _p_sin(other_angle) ** 2 * p_max(0.0, 1.0 - normalized_squared) ** 2
+        if densities is not None:
+            density: Scalar = densities[event_index]
+        else:
+            density = 0.0
+            for other_index, (_, _, other_point, other_angle, _) in enumerate(provisional):
+                if event_index == other_index:
+                    continue
+                normalized_squared = (
+                    keep(torch.sum((point - other_point) ** 2)) / (6.0 * scene.intrinsic_unit) ** 2
+                )
+                density += _p_sin(other_angle) ** 2 * p_max(0.0, 1.0 - normalized_squared) ** 2
         multiplicity = multiplicities[(edge_a, edge_b)]
         angle_term = _p_cos(angle) ** 2
         proximity_ratio = proximity / scene.intrinsic_unit
