@@ -181,6 +181,7 @@ VECTORIZED_EXACT_SCORERS = True
 _U07_PAIR_BLOCK_SIZE = 262_144
 _U07_DENSITY_BLOCK_ELEMENTS = 4_194_304
 _U11_PAIR_OBSTACLE_BUDGET = 262_144
+_U11_BROAD_ROW_BLOCK = 8_388_608
 _U11_OBSTACLE_SELECTION_BATCH_MIN = 128
 
 
@@ -2053,13 +2054,72 @@ def _segments_blocked_vectorized(
     # round a boundary-adjacent segment onto the reconstructed AABB edge.
     box_minimum = np.nextafter(centers - half_extents, -np.inf)
     box_maximum = np.nextafter(centers + half_extents, np.inf)
-    broad_candidates = (
-        (segment_maximum[:, None, :] > box_minimum[None, :, :])
-        & (segment_minimum[:, None, :] < box_maximum[None, :, :])
-    ).all(axis=2)
-    candidate_indices = np.argwhere(broad_candidates)
+    blocked_mask = np.zeros(len(starts), dtype=bool)
+    # The broad phase is row-blocked: a dense scene's full [segments,
+    # obstacles] candidate matrix reaches tens of GiB (measured 21.9 GiB at
+    # 10.3M x 1136), so blocks bound memory while argwhere's row-major order
+    # keeps the candidate stream byte-identical to the unblocked enumeration.
+    total_segments = all_starts.shape[0]
+    obstacle_count = centers.shape[0]
+    row_block = max(1, _U11_BROAD_ROW_BLOCK // max(1, obstacle_count))
+    for row_start in range(0, total_segments, row_block):
+        row_end = min(total_segments, row_start + row_block)
+        alive = np.nonzero(~blocked_mask[row_start:row_end])[0] + row_start
+        if alive.size == 0:
+            continue
+        block_candidates = (
+            (segment_maximum[alive, None, :] > box_minimum[None, :, :])
+            & (segment_minimum[alive, None, :] < box_maximum[None, :, :])
+        ).all(axis=2)
+        local_indices = np.argwhere(block_candidates)
+        if local_indices.size == 0:
+            continue
+        candidate_indices = np.column_stack((alive[local_indices[:, 0]], local_indices[:, 1]))
+        _blocked_batches(
+            candidate_indices,
+            all_starts,
+            all_ends,
+            all_polygon_parameters,
+            box_boundaries,
+            centers,
+            half_extents,
+            polygon_starts,
+            polygon_edges,
+            blocked,
+            blocked_mask,
+        )
+    return blocked
+
+
+def _blocked_batches(
+    candidate_indices: np.ndarray,
+    all_starts: np.ndarray,
+    all_ends: np.ndarray,
+    all_polygon_parameters: np.ndarray,
+    box_boundaries: np.ndarray,
+    centers: np.ndarray,
+    half_extents: np.ndarray,
+    polygon_starts: np.ndarray,
+    polygon_edges: np.ndarray,
+    blocked: List[bool],
+    blocked_mask: np.ndarray,
+) -> None:
+    """Run one broad-phase block's candidates through the U11 narrow phase.
+
+    Mutates ``blocked``/``blocked_mask`` in place; every surviving row's
+    arithmetic is the historical batch pipeline unchanged.
+    """
+
     for batch_start in range(0, candidate_indices.shape[0], _U11_PAIR_OBSTACLE_BUDGET):
         batch = candidate_indices[batch_start : batch_start + _U11_PAIR_OBSTACLE_BUDGET]
+        # Decision-inert short circuit, the batched twin of the scalar
+        # path's per-segment any(): blocked is an OR over a segment's
+        # obstacles, so rows of already-blocked segments cannot change it.
+        # argwhere order is segment-major, making the skip effective on
+        # dense fields where most segments block early.
+        batch = batch[~blocked_mask[batch[:, 0]]]
+        if batch.shape[0] == 0:
+            continue
         segment_indices = batch[:, 0]
         obstacle_indices = batch[:, 1]
         start_tensor = all_starts[segment_indices]
@@ -2102,9 +2162,9 @@ def _segments_blocked_vectorized(
         inside_terminal_polygon = (crosses >= -1e-12).all(axis=2).any(axis=1)
         residual_candidates = np.unique(active_indices[~inside_terminal_polygon, 0])
         residual_segments = np.unique(segment_indices[residual_candidates])
+        blocked_mask[residual_segments] = True
         for index in residual_segments:
             blocked[int(index)] = True
-    return blocked
 
 
 def _route_obstacles_vectorized(
