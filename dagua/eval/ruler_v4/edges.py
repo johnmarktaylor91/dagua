@@ -1994,11 +1994,49 @@ def _matched_boundary_parameters(
     return query_parameter, valid
 
 
+def _snapshot_block_arrays(
+    snapshots: Sequence[_ObstacleSnapshot],
+    polygon_boundaries: Sequence[_FloatSegment],
+) -> Tuple[np.ndarray, ...]:
+    """Convert one route's obstacle snapshots to the batched decision arrays.
+
+    Pure per-snapshot conversions of already-detached floats -- building them
+    once per route and reusing across every visibility-row call yields the
+    same arrays as rebuilding per call (the historical behaviour), element
+    for element.
+    """
+
+    polygon_array = np.asarray(polygon_boundaries, dtype=np.float64)
+    polygon_points = np.asarray(snapshots[0].polygons, dtype=np.float64)
+    polygon_starts = polygon_points
+    polygon_edges = np.roll(polygon_points, shift=-1, axis=1) - polygon_points
+    box_boundaries = np.asarray(
+        [snapshot.box_boundaries for snapshot in snapshots], dtype=np.float64
+    )
+    centers = np.asarray([snapshot.center for snapshot in snapshots], dtype=np.float64)
+    half_extents = np.asarray([snapshot.half_extents for snapshot in snapshots], dtype=np.float64)
+    # One ULP keeps the broad phase conservative when extreme coordinates
+    # round a boundary-adjacent segment onto the reconstructed AABB edge.
+    box_minimum = np.nextafter(centers - half_extents, -np.inf)
+    box_maximum = np.nextafter(centers + half_extents, np.inf)
+    return (
+        polygon_array,
+        polygon_starts,
+        polygon_edges,
+        box_boundaries,
+        centers,
+        half_extents,
+        box_minimum,
+        box_maximum,
+    )
+
+
 def _segments_blocked_vectorized(
     starts: Sequence[_FloatPoint],
     ends: Sequence[_FloatPoint],
     snapshots: Sequence[_ObstacleSnapshot],
     polygon_boundaries: Sequence[_FloatSegment],
+    arrays: Optional[Tuple[np.ndarray, ...]] = None,
 ) -> List[bool]:
     """Test many U11 visibility edges against all cleared obstacles.
 
@@ -2010,6 +2048,9 @@ def _segments_blocked_vectorized(
         Detached obstacle geometry for one route.
     polygon_boundaries : sequence[tuple[float, float, float, float]]
         The two terminal-polygon boundaries shared by every obstacle.
+    arrays : tuple[numpy.ndarray, ...], optional
+        Precomputed ``_snapshot_block_arrays`` for this route; None rebuilds
+        them from ``snapshots`` (identical values either way).
 
     Returns
     -------
@@ -2024,57 +2065,94 @@ def _segments_blocked_vectorized(
     coordinates and shortest-path lengths remain on the shipped scalar path.
     """
 
-    if not starts:
+    if len(starts) == 0:
         return []
     if not snapshots:
         return [False] * len(starts)
-    polygon_array = np.asarray(polygon_boundaries, dtype=np.float64)
-    polygon_points = np.asarray(snapshots[0].polygons, dtype=np.float64)
-    polygon_starts = polygon_points
-    polygon_edges = np.roll(polygon_points, shift=-1, axis=1) - polygon_points
-    box_boundaries = np.asarray(
-        [snapshot.box_boundaries for snapshot in snapshots], dtype=np.float64
-    )
-    centers = np.asarray([snapshot.center for snapshot in snapshots], dtype=np.float64)
-    half_extents = np.asarray([snapshot.half_extents for snapshot in snapshots], dtype=np.float64)
+    if arrays is None:
+        arrays = _snapshot_block_arrays(snapshots, polygon_boundaries)
+    (
+        polygon_array,
+        polygon_starts,
+        polygon_edges,
+        box_boundaries,
+        centers,
+        half_extents,
+        box_minimum,
+        box_maximum,
+    ) = arrays
     blocked = [False] * len(starts)
     all_starts = np.asarray(starts, dtype=np.float64)
     all_ends = np.asarray(ends, dtype=np.float64)
-    all_polygon_parameters, all_polygon_valid = _batched_boundary_parameters(
-        all_starts, all_ends, polygon_array
-    )
-    all_polygon_parameters = np.where(
-        all_polygon_valid,
-        all_polygon_parameters,
-        np.zeros_like(all_polygon_parameters),
-    )
+    # Polygon parameters are filled lazily per block for exactly the segments
+    # that reach the narrow phase (their rows are the only ones ever read);
+    # each filled row is the same row the historical all-segments batch
+    # produced, because `_batched_boundary_parameters` has no cross-row term.
+    all_polygon_parameters = np.zeros((all_starts.shape[0], polygon_array.shape[0]))
     segment_minimum = np.minimum(all_starts, all_ends)
     segment_maximum = np.maximum(all_starts, all_ends)
-    # One ULP keeps the broad phase conservative when extreme coordinates
-    # round a boundary-adjacent segment onto the reconstructed AABB edge.
-    box_minimum = np.nextafter(centers - half_extents, -np.inf)
-    box_maximum = np.nextafter(centers + half_extents, np.inf)
     blocked_mask = np.zeros(len(starts), dtype=bool)
     # The broad phase is row-blocked: a dense scene's full [segments,
     # obstacles] candidate matrix reaches tens of GiB (measured 21.9 GiB at
-    # 10.3M x 1136), so blocks bound memory while argwhere's row-major order
-    # keeps the candidate stream byte-identical to the unblocked enumeration.
+    # 10.3M x 1136), so blocks bound memory. Candidate verdicts are decided
+    # row-independently in the narrow phase, so the candidate stream's exact
+    # membership and order are value-inert: every extra conservative keep
+    # narrow-evaluates to False and every skip is of an already-decided OR.
     total_segments = all_starts.shape[0]
     obstacle_count = centers.shape[0]
     row_block = max(1, _U11_BROAD_ROW_BLOCK // max(1, obstacle_count))
+    slack_scale = 16.0 * np.finfo(np.float64).eps
     for row_start in range(0, total_segments, row_block):
         row_end = min(total_segments, row_start + row_block)
         alive = np.nonzero(~blocked_mask[row_start:row_end])[0] + row_start
         if alive.size == 0:
             continue
-        block_candidates = (
-            (segment_maximum[alive, None, :] > box_minimum[None, :, :])
-            & (segment_minimum[alive, None, :] < box_maximum[None, :, :])
-        ).all(axis=2)
+        # AABB overlap, axis-split to avoid [rows, obstacles, 2] temporaries
+        # (identical boolean per pair: reordered AND of the same comparisons).
+        block_candidates = (segment_maximum[alive, None, 0] > box_minimum[None, :, 0]) & (
+            segment_minimum[alive, None, 0] < box_maximum[None, :, 0]
+        )
+        block_candidates &= (segment_maximum[alive, None, 1] > box_minimum[None, :, 1]) & (
+            segment_minimum[alive, None, 1] < box_maximum[None, :, 1]
+        )
+        # Separating-axis prune: if the segment's LINE has the whole box
+        # strictly on one side (exact |cross(d, c-a)| > exact |d_y|h_x +
+        # |d_x|h_y, the box's projection onto the segment normal), no point
+        # of the segment lies strictly inside the box, so the narrow phase's
+        # every interval midpoint fails |p-c| < h and the pair's verdict is
+        # False -- dropping it is decision-inert. The AABB phase alone keeps
+        # ~200 candidates per long diagonal segment where only ~2-5 truly
+        # cross (the boxes are small node markers), which is what made the
+        # dense tail superlinear-hostile. FP conservatism: each side is
+        # computed with <= 3 rounding steps (relative error bound
+        # (1+u)^3 - 1 < 4u each, u = eps/2), and every rounding error is
+        # bounded in ABSOLUTE terms by 4u times the cancellation-free
+        # magnitude of that side (mag for the cross, rhs for the extents
+        # side). A pair is only dropped when fl|cross| exceeds fl(rhs) plus
+        # 16*eps*(mag + rhs) -- an over-cover of the summed error bounds by
+        # more than 2x, itself computed from nonnegative terms so its own
+        # rounding is second-order and absorbed by that margin. Pairs at or
+        # inside the slack stay and the narrow phase decides them unchanged.
+        directions = all_ends[alive] - all_starts[alive]
+        abs_dx = np.abs(directions[:, 0])[:, None]
+        abs_dy = np.abs(directions[:, 1])[:, None]
+        offsets_x = centers[None, :, 0] - all_starts[alive, None, 0]
+        offsets_y = centers[None, :, 1] - all_starts[alive, None, 1]
+        cross = directions[:, 0][:, None] * offsets_y - directions[:, 1][:, None] * offsets_x
+        rhs = abs_dy * half_extents[None, :, 0] + abs_dx * half_extents[None, :, 1]
+        magnitude = abs_dx * np.abs(offsets_y) + abs_dy * np.abs(offsets_x)
+        block_candidates &= np.abs(cross) <= rhs + slack_scale * (magnitude + rhs)
         local_indices = np.argwhere(block_candidates)
         if local_indices.size == 0:
             continue
         candidate_indices = np.column_stack((alive[local_indices[:, 0]], local_indices[:, 1]))
+        needed = np.unique(candidate_indices[:, 0])
+        needed_parameters, needed_valid = _batched_boundary_parameters(
+            all_starts[needed], all_ends[needed], polygon_array
+        )
+        all_polygon_parameters[needed] = np.where(
+            needed_valid, needed_parameters, np.zeros_like(needed_parameters)
+        )
         _blocked_batches(
             candidate_indices,
             all_starts,
@@ -2108,63 +2186,121 @@ def _blocked_batches(
 
     Mutates ``blocked``/``blocked_mask`` in place; every surviving row's
     arithmetic is the historical batch pipeline unchanged.
+
+    Candidates are consumed per segment in argwhere order with geometrically
+    doubling chunks (the batched twin of the scalar path's per-segment
+    ``any()``): a segment stops contributing rows once its OR is decided, so
+    dense fields pay for the few obstacles up to the first blocker instead of
+    every overlapping obstacle (measured 72-206 candidates per segment with
+    ~75% of segments blocked). Each evaluated pair's verdict is decided by
+    that pair alone; skipping rows of already-blocked segments cannot change
+    any segment's final OR, so the emitted flags are byte-identical to the
+    exhaustive pipeline.
     """
 
-    for batch_start in range(0, candidate_indices.shape[0], _U11_PAIR_OBSTACLE_BUDGET):
-        batch = candidate_indices[batch_start : batch_start + _U11_PAIR_OBSTACLE_BUDGET]
-        # Decision-inert short circuit, the batched twin of the scalar
-        # path's per-segment any(): blocked is an OR over a segment's
-        # obstacles, so rows of already-blocked segments cannot change it.
-        # argwhere order is segment-major, making the skip effective on
-        # dense fields where most segments block early.
-        batch = batch[~blocked_mask[batch[:, 0]]]
-        if batch.shape[0] == 0:
-            continue
-        segment_indices = batch[:, 0]
-        obstacle_indices = batch[:, 1]
-        start_tensor = all_starts[segment_indices]
-        end_tensor = all_ends[segment_indices]
-        polygon_parameters = all_polygon_parameters[segment_indices]
-        box_parameters, box_valid = _matched_boundary_parameters(
-            start_tensor, end_tensor, box_boundaries[obstacle_indices]
-        )
-        box_parameters = np.where(box_valid, box_parameters, np.zeros_like(box_parameters))
-        parameters = np.sort(
-            np.concatenate(
-                (
-                    np.zeros((batch.shape[0], 1), dtype=np.float64),
-                    np.ones((batch.shape[0], 1), dtype=np.float64),
-                    box_parameters,
-                    polygon_parameters,
-                ),
-                axis=1,
+    total = candidate_indices.shape[0]
+    if total == 0:
+        return
+    segments = candidate_indices[:, 0]
+    group_starts = np.flatnonzero(np.r_[True, segments[1:] != segments[:-1]])
+    group_ends = np.r_[group_starts[1:], total]
+    group_segments = segments[group_starts]
+    cursor = group_starts.copy()
+    chunk = np.ones(group_starts.shape[0], dtype=np.int64)
+    while True:
+        alive = (cursor < group_ends) & ~blocked_mask[group_segments]
+        if not alive.any():
+            return
+        counts = np.minimum(chunk[alive], group_ends[alive] - cursor[alive])
+        row_starts = np.repeat(cursor[alive], counts)
+        row_offsets = np.arange(counts.sum()) - np.repeat(np.cumsum(counts) - counts, counts)
+        round_rows = candidate_indices[row_starts + row_offsets]
+        cursor[alive] += counts
+        chunk[alive] *= 2
+        for batch_start in range(0, round_rows.shape[0], _U11_PAIR_OBSTACLE_BUDGET):
+            batch = round_rows[batch_start : batch_start + _U11_PAIR_OBSTACLE_BUDGET]
+            batch = batch[~blocked_mask[batch[:, 0]]]
+            if batch.shape[0] == 0:
+                continue
+            _blocked_candidate_batch(
+                batch,
+                all_starts,
+                all_ends,
+                all_polygon_parameters,
+                box_boundaries,
+                centers,
+                half_extents,
+                polygon_starts,
+                polygon_edges,
+                blocked,
+                blocked_mask,
+            )
+
+
+def _blocked_candidate_batch(
+    batch: np.ndarray,
+    all_starts: np.ndarray,
+    all_ends: np.ndarray,
+    all_polygon_parameters: np.ndarray,
+    box_boundaries: np.ndarray,
+    centers: np.ndarray,
+    half_extents: np.ndarray,
+    polygon_starts: np.ndarray,
+    polygon_edges: np.ndarray,
+    blocked: List[bool],
+    blocked_mask: np.ndarray,
+) -> None:
+    """Decide one budget-bounded batch of (segment, obstacle) pairs.
+
+    The pair arithmetic below is the historical batch pipeline unchanged;
+    every verdict depends only on its own row.
+    """
+
+    segment_indices = batch[:, 0]
+    obstacle_indices = batch[:, 1]
+    start_tensor = all_starts[segment_indices]
+    end_tensor = all_ends[segment_indices]
+    polygon_parameters = all_polygon_parameters[segment_indices]
+    box_parameters, box_valid = _matched_boundary_parameters(
+        start_tensor, end_tensor, box_boundaries[obstacle_indices]
+    )
+    box_parameters = np.where(box_valid, box_parameters, np.zeros_like(box_parameters))
+    parameters = np.sort(
+        np.concatenate(
+            (
+                np.zeros((batch.shape[0], 1), dtype=np.float64),
+                np.ones((batch.shape[0], 1), dtype=np.float64),
+                box_parameters,
+                polygon_parameters,
             ),
             axis=1,
-        )
-        lower = parameters[:, :-1]
-        upper = parameters[:, 1:]
-        midpoints = (lower + upper) / 2.0
-        direction = end_tensor - start_tensor
-        points = start_tensor[:, None, :] + midpoints[..., None] * direction[:, None, :]
-        active = (upper > lower) & (
-            np.abs(points - centers[obstacle_indices, None, :])
-            < half_extents[obstacle_indices, None, :]
-        ).all(axis=2)
-        active_indices = np.argwhere(active)
-        if active_indices.size == 0:
-            continue
-        active_points = points[active]
-        offsets = active_points[:, None, None, :] - polygon_starts[None, :, :, :]
-        crosses = (
-            polygon_edges[None, :, :, 0] * offsets[..., 1]
-            - polygon_edges[None, :, :, 1] * offsets[..., 0]
-        )
-        inside_terminal_polygon = (crosses >= -1e-12).all(axis=2).any(axis=1)
-        residual_candidates = np.unique(active_indices[~inside_terminal_polygon, 0])
-        residual_segments = np.unique(segment_indices[residual_candidates])
-        blocked_mask[residual_segments] = True
-        for index in residual_segments:
-            blocked[int(index)] = True
+        ),
+        axis=1,
+    )
+    lower = parameters[:, :-1]
+    upper = parameters[:, 1:]
+    midpoints = (lower + upper) / 2.0
+    direction = end_tensor - start_tensor
+    points = start_tensor[:, None, :] + midpoints[..., None] * direction[:, None, :]
+    active = (upper > lower) & (
+        np.abs(points - centers[obstacle_indices, None, :])
+        < half_extents[obstacle_indices, None, :]
+    ).all(axis=2)
+    active_indices = np.argwhere(active)
+    if active_indices.size == 0:
+        return
+    active_points = points[active]
+    offsets = active_points[:, None, None, :] - polygon_starts[None, :, :, :]
+    crosses = (
+        polygon_edges[None, :, :, 0] * offsets[..., 1]
+        - polygon_edges[None, :, :, 1] * offsets[..., 0]
+    )
+    inside_terminal_polygon = (crosses >= -1e-12).all(axis=2).any(axis=1)
+    residual_candidates = np.unique(active_indices[~inside_terminal_polygon, 0])
+    residual_segments = np.unique(segment_indices[residual_candidates])
+    blocked_mask[residual_segments] = True
+    for index in residual_segments:
+        blocked[int(index)] = True
 
 
 def _route_obstacles_vectorized(
@@ -2437,26 +2573,48 @@ def _route_baseline(
         unique_vertices[(float(point[0]), float(point[1]))] = point
     vertices = [start, end] + [unique_vertices[key] for key in sorted(unique_vertices)]
     vertices_f: List[_FloatPoint] = [(float(point[0]), float(point[1])) for point in vertices]
-    neighbors: List[List[Tuple[int, float]]] = [[] for _ in vertices]
     if vectorized:
-        vertex_pairs = [
-            (left_index, right_index)
-            for left_index in range(len(vertices))
-            for right_index in range(left_index + 1, len(vertices))
-        ]
-        blocked_pairs = _segments_blocked_vectorized(
-            [vertices_f[left] for left, _ in vertex_pairs],
-            [vertices_f[right] for _, right in vertex_pairs],
-            snapshots,
-            polygon_boundaries,
-        )
-        for (left_index, right_index), blocked in zip(vertex_pairs, blocked_pairs):
-            if blocked:
-                continue
-            distance = float(torch.linalg.vector_norm(vertices[right_index] - vertices[left_index]))
-            neighbors[left_index].append((right_index, distance))
-            neighbors[right_index].append((left_index, distance))
+        # LAZY visibility rows: the emitted values read ONLY distances[1] and
+        # paths[1], so the full [V^2/2, obstacles] blocked matrix (10.3M x
+        # 1136 measured on the dense tail, >200s for ONE route) is replaced by
+        # per-vertex rows computed at first pop. Every per-pair decision is the
+        # SAME `_segments_blocked_vectorized` on the SAME (low, high)-oriented
+        # segment -- its row arithmetic has no cross-row term (the narrow
+        # phase's blocked-row skip only elides rows whose OR is already
+        # decided), so each boolean is bit-identical to the full-matrix call.
+        neighbor_rows: Dict[int, List[Tuple[int, float]]] = {}
+        block_arrays = _snapshot_block_arrays(snapshots, polygon_boundaries) if snapshots else None
+        vertex_array = np.asarray(vertices_f, dtype=np.float64)
+        # Lower bounds on the remaining distance to the target vertex, used
+        # only by the corridor guard below (never emitted).
+        target_lower = np.linalg.norm(vertex_array - vertex_array[1], axis=1)
+
+        def _expand(node: int) -> List[Tuple[int, float]]:
+            row = neighbor_rows.get(node)
+            if row is not None:
+                return row
+            others = [other for other in range(len(vertices)) if other != node]
+            ordered = [(node, other) if node < other else (other, node) for other in others]
+            # Fancy-indexed views of the SAME float64 coordinates the per-call
+            # list construction would produce -- np.asarray inside the callee
+            # passes ndarrays through untouched.
+            blocked_row = _segments_blocked_vectorized(
+                vertex_array[np.asarray([low for low, _ in ordered], dtype=np.intp)],
+                vertex_array[np.asarray([high for _, high in ordered], dtype=np.intp)],
+                snapshots,
+                polygon_boundaries,
+                arrays=block_arrays,
+            )
+            row = []
+            for (low, high), other, other_blocked in zip(ordered, others, blocked_row):
+                if other_blocked:
+                    continue
+                row.append((other, float(torch.linalg.vector_norm(vertices[high] - vertices[low]))))
+            neighbor_rows[node] = row
+            return row
+
     else:
+        neighbors: List[List[Tuple[int, float]]] = [[] for _ in vertices]
         for left_index, left in enumerate(vertices):
             left_f = vertices_f[left_index]
             for right_index in range(left_index + 1, len(vertices)):
@@ -2476,6 +2634,10 @@ def _route_baseline(
                 distance = float(torch.linalg.vector_norm(right - left))
                 neighbors[left_index].append((right_index, distance))
                 neighbors[right_index].append((left_index, distance))
+
+        def _expand(node: int) -> List[Tuple[int, float]]:
+            return sorted(neighbors[node])
+
     distances = [math.inf] * len(vertices)
     paths: List[Tuple[int, ...]] = [tuple() for _ in vertices]
     distances[0] = 0.0
@@ -2485,7 +2647,35 @@ def _route_baseline(
         distance, path, node = heapq.heappop(queue)
         if distance != distances[node] or path != paths[node]:
             continue
-        for neighbor, edge_length in sorted(neighbors[node]):
+        if node == 1:
+            # Settled-at-first-valid-pop: every edge length is strictly
+            # positive (vertices are unique), so any equal-distance relaxation
+            # into node 1 comes from a predecessor at STRICTLY smaller
+            # distance, which popped earlier -- (distances[1], paths[1]) is
+            # already the (distance, lexicographic-path) minimum here and no
+            # later pop can change it. Skipped pops feed nothing else.
+            break
+        if (
+            vectorized
+            and distances[1] != math.inf
+            and (distance + float(target_lower[node])) * (1.0 - 1e-9) > distances[1]
+        ):
+            # Corridor guard: edge lengths are Euclidean, so every completion
+            # of this node's path into node 1 has EXACT length >= exact(d_u) +
+            # euclid(u, 1), and its float candidate at node 1 deviates from
+            # that by < (2V+5) rounding units (one norm per leg, <= V
+            # accumulating additions) -- < 1e-11 relative for any V here,
+            # over-covered 100x by the 1e-9 margin. The guard therefore
+            # certifies every such candidate exceeds the recorded distances[1]
+            # strictly (no improvement, and no equal-distance lexicographic
+            # tie, which requires exact float equality). Intermediate nodes
+            # this expansion could have updated only matter through
+            # completions into node 1, which the same bound dominates, so
+            # skipping the expansion leaves (distances[1], paths[1]) -- the
+            # only values the emitted baseline and turning read -- unchanged.
+            # Emitted values never read this guard's arithmetic.
+            continue
+        for neighbor, edge_length in _expand(node):
             candidate = distance + edge_length
             candidate_path = path + (neighbor,)
             if candidate < distances[neighbor] or (
