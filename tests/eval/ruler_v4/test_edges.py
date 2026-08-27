@@ -682,3 +682,70 @@ def test_u16_clean_edge_label_has_zero_overlap() -> None:
     )
     assert result.state is ResultState.VALUE
     assert result.subterms["U16.i"] == pytest.approx(0.0, abs=0.0)
+
+
+def test_u07_grid_density_accumulator_is_bit_identical_to_dense() -> None:
+    """The compact-support grid prune must reproduce the dense bytes exactly.
+
+    Covers a hairball cluster inside one kernel radius (every pair kept), a
+    broad scatter across many cells (most pairs pruned), duplicate points,
+    zero weights, and kernel-boundary-straddling distances.
+    """
+
+    from dagua.eval.ruler_v4.edges import (
+        _U07_DENSITY_GRID_MIN_EVENTS,
+        _event_density_accumulator_dense,
+        _event_density_accumulator_grid,
+    )
+
+    generator = torch.Generator().manual_seed(20260827)
+    intrinsic_unit = 1.5252835215383378
+    denominator = (6.0 * intrinsic_unit) ** 2
+    count = max(_U07_DENSITY_GRID_MIN_EVENTS, 4096) + 512
+    cluster = torch.rand((count // 4, 2), generator=generator, dtype=torch.float64) * (
+        3.0 * intrinsic_unit
+    )
+    scatter = (
+        torch.rand((count // 2, 2), generator=generator, dtype=torch.float64)
+        * (400.0 * intrinsic_unit)
+        - 200.0 * intrinsic_unit
+    )
+    ring_angles = torch.rand(
+        (count - count // 4 - count // 2, 1), generator=generator, dtype=torch.float64
+    ) * (2.0 * math.pi)
+    ring_radii = 6.0 * intrinsic_unit * (1.0 + (torch.rand_like(ring_angles) - 0.5) * 1e-3)
+    ring = torch.cat(
+        [ring_radii * torch.cos(ring_angles), ring_radii * torch.sin(ring_angles)], dim=1
+    )
+    stacked = torch.cat([cluster, scatter, ring], dim=0)
+    stacked[7] = stacked[3]
+    weights = torch.rand((count,), generator=generator, dtype=torch.float64)
+    weights[::97] = 0.0
+    dense = _event_density_accumulator_dense(stacked, weights, denominator, count)
+    grid = _event_density_accumulator_grid(stacked, weights, denominator, count)
+    assert grid is not None
+    assert grid.numpy().tobytes() == dense.numpy().tobytes()
+
+
+def test_u07_grid_density_accumulator_declines_guarded_inputs() -> None:
+    """Small, non-finite, or degenerate inputs fall back to the dense path."""
+
+    from dagua.eval.ruler_v4.edges import _event_density_accumulator_grid
+
+    small = torch.rand((64, 2), dtype=torch.float64)
+    small_weights = torch.rand((64,), dtype=torch.float64)
+    assert _event_density_accumulator_grid(small, small_weights, 4.0, 64) is None
+
+    count = 5000
+    stacked = torch.rand((count, 2), dtype=torch.float64)
+    weights = torch.rand((count,), dtype=torch.float64)
+    poisoned = stacked.clone()
+    poisoned[17, 0] = math.nan
+    assert _event_density_accumulator_grid(poisoned, weights, 4.0, count) is None
+    inf_weights = weights.clone()
+    inf_weights[3] = math.inf
+    assert _event_density_accumulator_grid(stacked, inf_weights, 4.0, count) is None
+    assert _event_density_accumulator_grid(stacked, weights, 0.0, count) is None
+    assert _event_density_accumulator_grid(stacked, weights, math.inf, count) is None
+    huge = stacked * 1e18
+    assert _event_density_accumulator_grid(huge, weights, 4.0, count) is None
