@@ -180,6 +180,9 @@ _U11_TERMINAL_CLEAR_RADIUS = 0.5
 VECTORIZED_EXACT_SCORERS = True
 _U07_PAIR_BLOCK_SIZE = 262_144
 _U07_DENSITY_BLOCK_ELEMENTS = 4_194_304
+_U07_DENSITY_GRID_MIN_EVENTS = 4_096
+_U07_DENSITY_GRID_CELL_MARGIN = 1e-6
+_U07_DENSITY_GRID_MAX_CELL_MAGNITUDE = float(2**30)
 _U11_PAIR_OBSTACLE_BUDGET = 262_144
 _U11_BROAD_ROW_BLOCK = 8_388_608
 _U11_OBSTACLE_SELECTION_BATCH_MIN = 128
@@ -521,6 +524,41 @@ def _event_densities_exact(
     )
     denominator = (6.0 * intrinsic_unit) ** 2
     count = len(points)
+    accumulator = _event_density_accumulator_grid(stacked, weights, denominator, count)
+    if accumulator is None:
+        accumulator = _event_density_accumulator_dense(stacked, weights, denominator, count)
+    return [float(value) for value in accumulator.tolist()]
+
+
+def _event_density_accumulator_dense(
+    stacked: torch.Tensor,
+    weights: torch.Tensor,
+    denominator: float,
+    count: int,
+) -> torch.Tensor:
+    """Accumulate every density over all ``count**2`` terms in column blocks.
+
+    This is the historical block accumulation: every event adds every column
+    ``j`` in ascending order (the ``j == i`` slot zeroed first), one IEEE
+    double add per term.
+
+    Parameters
+    ----------
+    stacked : torch.Tensor
+        ``[count, 2]`` float64 event points.
+    weights : torch.Tensor
+        ``[count]`` float64 per-event ``sin(angle)^2`` weights.
+    denominator : float
+        Kernel support scale ``(6 * intrinsic_unit)**2``.
+    count : int
+        Number of events.
+
+    Returns
+    -------
+    torch.Tensor
+        ``[count]`` float64 accumulated densities.
+    """
+
     column_block = max(1, _U07_DENSITY_BLOCK_ELEMENTS // count)
     accumulator = torch.zeros(count, dtype=torch.float64)
     with torch.no_grad():
@@ -536,7 +574,127 @@ def _event_densities_exact(
             terms[diagonal, diagonal - column_start] = 0.0
             for column_offset in range(column_end - column_start):
                 accumulator += terms[:, column_offset]
-    return [float(value) for value in accumulator.tolist()]
+    return accumulator
+
+
+def _event_density_accumulator_grid(
+    stacked: torch.Tensor,
+    weights: torch.Tensor,
+    denominator: float,
+    count: int,
+) -> Optional[torch.Tensor]:
+    """Accumulate densities skipping provably ``+0.0`` far-pair terms.
+
+    The kernel is compactly supported: ``term(i, j)`` is EXACTLY ``+0.0``
+    whenever ``squared >= denominator`` (``clamp(1 - normalized, min=0)``
+    collapses to positive zero and ``+0.0 * w`` stays ``+0.0`` for every
+    finite ``w >= +0.0``, which the finiteness guard below ensures). Every
+    accumulator starts at ``+0.0`` and only ever adds non-negative terms, so
+    it is never ``-0.0`` and eliding a ``+0.0`` add is bit-inert.
+
+    Events are binned into a uniform grid of cell size
+    ``sqrt(denominator) * (1 + _U07_DENSITY_GRID_CELL_MARGIN)``. A nonzero
+    term forces ``fl(dx^2) <= squared * (1 + eps)^2 < denominator *
+    (1 + eps)^2``, i.e. ``|dx| <= sqrt(denominator) * (1 + 3eps)``, strictly
+    below one cell (the ``1e-6`` margin over-covers the accumulated float
+    error by ~9 orders; the magnitude guard bounds the division rounding so
+    scaled coordinates within one cell differ by < 1 before ``floor``). So
+    all nonzero terms of event ``i`` lie inside its 3x3 cell neighborhood,
+    and the ascending-index union ``J_C`` (shared by every event of cell
+    ``C``) is a superset of them. Running the SAME column-block accumulation
+    as the dense path over the ``[|C|, |J_C|]`` submatrix therefore performs,
+    per event, the identical single-IEEE-op term chain on identical operands
+    and the identical ascending-``j`` add sequence, minus only ``+0.0``
+    adds -- including the historical zeroed ``j == i`` slot, which is zeroed
+    here the same way.
+
+    Parameters
+    ----------
+    stacked : torch.Tensor
+        ``[count, 2]`` float64 event points.
+    weights : torch.Tensor
+        ``[count]`` float64 per-event ``sin(angle)^2`` weights.
+    denominator : float
+        Kernel support scale ``(6 * intrinsic_unit)**2``.
+    count : int
+        Number of events.
+
+    Returns
+    -------
+    torch.Tensor or None
+        ``[count]`` float64 accumulated densities, or ``None`` when a guard
+        fails (small inputs, non-finite geometry, degenerate kernel scale, or
+        oversized cell coordinates) and the dense path must run instead.
+    """
+
+    if count < _U07_DENSITY_GRID_MIN_EVENTS:
+        return None
+    if not (math.isfinite(denominator) and denominator > 0.0):
+        return None
+    if not bool(torch.isfinite(stacked).all()) or not bool(torch.isfinite(weights).all()):
+        return None
+    cell = math.sqrt(denominator) * (1.0 + _U07_DENSITY_GRID_CELL_MARGIN)
+    if not (math.isfinite(cell) and cell > 0.0):
+        return None
+    scaled = stacked.numpy() / cell
+    if float(np.abs(scaled).max()) >= _U07_DENSITY_GRID_MAX_CELL_MAGNITUDE:
+        return None
+    cell_coordinates = np.floor(scaled).astype(np.int64)
+    cells, inverse, cell_counts = np.unique(
+        cell_coordinates, axis=0, return_inverse=True, return_counts=True
+    )
+    # Stable argsort keeps original event order within a cell, so every
+    # member list below is ascending in global event index.
+    member_order = np.argsort(inverse.ravel(), kind="stable")
+    group_ends = np.cumsum(cell_counts)
+    group_starts = group_ends - cell_counts
+    group_of_cell = {(int(x), int(y)): g for g, (x, y) in enumerate(cells)}
+    accumulator = torch.zeros(count, dtype=torch.float64)
+    with torch.no_grad():
+        for group, (cell_x, cell_y) in enumerate(cells):
+            row_indices = member_order[group_starts[group] : group_ends[group]]
+            neighbor_members = [
+                member_order[group_starts[g] : group_ends[g]]
+                for g in (
+                    group_of_cell.get((cell_x + dx, cell_y + dy))
+                    for dx in (-1, 0, 1)
+                    for dy in (-1, 0, 1)
+                )
+                if g is not None
+            ]
+            column_indices = np.sort(np.concatenate(neighbor_members))
+            rows_t = torch.from_numpy(row_indices)
+            row_points = stacked[rows_t]
+            column_points = stacked[torch.from_numpy(column_indices)]
+            column_weights = weights[torch.from_numpy(column_indices)]
+            # Own cell is always inside the 3x3 union, so each row's j == i
+            # column exists exactly once in the ascending column list.
+            diagonal_columns = np.searchsorted(column_indices, row_indices)
+            column_block = max(1, _U07_DENSITY_BLOCK_ELEMENTS // max(1, len(row_indices)))
+            sub_accumulator = torch.zeros(len(row_indices), dtype=torch.float64)
+            for column_start in range(0, len(column_indices), column_block):
+                column_end = min(len(column_indices), column_start + column_block)
+                difference = (
+                    row_points[:, None, :] - column_points[None, column_start:column_end, :]
+                )
+                squared = (difference**2).sum(dim=2)
+                normalized = squared / denominator
+                terms = (
+                    torch.clamp(1.0 - normalized, min=0.0) ** 2
+                    * column_weights[None, column_start:column_end]
+                )
+                in_block = np.nonzero(
+                    (diagonal_columns >= column_start) & (diagonal_columns < column_end)
+                )[0]
+                if in_block.size:
+                    terms[
+                        torch.from_numpy(in_block),
+                        torch.from_numpy(diagonal_columns[in_block] - column_start),
+                    ] = 0.0
+                for column_offset in range(column_end - column_start):
+                    sub_accumulator += terms[:, column_offset]
+            accumulator[rows_t] = sub_accumulator
+    return accumulator
 
 
 def _crossing_events_vectorized(scene: Scene, gamma: float) -> List[_CrossingEvent]:
