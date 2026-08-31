@@ -2177,6 +2177,13 @@ def _snapshot_block_arrays(
     # round a boundary-adjacent segment onto the reconstructed AABB edge.
     box_minimum = np.nextafter(centers - half_extents, -np.inf)
     box_maximum = np.nextafter(centers + half_extents, np.inf)
+    # Float32 twins for the broad phase, widened one float32 ULP outward so
+    # that any pair the float64 AABB test keeps is also kept at float32 (the
+    # float64->float32 rounding moves a bound by at most half a float32 ULP).
+    box_minimum_f32 = np.nextafter(box_minimum.astype(np.float32), np.float32(-np.inf))
+    box_maximum_f32 = np.nextafter(box_maximum.astype(np.float32), np.float32(np.inf))
+    centers_f32 = centers.astype(np.float32)
+    half_extents_f32 = half_extents.astype(np.float32)
     return (
         polygon_array,
         polygon_starts,
@@ -2186,6 +2193,10 @@ def _snapshot_block_arrays(
         half_extents,
         box_minimum,
         box_maximum,
+        box_minimum_f32,
+        box_maximum_f32,
+        centers_f32,
+        half_extents_f32,
     )
 
 
@@ -2238,6 +2249,10 @@ def _segments_blocked_vectorized(
         half_extents,
         box_minimum,
         box_maximum,
+        box_minimum_f32,
+        box_maximum_f32,
+        centers_f32,
+        half_extents_f32,
     ) = arrays
     blocked = [False] * len(starts)
     all_starts = np.asarray(starts, dtype=np.float64)
@@ -2247,8 +2262,6 @@ def _segments_blocked_vectorized(
     # each filled row is the same row the historical all-segments batch
     # produced, because `_batched_boundary_parameters` has no cross-row term.
     all_polygon_parameters = np.zeros((all_starts.shape[0], polygon_array.shape[0]))
-    segment_minimum = np.minimum(all_starts, all_ends)
-    segment_maximum = np.maximum(all_starts, all_ends)
     blocked_mask = np.zeros(len(starts), dtype=bool)
     # The broad phase is row-blocked: a dense scene's full [segments,
     # obstacles] candidate matrix reaches tens of GiB (measured 21.9 GiB at
@@ -2259,7 +2272,34 @@ def _segments_blocked_vectorized(
     total_segments = all_starts.shape[0]
     obstacle_count = centers.shape[0]
     row_block = max(1, _U11_BROAD_ROW_BLOCK // max(1, obstacle_count))
-    slack_scale = 16.0 * np.finfo(np.float64).eps
+    # Float32 broad phase. Both phases only PRUNE pairs whose narrow verdict
+    # is provably False, so running them at float32 with outward-widened
+    # bounds keeps a SUPERSET of the float64 phases' candidates (every extra
+    # keep is decided by the unchanged float64 narrow phase => decision-
+    # inert) at half the [rows, obstacles] memory traffic.
+    all_starts_f32 = all_starts.astype(np.float32)
+    all_ends_f32 = all_ends.astype(np.float32)
+    # min/max commute with monotone rounding, and one outward float32 ULP
+    # covers the half-ULP float64->float32 bound rounding, so a pair passing
+    # the float64 AABB test always passes this one.
+    segment_minimum_f32 = np.nextafter(
+        np.minimum(all_starts_f32, all_ends_f32), np.float32(-np.inf)
+    )
+    segment_maximum_f32 = np.nextafter(np.maximum(all_starts_f32, all_ends_f32), np.float32(np.inf))
+    # Scale term for the separating-axis error budget: float32 differences of
+    # float32-rounded float64 inputs carry ABSOLUTE error up to
+    # eps32 * (|a| + |b|), which for short segments (or near offsets) is not
+    # bounded by any multiple of the computed magnitudes, so the drop margin
+    # needs a coordinate-scale-proportional term alongside the relative one.
+    coordinate_scale = np.float32(
+        max(
+            float(np.max(np.abs(all_starts), initial=0.0)),
+            float(np.max(np.abs(all_ends), initial=0.0)),
+            float(np.max(np.abs(box_minimum), initial=0.0)),
+            float(np.max(np.abs(box_maximum), initial=0.0)),
+        )
+    )
+    eps32 = np.float32(np.finfo(np.float32).eps)
     for row_start in range(0, total_segments, row_block):
         row_end = min(total_segments, row_start + row_block)
         alive = np.nonzero(~blocked_mask[row_start:row_end])[0] + row_start
@@ -2267,39 +2307,42 @@ def _segments_blocked_vectorized(
             continue
         # AABB overlap, axis-split to avoid [rows, obstacles, 2] temporaries
         # (identical boolean per pair: reordered AND of the same comparisons).
-        block_candidates = (segment_maximum[alive, None, 0] > box_minimum[None, :, 0]) & (
-            segment_minimum[alive, None, 0] < box_maximum[None, :, 0]
+        block_candidates = (segment_maximum_f32[alive, None, 0] > box_minimum_f32[None, :, 0]) & (
+            segment_minimum_f32[alive, None, 0] < box_maximum_f32[None, :, 0]
         )
-        block_candidates &= (segment_maximum[alive, None, 1] > box_minimum[None, :, 1]) & (
-            segment_minimum[alive, None, 1] < box_maximum[None, :, 1]
+        block_candidates &= (segment_maximum_f32[alive, None, 1] > box_minimum_f32[None, :, 1]) & (
+            segment_minimum_f32[alive, None, 1] < box_maximum_f32[None, :, 1]
         )
         # Separating-axis prune: if the segment's LINE has the whole box
         # strictly on one side (exact |cross(d, c-a)| > exact |d_y|h_x +
         # |d_x|h_y, the box's projection onto the segment normal), no point
         # of the segment lies strictly inside the box, so the narrow phase's
         # every interval midpoint fails |p-c| < h and the pair's verdict is
-        # False -- dropping it is decision-inert. The AABB phase alone keeps
-        # ~200 candidates per long diagonal segment where only ~2-5 truly
-        # cross (the boxes are small node markers), which is what made the
-        # dense tail superlinear-hostile. FP conservatism: each side is
-        # computed with <= 3 rounding steps (relative error bound
-        # (1+u)^3 - 1 < 4u each, u = eps/2), and every rounding error is
-        # bounded in ABSOLUTE terms by 4u times the cancellation-free
-        # magnitude of that side (mag for the cross, rhs for the extents
-        # side). A pair is only dropped when fl|cross| exceeds fl(rhs) plus
-        # 16*eps*(mag + rhs) -- an over-cover of the summed error bounds by
-        # more than 2x, itself computed from nonnegative terms so its own
-        # rounding is second-order and absorbed by that margin. Pairs at or
-        # inside the slack stay and the narrow phase decides them unchanged.
-        directions = all_ends[alive] - all_starts[alive]
+        # False -- dropping it is decision-inert. FP conservatism at float32:
+        # relative to the EXACT values of the float64 inputs, each side
+        # accumulates (a) input-rounding error <= eps32 * scale per
+        # difference, amplified by cancellation and bounded in absolute terms
+        # by eps32 * scale * (|d_x|+|d_y|+|o_x|+|o_y|) across the cross's
+        # products, and (b) <= 5 relative rounding steps bounded by
+        # 5*eps32*(mag + rhs)/2. A pair is only dropped when fl32|cross|
+        # exceeds fl32(rhs) plus eps32*(2*spread + 16*(mag + rhs)) -- each
+        # budget term over-covered >= 2x, the margin's own rounding second-
+        # order and absorbed. Pairs at or inside the slack stay and the
+        # float64 narrow phase decides them unchanged.
+        directions = all_ends_f32[alive] - all_starts_f32[alive]
         abs_dx = np.abs(directions[:, 0])[:, None]
         abs_dy = np.abs(directions[:, 1])[:, None]
-        offsets_x = centers[None, :, 0] - all_starts[alive, None, 0]
-        offsets_y = centers[None, :, 1] - all_starts[alive, None, 1]
+        offsets_x = centers_f32[None, :, 0] - all_starts_f32[alive, None, 0]
+        offsets_y = centers_f32[None, :, 1] - all_starts_f32[alive, None, 1]
+        abs_ox = np.abs(offsets_x)
+        abs_oy = np.abs(offsets_y)
         cross = directions[:, 0][:, None] * offsets_y - directions[:, 1][:, None] * offsets_x
-        rhs = abs_dy * half_extents[None, :, 0] + abs_dx * half_extents[None, :, 1]
-        magnitude = abs_dx * np.abs(offsets_y) + abs_dy * np.abs(offsets_x)
-        block_candidates &= np.abs(cross) <= rhs + slack_scale * (magnitude + rhs)
+        rhs = abs_dy * half_extents_f32[None, :, 0] + abs_dx * half_extents_f32[None, :, 1]
+        magnitude = abs_dx * abs_oy + abs_dy * abs_ox
+        spread = coordinate_scale * (abs_dx + abs_dy + abs_ox + abs_oy)
+        block_candidates &= np.abs(cross) <= rhs + eps32 * (
+            np.float32(2.0) * spread + np.float32(16.0) * (magnitude + rhs)
+        )
         local_indices = np.argwhere(block_candidates)
         if local_indices.size == 0:
             continue
@@ -2649,6 +2692,162 @@ def _cleared_obstacle_vertices_vectorized(
     return [unique[key] for key in sorted(unique)]
 
 
+def _terminal_polygon_bounds(
+    polygons: Tuple[Tuple[_FloatPoint, ...], ...],
+) -> Tuple[float, float, float, float, float]:
+    """Return the terminal polygons' joint axis bounds and coordinate scale."""
+
+    xs = [point[0] for polygon in polygons for point in polygon]
+    ys = [point[1] for polygon in polygons for point in polygon]
+    scale = max(max(abs(value) for value in xs), max(abs(value) for value in ys))
+    return min(xs), min(ys), max(xs), max(ys), scale
+
+
+def _box_clear_of_terminal_polygons(
+    snapshot: _ObstacleSnapshot,
+    bounds: Tuple[float, float, float, float, float],
+) -> bool:
+    """Decide conservatively that a box cannot interact with the terminal polygons.
+
+    True only when the box AABB, expanded by a 64-eps-class absolute margin,
+    is separated from the polygons' joint AABB on some axis. Separation at
+    that margin makes both interaction channels of the full vertex builder
+    provably empty: no polygon vertex passes the closed ``|p - c| <= h``
+    membership test (one subtraction's rounding moves that comparison by
+    under eps * scale), and no box-boundary/polygon-boundary intersection
+    parameter pair can land in [0, 1] x [0, 1] (parameters of segments
+    separated by more than the margin overshoot the unit interval by far
+    more than their own relative rounding). False merely routes the box
+    through the full builder, so this test only needs to be conservative.
+    """
+
+    poly_min_x, poly_min_y, poly_max_x, poly_max_y, poly_scale = bounds
+    center_x, center_y = snapshot.center
+    half_x, half_y = snapshot.half_extents
+    scale = max(poly_scale, abs(center_x) + half_x, abs(center_y) + half_y)
+    margin = 64.0 * float(np.finfo(np.float64).eps) * scale
+    return (
+        poly_min_x > center_x + half_x + margin
+        or poly_max_x < center_x - half_x - margin
+        or poly_min_y > center_y + half_y + margin
+        or poly_max_y < center_y - half_y - margin
+    )
+
+
+def _cleared_box_corner_vertices(
+    box: BoxGeometry, snapshot: _ObstacleSnapshot
+) -> List[torch.Tensor]:
+    """Return a terminal-clear box's visibility vertices: its corners, filtered.
+
+    Fast path for boxes :func:`_box_clear_of_terminal_polygons` separates from
+    both terminal polygons: the full builder's polygon-vertex and boundary-
+    intersection candidate channels are provably empty there, leaving exactly
+    the four corner candidates. The containment filter still runs because a
+    corner whose reconstruction rounds strictly inside the box on both axes
+    is removed by the full path too, polygons or not.
+    """
+
+    candidates = [start for start, _ in _box_boundary_segments(box)]
+    retained = [
+        point
+        for point in candidates
+        if not _cleared_obstacle_contains(float(point[0]), float(point[1]), snapshot)
+    ]
+    unique: Dict[Tuple[float, float], torch.Tensor] = {}
+    for point in retained:
+        unique[(float(point[0]), float(point[1]))] = point
+    return [unique[key] for key in sorted(unique)]
+
+
+def _corridor_incumbent(
+    vertices: List[torch.Tensor],
+    vertex_array: np.ndarray,
+    target_lower: np.ndarray,
+    snapshots: Sequence[_ObstacleSnapshot],
+    polygon_boundaries: Sequence[_FloatSegment],
+    block_arrays: Optional[Tuple[np.ndarray, ...]],
+    limit: int = 256,
+    fanout: int = 16,
+) -> float:
+    """Seed the corridor guard with one probed visible path's label.
+
+    Hops from the source vertex (index 0) toward the target vertex (index 1):
+    at each step it batch-tests the direct hop to the target plus the
+    ``fanout`` unvisited vertices nearest the target (one
+    ``_segments_blocked_vectorized`` call over <= fanout+1 segments -- a few
+    thousand pair predicates, roughly a thousandth of one full visibility
+    row) and takes the first unblocked candidate. Every accepted hop is a
+    real visibility edge decided by the SAME oriented predicate the search's
+    rows use, and the returned value is the left-fold of the same float edge
+    lengths a Dijkstra relaxation sequence along that path would record --
+    so it upper-bounds the FINAL recorded target distance (the search
+    relaxes this exact path unless strictly better prefixes replace parts of
+    it, and prefix improvements only lower the final label under monotone
+    float addition), which is all the corridor guard's strict-dominance
+    argument reads. Returns inf -- guard behavior unchanged from the
+    unseeded code -- when the walk dead-ends or exceeds ``limit`` hops.
+
+    The probe never touches the search's labels, queue, cached rows, or
+    emitted values; its only output is the returned bound.
+    """
+
+    node = 0
+    distance = 0.0
+    visited = {0}
+    # Blocked fractions run 75-99% here, so a fixed small fanout dead-ends;
+    # tiers escalate geometrically until an unblocked hop appears, and the
+    # whole walk is capped at ~4 full rows' worth of tested segments so a
+    # pocketed start costs a bounded, small multiple of one search pop.
+    budget = 4 * max(1, len(vertices))
+    for _ in range(limit):
+        # Candidate hops ranked by the ellipse metric hop + remaining: pure
+        # nearest-to-target ranking dead-ends immediately in clutter (the
+        # far hops are all blocked), while hop + remaining prefers the
+        # visible-length-minimizing local step the search itself would take.
+        hop_lengths = np.linalg.norm(vertex_array - vertex_array[node], axis=1)
+        ranked = [
+            vertex
+            for vertex in (int(v) for v in np.argsort(hop_lengths + target_lower, kind="stable"))
+            if vertex > 1 and vertex != node and vertex not in visited
+        ]
+        moved = False
+        tier_start, tier_size = 0, fanout
+        while not moved and (tier_start == 0 or tier_start < len(ranked)):
+            candidates = ([1] if tier_start == 0 else []) + ranked[
+                tier_start : tier_start + tier_size
+            ]
+            if not candidates:
+                break
+            budget -= len(candidates)
+            if budget < 0:
+                return math.inf
+            pairs = [(node, vertex) if node < vertex else (vertex, node) for vertex in candidates]
+            blocked_row = _segments_blocked_vectorized(
+                vertex_array[np.asarray([low for low, _ in pairs], dtype=np.intp)],
+                vertex_array[np.asarray([high for _, high in pairs], dtype=np.intp)],
+                snapshots,
+                polygon_boundaries,
+                arrays=block_arrays,
+            )
+            for (low, high), vertex, vertex_blocked in zip(pairs, candidates, blocked_row):
+                if vertex_blocked:
+                    continue
+                distance = distance + float(
+                    torch.linalg.vector_norm(vertices[high] - vertices[low])
+                )
+                if vertex == 1:
+                    return distance
+                node = vertex
+                visited.add(vertex)
+                moved = True
+                break
+            tier_start += tier_size
+            tier_size *= 4
+        if not moved:
+            return math.inf
+    return math.inf
+
+
 def _route_baseline(
     scene: Scene, route: Route, *, vectorized: bool = False
 ) -> Tuple[Scalar, Scalar]:
@@ -2676,6 +2875,11 @@ def _route_baseline(
         ``t_soft = 0.1 * chord_e`` (U11.md sec 7 step 4) flows tensors.
     """
 
+    # Essential complexity (CC F-class, worsened E->F by the seeded corridor
+    # guard): this is one certified decision procedure -- the scalar and
+    # vectorized twins, the guard, and the emitted-value rebuild share state
+    # whose byte-identity argument must be readable in one place; splitting
+    # it would sever those invariants across functions.
     source, target = scene.graph.edges[route.edge_index]
     start = route.points[0]
     end = route.points[-1]
@@ -2719,13 +2923,19 @@ def _route_baseline(
     if not chord_blocked:
         return chord, 0.0
     obstacle_vertices: List[torch.Tensor] = []
+    terminal_bounds = _terminal_polygon_bounds(polygons_f) if vectorized else None
     for box, snapshot in zip(obstacles, snapshots):
-        if vectorized:
+        if not vectorized:
+            obstacle_vertices.extend(_cleared_obstacle_vertices(box, terminal_polygons, snapshot))
+        elif _box_clear_of_terminal_polygons(snapshot, terminal_bounds):
+            # Nearly every in-ellipse box is terminal-clear; skipping the full
+            # builder's 128-pair intersection batch for those was measured at
+            # 1-2 s/blocked route on the dense tail.
+            obstacle_vertices.extend(_cleared_box_corner_vertices(box, snapshot))
+        else:
             obstacle_vertices.extend(
                 _cleared_obstacle_vertices_vectorized(box, terminal_polygons, snapshot)
             )
-        else:
-            obstacle_vertices.extend(_cleared_obstacle_vertices(box, terminal_polygons, snapshot))
     unique_vertices: Dict[Tuple[float, float], torch.Tensor] = {}
     for point in obstacle_vertices:
         unique_vertices[(float(point[0]), float(point[1]))] = point
@@ -2751,7 +2961,30 @@ def _route_baseline(
             row = neighbor_rows.get(node)
             if row is not None:
                 return row
-            others = [other for other in range(len(vertices)) if other != node]
+            # Edge-level corridor restriction (the seeded bound's payoff):
+            # a relaxation along (node, other) can only matter through
+            # completions into node 1 of EXACT length >= exact(d_node) +
+            # euclid(node, other) + euclid(other, 1); when that lower bound
+            # already exceeds the guard bound strictly (same margin algebra
+            # as the pop-level guard below, same guard-only arithmetic), the
+            # pair's blocked test is unreachable work and dropping it leaves
+            # (distances[1], paths[1]) unchanged. Row cost then scales with
+            # corridor width, not vertex count. Bound == inf keeps all pairs
+            # (identical to the unrestricted row).
+            bound = distances[1] if distances[1] < incumbent else incumbent
+            if bound != math.inf:
+                completion_lower = (
+                    distances[node]
+                    + np.linalg.norm(vertex_array - vertex_array[node], axis=1)
+                    + target_lower
+                )
+                others = [
+                    other
+                    for other in range(len(vertices))
+                    if other != node and completion_lower[other] * (1.0 - 1e-9) <= bound
+                ]
+            else:
+                others = [other for other in range(len(vertices)) if other != node]
             ordered = [(node, other) if node < other else (other, node) for other in others]
             # Fancy-indexed views of the SAME float64 coordinates the per-call
             # list construction would produce -- np.asarray inside the callee
@@ -2770,6 +3003,19 @@ def _route_baseline(
                 row.append((other, float(torch.linalg.vector_norm(vertices[high] - vertices[low]))))
             neighbor_rows[node] = row
             return row
+
+        # First-bound seeding: one probed path's real label arms the corridor
+        # guard from the very first pop. The guard was otherwise inert until
+        # the search first relaxed into the target, which on dense tails is
+        # where most expansions happen.
+        incumbent = _corridor_incumbent(
+            vertices,
+            vertex_array,
+            target_lower,
+            snapshots,
+            polygon_boundaries,
+            block_arrays,
+        )
 
     else:
         neighbors: List[List[Tuple[int, float]]] = [[] for _ in vertices]
@@ -2813,26 +3059,28 @@ def _route_baseline(
             # already the (distance, lexicographic-path) minimum here and no
             # later pop can change it. Skipped pops feed nothing else.
             break
-        if (
-            vectorized
-            and distances[1] != math.inf
-            and (distance + float(target_lower[node])) * (1.0 - 1e-9) > distances[1]
-        ):
-            # Corridor guard: edge lengths are Euclidean, so every completion
-            # of this node's path into node 1 has EXACT length >= exact(d_u) +
-            # euclid(u, 1), and its float candidate at node 1 deviates from
-            # that by < (2V+5) rounding units (one norm per leg, <= V
-            # accumulating additions) -- < 1e-11 relative for any V here,
-            # over-covered 100x by the 1e-9 margin. The guard therefore
-            # certifies every such candidate exceeds the recorded distances[1]
-            # strictly (no improvement, and no equal-distance lexicographic
-            # tie, which requires exact float equality). Intermediate nodes
-            # this expansion could have updated only matter through
-            # completions into node 1, which the same bound dominates, so
-            # skipping the expansion leaves (distances[1], paths[1]) -- the
-            # only values the emitted baseline and turning read -- unchanged.
-            # Emitted values never read this guard's arithmetic.
-            continue
+        if vectorized:
+            bound = distances[1] if distances[1] < incumbent else incumbent
+            if bound != math.inf and (distance + float(target_lower[node])) * (1.0 - 1e-9) > bound:
+                # Corridor guard: edge lengths are Euclidean, so every
+                # completion of this node's path into node 1 has EXACT length
+                # >= exact(d_u) + euclid(u, 1), and its float candidate at
+                # node 1 deviates from that by < (2V+5) rounding units (one
+                # norm per leg, <= V accumulating additions) -- < 1e-11
+                # relative for any V here, over-covered 100x by the 1e-9
+                # margin. The bound is the smaller of the recorded
+                # distances[1] and the seeded incumbent -- BOTH labels of real
+                # candidate paths, so the final recorded distances[1] never
+                # exceeds either -- and the guard therefore certifies every
+                # such candidate exceeds the final distances[1] strictly (no
+                # improvement, and no equal-distance lexicographic tie, which
+                # requires exact float equality). Intermediate nodes this
+                # expansion could have updated only matter through completions
+                # into node 1, which the same bound dominates, so skipping the
+                # expansion leaves (distances[1], paths[1]) -- the only values
+                # the emitted baseline and turning read -- unchanged. Emitted
+                # values never read this guard's arithmetic.
+                continue
         for neighbor, edge_length in _expand(node):
             candidate = distance + edge_length
             candidate_path = path + (neighbor,)
