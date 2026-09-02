@@ -373,6 +373,18 @@ class Freeze1FitResult:
     access_budget_after: Mapping[str, int]
     run_dir: Path
 
+    @property
+    def freeze_blocked_classes(self) -> Tuple[str, ...]:
+        """Return the classes whose freeze the rotation-envelope guard blocks.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Classes publishing "uncalibrated, axioms only" (W-13-EST(g)).
+        """
+
+        return tuple(self.jnd_fit.uncalibrated_classes)
+
     def __post_init__(self) -> None:
         """Freeze driver budget mappings."""
 
@@ -458,6 +470,32 @@ def _input_digest(pairs: Sequence[FitPair]) -> str:
         digest.update("\0".join(fields).encode("utf-8"))
         digest.update(b"\n")
     return digest.hexdigest()
+
+
+def _base_pair_identity_digest(pairs: Sequence[FitPair]) -> str:
+    """Digest the delivered base-pair identity set (BLIND-ATTEST A4, ADDENDUM-34).
+
+    This is the SECOND part of the two-part attestation digest. It is a
+    function of the distinct ``base_pair_id`` values alone -- sorted,
+    LF-joined, trailing newline -- so the outside checker
+    (``p3/tools/v4_blind_attest.py``) can compute it without ever reading a
+    verdict, a session id, a blind id or the delivered order. The driver
+    recomputes it here and requires the attesting line's A4 evidence to carry
+    the same value, which binds the set A4 was checked over to THIS run's rows.
+
+    Parameters
+    ----------
+    pairs : sequence[FitPair]
+        Complete train-role input.
+
+    Returns
+    -------
+    str
+        SHA-256 hex digest over the sorted distinct base-pair identities.
+    """
+
+    identities = sorted({pair.base_pair_id for pair in pairs})
+    return hashlib.sha256(("\n".join(identities) + "\n").encode("utf-8")).hexdigest()
 
 
 def _sha256_file(path: Path) -> str:
@@ -746,6 +784,7 @@ def _verify_blind_attestation(
     line_sha256: str,
     expected_map_sha256: str,
     fit_input_digest: str,
+    base_pair_identity_digest: str,
 ) -> Mapping[str, object]:
     """Verify one exact append-only attestation line without opening the map.
 
@@ -758,7 +797,12 @@ def _verify_blind_attestation(
     expected_map_sha256 : str
         Frozen ADDENDUM-19 map digest.
     fit_input_digest : str
-        Driver-recomputed digest of this delivered row set.
+        Driver-recomputed digest of this delivered row set (rows, order,
+        sessions, blind ids and verdicts; the line's top-level
+        ``fit_input_digest``).
+    base_pair_identity_digest : str
+        Driver-recomputed digest of the distinct delivered ``base_pair_id``
+        set (the A4 evidence key ``delivered_base_pair_digest``, ADDENDUM-34).
 
     Returns
     -------
@@ -813,6 +857,13 @@ def _verify_blind_attestation(
         raise FitStartConditionError("blind-map attestation row schema is not engine-blind")
     if raw.get("fit_input_digest") != fit_input_digest:
         raise FitStartConditionError("blind-map attestation input digest differs from this run")
+    a4_evidence = assertions["A4_RESOLUTION_COMPLETE"][
+        "evidence"
+    ]  # CC D(21): one closed fail-closed sequence; A34 adds ONE comparison (essential)
+    if a4_evidence.get("delivered_base_pair_digest") != base_pair_identity_digest:
+        raise FitStartConditionError(
+            "blind-map attestation A4 base-pair digest differs from this run's delivered set"
+        )
     if raw.get("map_sha256") != expected_map_sha256:
         raise FitStartConditionError("blind-map attestation map digest differs from frozen config")
     return MappingProxyType(raw)
@@ -1279,6 +1330,39 @@ def _require_real_start_conditions(
         )
 
 
+_UNCALIBRATED_PUBLICATION = "uncalibrated, axioms only"
+
+
+def _rotation_envelope_guard_publication(jnd_fit: JNDHeterogeneityFit) -> dict:
+    """Publish the per-class rotation-envelope ordering-invariant outcome.
+
+    Parameters
+    ----------
+    jnd_fit : JNDHeterogeneityFit
+        Final W-13 fit carrying ``uncalibrated_classes``.
+
+    Returns
+    -------
+    dict
+        ``publication`` maps every realized primary class to either
+        ``"calibrated"`` or the frozen text ``"uncalibrated, axioms only"``;
+        ``freeze_blocked_classes`` lists the classes whose freeze is blocked.
+    """
+
+    blocked = tuple(jnd_fit.uncalibrated_classes)
+    classes = sorted({cell_class for cell_class, _ in jnd_fit.cell_counts} | set(blocked))
+    return {
+        "invariant": "tie band > measured rotation envelope, re-evaluated per class",
+        "publication": {
+            name: (_UNCALIBRATED_PUBLICATION if name in blocked else "calibrated")
+            for name in classes
+        },
+        "uncalibrated_classes": list(blocked),
+        "freeze_blocked_classes": list(blocked),
+        "whole_fit_refused": False,
+    }
+
+
 def run_freeze1_fit(
     pairs: Sequence[FitPair],
     plan: FittingPlan,
@@ -1361,6 +1445,7 @@ def run_freeze1_fit(
     if not synthetic_only and any(pair.synthetic for pair in rows):
         raise ValueError("FREEZE-1 cannot mix synthetic and real rows")
     input_digest = _input_digest(rows)
+    base_pair_identity_digest = _base_pair_identity_digest(rows)
     half_assignment: Optional[HalfAssignment] = None
     dof_declaration: Optional[Mapping[str, object]] = None
     blind_attestation: Optional[Mapping[str, object]] = None
@@ -1409,6 +1494,7 @@ def run_freeze1_fit(
                 blind_attestation_sha256,
                 driver_config.expected_map_sha256,
                 input_digest,
+                base_pair_identity_digest,
             )
             side_swap_result = side_swap_audit(rows, side_swap_audit_rows)
         except (OSError, ValueError) as error:
@@ -1439,6 +1525,7 @@ def run_freeze1_fit(
         output / "manifest.json",
         {
             "input_digest": input_digest,
+            "base_pair_identity_digest": base_pair_identity_digest,
             "row_count": len(rows),
             "replication_row_count": len(lines.replication),
             "role_hash": _FROZEN_A15_ROLE_HASH,
@@ -1572,10 +1659,12 @@ def run_freeze1_fit(
             driver_config,
             half_assignment,
         )
-        if jnd_fit.uncalibrated_classes:
-            raise ValueError(
-                f"rotation-envelope guard blocks classes: {list(jnd_fit.uncalibrated_classes)}"
-            )
+        # W-13-EST(g) / A18 sec 3 guard 3 (P5_PROTOCOL 2.2(g)): the per-class
+        # ordering invariant is re-evaluated per class; a failing class
+        # PUBLISHES "uncalibrated, axioms only" and blocks the freeze for THAT
+        # class. The fit itself completes (ADDENDUM-34 conformance edit; the
+        # pre-A34 driver raised ValueError and refused the whole fit).
+        rotation_envelope_guard = _rotation_envelope_guard_publication(jnd_fit)
         branch = evaluate_h_jnd_branch(jnd_fit, ledger=ledger, synthetic_only=synthetic_only)
         budget_after = ledger.budget_usage(_FROZEN_A15_ROLE_HASH)
         trajectory_rows = [
@@ -1634,7 +1723,9 @@ def run_freeze1_fit(
                     ],
                     "c06_shrink_actions": list(jnd_fit.c06_shrink_actions),
                     "c06_partial_declaration": jnd_fit.c06_partial_declaration,
+                    "uncalibrated_classes": list(jnd_fit.uncalibrated_classes),
                 },
+                "rotation_envelope_guard": rotation_envelope_guard,
                 "h_jnd_branch": asdict(branch),
                 "side_swap_audit": (None if side_swap_result is None else asdict(side_swap_result)),
                 "start_conditions": asdict(start_conditions),
@@ -1653,7 +1744,13 @@ def run_freeze1_fit(
                 "converged": True,
             },
         )
-        _atomic_write_json(output / "status.json", {"state": "COMPLETE"})
+        _atomic_write_json(
+            output / "status.json",
+            {
+                "state": "COMPLETE",
+                "freeze_blocked_classes": rotation_envelope_guard["freeze_blocked_classes"],
+            },
+        )
         return Freeze1FitResult(
             weight_fit=weight_fit,
             outer_weight_stability=outer_stability,

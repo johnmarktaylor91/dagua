@@ -2140,11 +2140,33 @@ def test_side_swap_audit_produces_finite_realized_740_leg_join() -> None:
     assert result.likelihood_row_count == 0
 
 
-def test_blind_attestation_digest_input_and_whitelist_are_derived(tmp_path: Path) -> None:
-    """BLIND-ATTEST derives its gate from exact line bytes and rejects leaked keys."""
+def _attestation_line(fit_digest: str, map_digest: str, a4_extra: Optional[dict] = None) -> dict:
+    """Build one schema-complete attestation line for the driver gate.
 
-    fit_digest = "a" * 64
-    map_digest = "b" * 64
+    Parameters
+    ----------
+    fit_digest : str
+        Value for the line's top-level ``fit_input_digest``.
+    map_digest : str
+        Value for ``map_sha256``.
+    a4_extra : dict or None, optional
+        Extra A4 evidence keys (the ADDENDUM-34 ``delivered_base_pair_digest``).
+
+    Returns
+    -------
+    dict
+        Line payload in the frozen ``v4-blind-attest-1`` schema.
+    """
+
+    a4_evidence = {
+        "base_pairs": 2,
+        "resolved": 2,
+        "distinct_pair_count": 2,
+        "missing_blind_ids": 0,
+        "duplicate_blind_ids": 0,
+        "graph_hash_mismatches": 0,
+    }
+    a4_evidence.update(a4_extra or {})
     assertions = {
         "A1_QUARANTINE_DISJOINT": {
             "assertion": "A1_QUARANTINE_DISJOINT",
@@ -2177,17 +2199,10 @@ def test_blind_attestation_digest_input_and_whitelist_are_derived(tmp_path: Path
         "A4_RESOLUTION_COMPLETE": {
             "assertion": "A4_RESOLUTION_COMPLETE",
             "result": True,
-            "evidence": {
-                "base_pairs": 2,
-                "resolved": 2,
-                "distinct_pair_count": 2,
-                "missing_blind_ids": 0,
-                "duplicate_blind_ids": 0,
-                "graph_hash_mismatches": 0,
-            },
+            "evidence": a4_evidence,
         },
     }
-    payload = {
+    return {
         "attestation_version": "v4-blind-attest-1",
         "date": "2026-08-22",
         "attester": "P5ACTIVATE",
@@ -2198,31 +2213,90 @@ def test_blind_attestation_digest_input_and_whitelist_are_derived(tmp_path: Path
         "fit_input_digest": fit_digest,
         "assertions": assertions,
     }
+
+
+def _write_line(path: Path, payload: dict) -> str:
     line = f"{json.dumps(payload, sort_keys=True, separators=(',', ':'))}\n".encode()
-    path = tmp_path / "attest.jsonl"
     path.write_bytes(line)
-    line_digest = hashlib.sha256(line).hexdigest()
+    return hashlib.sha256(line).hexdigest()
+
+
+def test_blind_attestation_digest_input_and_whitelist_are_derived(tmp_path: Path) -> None:
+    """BLIND-ATTEST binds BOTH digests with the real conventions and rejects leaked keys.
+
+    ADDENDUM-34 (c2) two-part digest: the line's ``fit_input_digest`` is the
+    driver's per-row digest (rows, order, sessions, blind ids, verdicts) and the
+    A4 evidence carries ``delivered_base_pair_digest``, the identity digest the
+    outside checker computes over sorted distinct ``base_pair_id`` values alone.
+    Both are computed here with the REAL functions on both sides (the pre-A34
+    test passed an opaque ``"a" * 64`` that any convention would have accepted).
+    """
+
+    rows = _jnd_success_rows()
+    fit_digest = driver_module._input_digest(rows)
+    identity_digest = driver_module._base_pair_identity_digest(rows)
+    independent = hashlib.sha256(
+        ("\n".join(sorted({row.base_pair_id for row in rows})) + "\n").encode()
+    ).hexdigest()
+    assert identity_digest == independent
+    assert fit_digest != identity_digest
+    map_digest = "b" * 64
+    path = tmp_path / "attest.jsonl"
+    payload = _attestation_line(
+        fit_digest, map_digest, {"delivered_base_pair_digest": identity_digest}
+    )
+    line_digest = _write_line(path, payload)
 
     verified = driver_module._verify_blind_attestation(
-        path,
-        line_digest,
-        map_digest,
-        fit_digest,
+        path, line_digest, map_digest, fit_digest, identity_digest
+    )
+    assert verified["fit_input_digest"] == fit_digest
+    assert (
+        verified["assertions"]["A4_RESOLUTION_COMPLETE"]["evidence"]["delivered_base_pair_digest"]
+        == identity_digest
     )
 
-    assert verified["fit_input_digest"] == fit_digest
+    # The identity digest is blind to verdicts, sessions, blind ids and order;
+    # the row digest is bound to every one of them.
+    flipped = tuple(
+        replace(row, graded_verdict=-row.graded_verdict, outcome=-row.outcome) for row in rows
+    )
+    reordered = tuple(reversed(rows))
+    assert driver_module._base_pair_identity_digest(flipped) == identity_digest
+    assert driver_module._base_pair_identity_digest(reordered) == identity_digest
+    assert driver_module._input_digest(flipped) != fit_digest
+    assert driver_module._input_digest(reordered) != fit_digest
     with pytest.raises(FitStartConditionError, match="input digest"):
-        driver_module._verify_blind_attestation(path, line_digest, map_digest, "e" * 64)
+        driver_module._verify_blind_attestation(
+            path, line_digest, map_digest, driver_module._input_digest(flipped), identity_digest
+        )
+    with pytest.raises(FitStartConditionError, match="input digest"):
+        driver_module._verify_blind_attestation(
+            path, line_digest, map_digest, driver_module._input_digest(reordered), identity_digest
+        )
+    # A4 was checked over a different base-pair set: refused by the second part.
+    subset_digest = driver_module._base_pair_identity_digest(rows[:-2])
+    assert subset_digest != identity_digest
+    with pytest.raises(FitStartConditionError, match="base-pair digest"):
+        driver_module._verify_blind_attestation(
+            path, line_digest, map_digest, fit_digest, subset_digest
+        )
+    # A pre-A34 line (A4 evidence counts only, no identity digest) is a different fit.
+    legacy_digest = _write_line(
+        tmp_path / "legacy.jsonl", _attestation_line(fit_digest, map_digest)
+    )
+    with pytest.raises(FitStartConditionError, match="base-pair digest"):
+        driver_module._verify_blind_attestation(
+            tmp_path / "legacy.jsonl", legacy_digest, map_digest, fit_digest, identity_digest
+        )
+    # The new key passes the constitutional whitelist; a leaked key does not.
+    assert driver_module._attestation_whitelist_valid(payload)
     leaked = dict(payload)
     leaked["graph_name"] = "forbidden"
-    leaked_line = f"{json.dumps(leaked, sort_keys=True, separators=(',', ':'))}\n".encode()
-    path.write_bytes(leaked_line)
+    leaked_digest = _write_line(path, leaked)
     with pytest.raises(FitStartConditionError, match="schema fields"):
         driver_module._verify_blind_attestation(
-            path,
-            hashlib.sha256(leaked_line).hexdigest(),
-            map_digest,
-            fit_digest,
+            path, leaked_digest, map_digest, fit_digest, identity_digest
         )
 
 
@@ -3300,9 +3374,60 @@ def test_freeze1_driver_runs_synthetic_fit_with_ledgered_artifacts(
     assert publication["lapse_prior_weight"] == pytest.approx(result.lapse_prior_weight)
     assert publication["lapse_boundary_disclosure"] is None
     assert publication["iterations"] == len(result.trajectory) == len(trajectory)
-    assert status == {"state": "COMPLETE"}
+    assert status == {"state": "COMPLETE", "freeze_blocked_classes": []}
+    assert publication["rotation_envelope_guard"]["freeze_blocked_classes"] == []
+    assert publication["rotation_envelope_guard"]["publication"] == {
+        "class-1": "calibrated",
+        "class-2": "calibrated",
+    }
+    assert manifest["base_pair_identity_digest"] == driver_module._base_pair_identity_digest(rows)
+    assert result.freeze_blocked_classes == ()
     with pytest.raises(FileExistsError):
         run_freeze1_fit(rows, plan, config, run_dir, synthetic_ledger_root)
     role_hash = bank_module._FROZEN_A15_ROLE_HASH
     assert AccessLedger(synthetic_ledger_root).budget_usage(role_hash)["test-h-jnd-branch"] == 1
     assert AccessLedger().budget_usage(role_hash)["test-h-jnd-branch"] == 0
+
+
+def test_freeze1_driver_publishes_uncalibrated_classes_per_class_not_whole_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-13-EST(g): a failing class publishes "uncalibrated, axioms only"; the fit completes.
+
+    ADDENDUM-34 conformance edit. The pre-A34 driver raised
+    ``ValueError("rotation-envelope guard blocks classes: ...")`` and refused the
+    WHOLE fit, contradicting the frozen text (P5_PROTOCOL 2.2(g), A18 sec 3
+    guard 3) which blocks the freeze for THAT class only.
+    """
+
+    monkeypatch.setattr(access_module, "_ACCESS_LEDGER_ROOT", tmp_path / "ACCESS_LEDGER")
+    rows = _jnd_success_rows()
+    plan = FittingPlan(_weight_parameters())
+    config = JNDFitConfig(
+        role_hash=bank_module._FROZEN_A15_ROLE_HASH,
+        top_composite_pair_counts={"band-1": 67, "band-2": 67},
+        # class-1's envelope is far above any estimable JND -> uncalibrated;
+        # class-2 keeps the fixture envelope -> calibrated.
+        rotation_envelopes={"class-1": 1.0e9, "class-2": 0.001},
+    )
+    run_dir = tmp_path / "freeze1-run-uncalibrated"
+    ledger_root = tmp_path / "SYNTHETIC_ACCESS_LEDGER"
+
+    result = run_freeze1_fit(rows, plan, config, run_dir, ledger_root)
+
+    assert result.jnd_fit.uncalibrated_classes == ("class-1",)
+    assert result.freeze_blocked_classes == ("class-1",)
+    assert result.access_budget_after["test-h-jnd-branch"] == 1
+    publication = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+    guard = publication["rotation_envelope_guard"]
+    assert guard["publication"] == {
+        "class-1": "uncalibrated, axioms only",
+        "class-2": "calibrated",
+    }
+    assert guard["freeze_blocked_classes"] == ["class-1"]
+    assert guard["whole_fit_refused"] is False
+    assert publication["jnd"]["uncalibrated_classes"] == ["class-1"]
+    assert status == {"state": "COMPLETE", "freeze_blocked_classes": ["class-1"]}
+    source = inspect.getsource(run_freeze1_fit)
+    assert "rotation-envelope guard blocks classes" not in source
