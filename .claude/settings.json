@@ -7,7 +7,7 @@
       "Bash(pytest *)",
       "Bash(gh *)",
       "Read",
-      "Write(.project-context/*)"
+      "Edit(.project-context/*)"
     ]
   },
   "attribution": {
