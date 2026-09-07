@@ -43,9 +43,10 @@ produced through an autograd-tracked path. Either:
    ```python
    from dagua.eval.graphs import get_test_graphs
    from dagua.eval.competitors import get_competitor
+
    graphs = {tg.name: tg for tg in get_test_graphs()}
-   tg = graphs['triangular_lattice_36']
-   c = get_competitor('classic_neulay_default')
+   tg = graphs["triangular_lattice_36"]
+   c = get_competitor("classic_neulay_default")
    result = c.layout(tg.graph, seed=42)
    ```
 

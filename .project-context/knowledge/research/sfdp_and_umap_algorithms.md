@@ -80,11 +80,11 @@ This is **not** a standard gradient step — it's a fixed-distance step in the f
 **Adaptive cooling** (step size update per iteration):
 ```python
 def update_step(step, Fnorm, Fnorm0):
-    if Fnorm >= Fnorm0:        # no progress
-        step *= 0.90           # cool = 0.90
+    if Fnorm >= Fnorm0:  # no progress
+        step *= 0.90  # cool = 0.90
     elif Fnorm > 0.95 * Fnorm0:  # modest progress
-        pass                   # keep step
-    else:                      # good progress
+        pass  # keep step
+    else:  # good progress
         step = 0.99 * step / 0.90  # increase ~= step * 1.1
     return step
 ```
@@ -229,10 +229,10 @@ rho_i = knn_dists[i, 0]  # (simplified; interpolation for non-integer local_conn
 # sum_{j in kNN(i)} exp(-(d(i,j) - rho_i) / sigma_i) = log2(k)
 target = log2(k)
 sigma_i = binary_search(
-    f = lambda sigma: sum(exp(-max(0, d(i,j) - rho_i) / sigma) for j in kNN(i)),
-    target = target,
-    n_iter = 64,
-    tol = 1e-5
+    f=lambda sigma: sum(exp(-max(0, d(i, j) - rho_i) / sigma) for j in kNN(i)),
+    target=target,
+    n_iter=64,
+    tol=1e-5,
 )
 
 # Floor: sigma_i >= 1e-3 * mean(knn_dists[i])
@@ -242,10 +242,10 @@ sigma_i = binary_search(
 
 For each point `i` and its neighbor `j`:
 ```python
-if d(i,j) - rho_i <= 0 or sigma_i == 0:
+if d(i, j) - rho_i <= 0 or sigma_i == 0:
     w_ij = 1.0
 else:
-    w_ij = exp(-(d(i,j) - rho_i) / sigma_i)
+    w_ij = exp(-(d(i, j) - rho_i) / sigma_i)
 ```
 
 This creates a directed weighted graph (sparse matrix) where each row is a local fuzzy set.
@@ -256,12 +256,12 @@ Convert directed graph to undirected via probabilistic t-conorm:
 ```python
 # A = directed membership matrix
 # With set_op_mix_ratio = 1.0 (default, pure fuzzy union):
-B = A + A^T - A * A^T
+B = A + A ^ T - A * A ^ T
 # Equivalent to: P(a or b) = P(a) + P(b) - P(a)*P(b)
 # (product t-norm for intersection, probabilistic sum for union)
 
 # General form with mix ratio r:
-B = r * (A + A^T - A*A^T) + (1-r) * (A * A^T)
+B = r * (A + A ^ T - A * A ^ T) + (1 - r) * (A * A ^ T)
 ```
 
 ### 2.3 Phase 2: Low-Dimensional Curve (a, b Parameters)
@@ -272,9 +272,9 @@ UMAP uses a smooth approximation to the step function:
 # Approximation: phi(d) = 1 / (1 + a * d^(2b))
 
 # Fit a, b by least-squares curve fitting:
-xv = linspace(0, 3*spread, 300)
+xv = linspace(0, 3 * spread, 300)
 yv = where(xv < min_dist, 1.0, exp(-(xv - min_dist) / spread))
-a, b = curve_fit(lambda x, a, b: 1/(1 + a*x**(2*b)), xv, yv)
+a, b = curve_fit(lambda x, a, b: 1 / (1 + a * x ** (2 * b)), xv, yv)
 ```
 
 Default `min_dist=0.1, spread=1.0` gives approximately `a ≈ 1.93, b ≈ 0.79`.
@@ -293,8 +293,8 @@ D_sqrt = diag(1 / sqrt(degree))
 L = I - D_sqrt @ graph @ D_sqrt
 
 # Find smallest k+1 eigenvectors (excluding trivial eigenvector)
-eigenvalues, eigenvectors = eigsh(L, k=dim+1, which='SM')
-embedding = eigenvectors[:, 1:dim+1]  # skip first (constant) eigenvector
+eigenvalues, eigenvectors = eigsh(L, k=dim + 1, which="SM")
+embedding = eigenvectors[:, 1 : dim + 1]  # skip first (constant) eigenvector
 
 # Scale to [-10, 10] and add small noise (std=0.0001)
 embedding = 10 * (embedding - min) / (max - min)
@@ -336,7 +336,7 @@ In practice, optimized via edge sampling (like word2vec negative sampling):
 
 For edge (i,j) with `dist_sq = ||y_i - y_j||^2`:
 ```python
-grad_coeff = -2 * a * b * dist_sq^(b-1) / (a * dist_sq^b + 1)
+grad_coeff = -2 * a * b * dist_sq ^ (b - 1) / (a * dist_sq ^ b + 1)
 # Per dimension:
 grad_d = clip(grad_coeff * (y_i[d] - y_j[d]), -4.0, 4.0)
 y_i[d] += alpha * grad_d
@@ -440,13 +440,13 @@ With p=-1: E_repulse = -K^2 * log(||x_i - x_j||) / ... (need care with the integ
 # Given: head, tail (edge indices), epochs_per_sample, a, b
 # Positive step:
 dist_sq = ((embedding[head] - embedding[tail]) ** 2).sum(-1)
-phi = 1 / (1 + a * dist_sq ** b)
-attractive_grad = -2 * a * b * dist_sq ** (b-1) / (a * dist_sq ** b + 1)
+phi = 1 / (1 + a * dist_sq**b)
+attractive_grad = -2 * a * b * dist_sq ** (b - 1) / (a * dist_sq**b + 1)
 
 # Negative sampling:
 neg_indices = torch.randint(0, n, (len(head), neg_rate))
 dist_sq_neg = ((embedding[head].unsqueeze(1) - embedding[neg_indices]) ** 2).sum(-1)
-repulsive_grad = 2 * gamma * b / ((0.001 + dist_sq_neg) * (a * dist_sq_neg ** b + 1))
+repulsive_grad = 2 * gamma * b / ((0.001 + dist_sq_neg) * (a * dist_sq_neg**b + 1))
 ```
 
 **Key differences from standard implementation**:

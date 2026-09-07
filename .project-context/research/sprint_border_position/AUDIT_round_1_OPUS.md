@@ -108,8 +108,8 @@ Correct. No bug.
 if border_position == "inside":
     return inset_shape_path(shape_spec, border_width)  # fill shrinks by S
 if border_position == "center":
-    return outer_path                                  # fill at bbox
-return outer_path                                      # outside: fill at bbox
+    return outer_path  # fill at bbox
+return outer_path  # outside: fill at bbox
 ```
 Matches cytoscape spec exactly:
 - `inside`: fill recedes by full stroke width S (correct -- stroke occupies
@@ -139,11 +139,11 @@ math.
 ### `_node_border_centerline_path` (line 3756)
 ```python
 if border_position == "inside":
-    return inset_shape_path(shape_spec, border_width / 2.0)   # bbox - S/2
+    return inset_shape_path(shape_spec, border_width / 2.0)  # bbox - S/2
 if border_position == "outside":
     return build_shape_path(_expanded_shape_spec(shape_spec, border_width / 2.0))
-                                                              # bbox + S/2
-return outer_path                                             # bbox
+    # bbox + S/2
+return outer_path  # bbox
 ```
 Centerline placed at bbox-S/2 for inside, bbox for center, bbox+S/2 for
 outside. This is exactly correct: the dashed/stroked ribbon's *centerline*

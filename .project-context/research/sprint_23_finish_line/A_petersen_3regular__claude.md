@@ -72,8 +72,7 @@ def network_simplex_x(layered, order, node_sizes, node_sep) -> ndarray[N]:
 
 def nse_layout(edge_index, n, node_sizes, config) -> Tensor[N, 2]:
     back = detect_back_edges_dfs(edge_index, n)
-    forward = [(u, v) for i, (u, v) in enumerate_edges
-               if not back[i] and u != v]
+    forward = [(u, v) for i, (u, v) in enumerate_edges if not back[i] and u != v]
     layer = longest_path_layers(forward, n)
     layered = insert_dummies(forward, layer, n)
     order = median_with_transpose(layered)
@@ -120,10 +119,10 @@ def _should_nse_x_polish(
     # benefits; complete_bipartite_8x12 has same density but breaks --
     # exclude bipartite via a parity check on the degree sequence).
     is_dense_dag = (
-        n >= 50 and
-        med_deg >= 2.0 and
-        not _is_bipartite_complete(edge_index, n) and
-        _is_dag(edge_index, n)
+        n >= 50
+        and med_deg >= 2.0
+        and not _is_bipartite_complete(edge_index, n)
+        and _is_dag(edge_index, n)
     )
     return is_3reg or is_dense_dag
 ```
@@ -181,11 +180,16 @@ Petersen residual: base scoring is **74.64**, NSE best is **75.86**, sugiyama ta
 
 ```python
 def _should_nse_x_polish(pos, edge_index, node_sizes, n):
-    if n < 8: return False
-    if _looks_like_lattice(pos, edge_index): return False
-    if _back_edges_present(edge_index, n): return False  # relayer owns this
-    if _avg_degree(edge_index, n) < 2.0: return False
-    if _is_bipartite_complete(edge_index, n): return False
+    if n < 8:
+        return False
+    if _looks_like_lattice(pos, edge_index):
+        return False
+    if _back_edges_present(edge_index, n):
+        return False  # relayer owns this
+    if _avg_degree(edge_index, n) < 2.0:
+        return False
+    if _is_bipartite_complete(edge_index, n):
+        return False
     deg_med = _median_degree(edge_index, n)
     deg_spread = _degree_spread(edge_index, n)
     is_3reg = 2.5 <= deg_med <= 3.5 and deg_spread <= 4.0
@@ -214,7 +218,7 @@ Combined with the `_best_of_polish` margin (0.5) + dag-non-regression + overlap-
 
 5. Wire into `_best_of_polish` (search for the existing list of polish candidates in `dagua_native.py`):
    ```python
-   ("nse_x", _nse_x_layout, _should_nse_x_polish),
+   (("nse_x", _nse_x_layout, _should_nse_x_polish),)
    ```
 
 6. Tests in `tests/test_layout_ops_pipelines.py`:

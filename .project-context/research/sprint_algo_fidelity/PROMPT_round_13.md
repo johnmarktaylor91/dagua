@@ -28,10 +28,10 @@ igraph uses **unnormalized** energy terms.
 
 dagua at `dagua/layout/ops/davidson_harel.py:16-20, 180-193`:
 ```python
-border=0.1
-edge_lengths=0.2
-edge_crossings=2.0
-node_edge_dist=0.5
+border = 0.1
+edge_lengths = 0.2
+edge_crossings = 2.0
+node_edge_dist = 0.5
 # NO node_dist term -- this is the biggest gap
 ```
 dagua uses **normalized** energy terms.

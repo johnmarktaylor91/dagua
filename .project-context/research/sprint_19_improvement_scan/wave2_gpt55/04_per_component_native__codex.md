@@ -300,7 +300,9 @@ if component_ids is not None and _should_decompose_components(problem, prepared_
 
     tiled = _tile_component_positions(
         component_results,
-        node_sep=float(getattr(prepared_config, "_dagua_native_node_sep", prepared_config.node_sep)),
+        node_sep=float(
+            getattr(prepared_config, "_dagua_native_node_sep", prepared_config.node_sep)
+        ),
     )
     outer_state = SolveState(pos=tiled)
     outer_state = AspectRatioFit(AspectRatioFitConfig()).apply(problem, outer_state, ctx)

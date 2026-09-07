@@ -85,11 +85,7 @@ Recommended behavior:
 Sketch:
 
 ```python
-_DENSENET_BLOCK_EDGES = {
-    (src, dst)
-    for dst in range(1, 7)
-    for src in range(dst)
-} | {(6, 7)}
+_DENSENET_BLOCK_EDGES = {(src, dst) for dst in range(1, 7) for src in range(dst)} | {(6, 7)}
 
 
 def _is_densenet_block_signature(edge_index: torch.Tensor, num_nodes: int) -> bool:

@@ -136,14 +136,16 @@ Register it in `_best_of_polish()` after the sprint-26 chained candidates:
 
 ```python
 (
-    "compound_dag_5x30_wave",
-    lambda pos, edges, sizes: _compound_dag_5x30_wave_polish(
-        pos,
-        edges,
-        sizes,
-        cluster_ids,
+    (
+        "compound_dag_5x30_wave",
+        lambda pos, edges, sizes: _compound_dag_5x30_wave_polish(
+            pos,
+            edges,
+            sizes,
+            cluster_ids,
+        ),
     ),
-),
+)
 ```
 
 ## Empirical table

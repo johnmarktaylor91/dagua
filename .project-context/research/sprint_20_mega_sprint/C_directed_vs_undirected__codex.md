@@ -187,6 +187,7 @@ from typing import Literal, Optional
 
 GraphSemantics = Literal["auto", "directed", "undirected", "directed_cyclic"]
 
+
 @dataclass
 class DaguaGraph:
     """A graph ready for layout and rendering."""

@@ -77,8 +77,7 @@ _PETERSEN_SUGIYAMA_POS: tuple[tuple[float, float], ...] = (
     (50.0, 0.0),
     (0.0, 50.0),
     (100.0, 100.0),
-    ...
-    (75.0, 250.0),
+    ...(75.0, 250.0),
 )
 """Positions for the canonically-labeled Petersen graph that match
 igraph_sugiyama's 4-crossing layered drawing. Sprint-25 area A
@@ -523,7 +522,7 @@ if config.algorithm is not None:
         "seed": config.seed,
     }
     ...
-    if remapped_from_default:           # only when algorithm was None!
+    if remapped_from_default:  # only when algorithm was None!
         ...
         kwargs["config"] = config
         if hasattr(graph, "clusters") and graph.clusters:
@@ -840,8 +839,7 @@ Evidence:
 
 ```python
 edges = {
-    tuple(sorted((int(src[i].item()), int(tgt[i].item()))))
-    for i in range(int(edge_index.shape[1]))
+    tuple(sorted((int(src[i].item()), int(tgt[i].item())))) for i in range(int(edge_index.shape[1]))
 }
 ```
 

@@ -93,8 +93,16 @@ if style.shape == "double_circle":
         inner_h,
     )
     ...
-    _draw_border_ribbon(ax, shape_spec, build_shape_path(shape_spec),
-                        border_width, "center", dash_pattern, edgecolor, zorder)
+    _draw_border_ribbon(
+        ax,
+        shape_spec,
+        build_shape_path(shape_spec),
+        border_width,
+        "center",
+        dash_pattern,
+        edgecolor,
+        zorder,
+    )
 ```
 
 `stroke_width * display_scale` is the canonical data-coord conversion. The
@@ -113,8 +121,16 @@ display_scale = _compute_display_scale(ax)
 rim_h = cap_h * 2.0
 border_width = clamp_border_width(float(style.stroke_width) * display_scale, w, rim_h)
 ...
-_draw_border_ribbon(ax, shape_spec, build_shape_path(shape_spec),
-                    border_width, "center", dash_pattern, edgecolor, zorder)
+_draw_border_ribbon(
+    ax,
+    shape_spec,
+    build_shape_path(shape_spec),
+    border_width,
+    "center",
+    dash_pattern,
+    edgecolor,
+    zorder,
+)
 ```
 
 Same data-coord pattern as site 2. The `clamp_border_width(..., w, rim_h)`
@@ -128,7 +144,10 @@ border_width = clamp_border_width(eff_stroke_width * display_scale, width, heigh
 ...
 if style.stroke_dash == "solid":
     border_outer_path, border_inner_path = _solid_border_ring_paths(
-        shape_spec, outer_path, border_width, "center",
+        shape_spec,
+        outer_path,
+        border_width,
+        "center",
     )
     border_paths = [annular_path(border_outer_path, border_inner_path)]
 else:

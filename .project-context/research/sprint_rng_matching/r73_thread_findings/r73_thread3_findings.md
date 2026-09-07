@@ -151,9 +151,7 @@ Function: `_pack_component_positions()` (lines 146-192)
 Replace the current row-major grid with a graphviz-compatible shelf packing:
 
 ```python
-def _pack_component_positions(
-    components, component_positions, num_nodes, gap
-):
+def _pack_component_positions(components, component_positions, num_nodes, gap):
     """Pack components using graphviz-compatible area-sorted shelf packing."""
     if not component_positions:
         return torch.empty((0, 2), dtype=torch.float32)
@@ -179,7 +177,7 @@ def _pack_component_positions(
 
     # 3. Compute target row width from total area (graphviz heuristic)
     total_area = sum(areas)
-    row_width = (total_area ** 0.5) * 1.0  # page_ratio=1.0 default
+    row_width = (total_area**0.5) * 1.0  # page_ratio=1.0 default
 
     # 4. Shelf packing: fill rows up to row_width
     x_cursor = 0.0
@@ -197,9 +195,11 @@ def _pack_component_positions(
             y_cursor += row_height + gap
             row_height = 0.0
 
-        offset = torch.tensor([x_cursor - float(mins[0].item()),
-                                y_cursor - float(mins[1].item())],
-                               dtype=dtype, device=device)
+        offset = torch.tensor(
+            [x_cursor - float(mins[0].item()), y_cursor - float(mins[1].item())],
+            dtype=dtype,
+            device=device,
+        )
         packed[component] = local + offset
 
         x_cursor += w + gap

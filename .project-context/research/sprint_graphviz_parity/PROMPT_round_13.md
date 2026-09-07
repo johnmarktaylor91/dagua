@@ -79,14 +79,15 @@ After all fixes:
    ```python
    from PIL import Image
    import os
-   src = 'eval_output/graphviz_theme_round_13/three_way'
-   dst = 'eval_output/graphviz_theme_round_13/two_way'
+
+   src = "eval_output/graphviz_theme_round_13/three_way"
+   dst = "eval_output/graphviz_theme_round_13/two_way"
    os.makedirs(dst, exist_ok=True)
    for f in os.listdir(src):
-       if f.endswith('.png'):
-           img = Image.open(f'{src}/{f}')
+       if f.endswith(".png"):
+           img = Image.open(f"{src}/{f}")
            w, h = img.size
-           img.crop((0, 0, int(w * 2/3), h)).save(f'{dst}/{f}')
+           img.crop((0, 0, int(w * 2 / 3), h)).save(f"{dst}/{f}")
    ```
 3. Verify with at most 5 panel reads (must include node_shapes_showcase.png to confirm star + ellipse fix, and tiny_graph.png to confirm node size + arrow fix).
 </verification_protocol>

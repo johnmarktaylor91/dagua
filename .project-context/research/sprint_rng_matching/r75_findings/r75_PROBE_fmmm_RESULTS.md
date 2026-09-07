@@ -22,11 +22,15 @@ Benchmark path used:
 
 ```python
 get_competitor("classic_fmmm").layout_with_variant(
-    graph, timeout=120, seed=seed,
+    graph,
+    timeout=120,
+    seed=seed,
     variant_params={"steps": 10, "fidelity_mode": True},
 )
 get_competitor("ogdf_fmmm").layout_with_variant(
-    graph, timeout=120, seed=seed,
+    graph,
+    timeout=120,
+    seed=seed,
     variant_params={"fixed_iterations": 10},
 )
 ```
@@ -91,7 +95,7 @@ subtraction form:
 
 ```python
 angles = atan2(force_y, force_x) - atan2(previous_y, previous_x)
-angles = where(angles < 0, angles + 2*pi, angles)
+angles = where(angles < 0, angles + 2 * pi, angles)
 buckets = ceil(angles / 0.52359878)
 ```
 

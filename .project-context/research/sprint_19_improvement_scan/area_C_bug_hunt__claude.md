@@ -79,11 +79,12 @@ else:
 # CUDA_VISIBLE_DEVICES="" python -c "..."
 import torch
 from dagua.metrics import edge_direction_straightness
-pos = torch.tensor([[0., 0.], [0., 0.]])
+
+pos = torch.tensor([[0.0, 0.0], [0.0, 0.0]])
 ei = torch.tensor([[0], [1]], dtype=torch.long)
-print(edge_direction_straightness(pos, ei, direction='TB'))
+print(edge_direction_straightness(pos, ei, direction="TB"))
 # {'edge_straightness_mean_deg': 0.0, 'edge_straightness_below_15': 1.0}
-print(edge_direction_straightness(pos, ei, direction='LR'))
+print(edge_direction_straightness(pos, ei, direction="LR"))
 # {'edge_straightness_mean_deg': 45.0, 'edge_straightness_below_15': 0.0}
 ```
 
@@ -138,15 +139,15 @@ import torch
 from dagua.metrics import dag_consistency
 
 # Self-loop: TB with edges 0->0 and 0->1
-pos = torch.tensor([[0., 0.], [0., 10.]])
+pos = torch.tensor([[0.0, 0.0], [0.0, 10.0]])
 ei = torch.tensor([[0, 0], [1, 0]], dtype=torch.long)
-print(dag_consistency(pos, ei, direction='TB'))
+print(dag_consistency(pos, ei, direction="TB"))
 # {'dag_consistency': 0.5, 'dag_num_violations': 1, ...}  <-- self-loop counted as violation
 
 # Same x in LR with a chain
-pos = torch.tensor([[5., 0.], [5., 1.], [5., 2.]])
+pos = torch.tensor([[5.0, 0.0], [5.0, 1.0], [5.0, 2.0]])
 ei = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
-print(dag_consistency(pos, ei, direction='LR'))
+print(dag_consistency(pos, ei, direction="LR"))
 # {'dag_consistency': 0.0, ...}
 ```
 
@@ -169,7 +170,7 @@ magnitude check. A simpler patch: strict `>=` with documented
 ```python
 correct = y_tgt > y_src  # strict
 # becomes:
-self_loop = (src == tgt)
+self_loop = src == tgt
 correct = (y_tgt > y_src) | self_loop  # self-loops neutral
 ```
 
@@ -192,6 +193,7 @@ Other sampled metrics (`count_overlaps_detailed`, `sampled_crossing_rate`,
 ```python
 import torch
 from dagua.metrics import angular_resolution
+
 N = 200
 torch.manual_seed(0)
 src = torch.randint(0, N, (500,))
@@ -203,7 +205,7 @@ torch.manual_seed(999)
 r1 = angular_resolution(pos, ei, n_samples=50)
 torch.manual_seed(123)
 r2 = angular_resolution(pos, ei, n_samples=50)
-print(r1['angular_res_mean_deg'], r2['angular_res_mean_deg'])
+print(r1["angular_res_mean_deg"], r2["angular_res_mean_deg"])
 # 9.72... vs 13.97... on the SAME positions
 ```
 
@@ -257,10 +259,11 @@ The code relies on the "happens to work" branch.
 
 ```python
 from dagua.metrics import composite
+
 m = dict(
     dag_consistency=1.0,
     edge_length_cv=0.3,
-    depth_spearman_rho=float('nan'),
+    depth_spearman_rho=float("nan"),
     overlap_count=0,
     edge_straightness_mean_deg=10.0,
     crossing_rate=0.0,
@@ -268,7 +271,7 @@ m = dict(
 )
 print(composite(m))  # 73.03 -- composes with depth term silently zero'd
 
-m['edge_length_cv'] = float('nan')
+m["edge_length_cv"] = float("nan")
 print(composite(m))  # 72.53 -- cv term silently zero'd (but could flip to NaN on other platforms)
 ```
 
@@ -369,6 +372,7 @@ unresolved-fallback code sets every node to `fill_layer = 0`.
 ```python
 import torch
 from dagua.utils import longest_path_layering
+
 ei = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
 print(longest_path_layering(ei, 3))
 # [0, 0, 0]   <-- everybody in layer 0
@@ -412,7 +416,8 @@ an implementation detail of the node ordering. Confirmed behavior:
 ```python
 from dagua.layout.cycle import detect_back_edges
 import torch
-ei = torch.tensor([[0,1,2],[1,2,0]], dtype=torch.long)
+
+ei = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
 print(detect_back_edges(ei, 3).tolist())  # [False, False, True]
 ```
 
@@ -437,7 +442,8 @@ constant. Verified:
 ```python
 from dagua.metrics import depth_position_correlation
 import torch
-pos = torch.tensor([[0., 0.], [1., 0.], [2., 0.]])
+
+pos = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
 depth = torch.tensor([0, 0, 0])
 print(depth_position_correlation(pos, depth))
 # {'depth_spearman_rho': nan, 'depth_spearman_pval': nan}

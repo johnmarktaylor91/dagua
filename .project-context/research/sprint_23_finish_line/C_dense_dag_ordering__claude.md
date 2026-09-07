@@ -138,17 +138,19 @@ ordering must beat the baseline composite score by `margin = 0.5`.
 
 ```python
 def median_with_transpose_polish(
-    pos: torch.Tensor,        # [N, 2] baseline output
-    edge_index: torch.Tensor, # [2, E] original edges
-    node_sizes: torch.Tensor, # [N, 2]
-    layers: list[int],        # per-original-node layer
-    score_fn,                 # baseline-validated composite scorer
+    pos: torch.Tensor,  # [N, 2] baseline output
+    edge_index: torch.Tensor,  # [2, E] original edges
+    node_sizes: torch.Tensor,  # [N, 2]
+    layers: list[int],  # per-original-node layer
+    score_fn,  # baseline-validated composite scorer
     n_sweeps: int = 24,
 ) -> torch.Tensor:
     base_score = score_fn(pos)
 
     expanded_layers, parents, children, _ = expand_dummy_graph(
-        edge_index_cpu=edge_index, layers=layers, num_nodes=N,
+        edge_index_cpu=edge_index,
+        layers=layers,
+        num_nodes=N,
     )
 
     best_layers = [list(layer) for layer in expanded_layers]
@@ -160,17 +162,15 @@ def median_with_transpose_polish(
         if s % 2 == 0:
             # downward: sort each layer by NUDGED median of parents.
             for k in range(1, L):
-                pos_prev = {n: i for i, n in enumerate(work[k-1])}
-                scores = {n: nudged_median(parents[n], pos_prev)
-                          for n in work[k]}
+                pos_prev = {n: i for i, n in enumerate(work[k - 1])}
+                scores = {n: nudged_median(parents[n], pos_prev) for n in work[k]}
                 stable = {n: i for i, n in enumerate(work[k])}
                 work[k].sort(key=lambda n: (scores[n], stable[n], n))
         else:
             # upward: sort each layer by NUDGED median of children.
-            for k in range(L-2, -1, -1):
-                pos_next = {n: i for i, n in enumerate(work[k+1])}
-                scores = {n: nudged_median(children[n], pos_next)
-                          for n in work[k]}
+            for k in range(L - 2, -1, -1):
+                pos_next = {n: i for i, n in enumerate(work[k + 1])}
+                scores = {n: nudged_median(children[n], pos_next) for n in work[k]}
                 stable = {n: i for i, n in enumerate(work[k])}
                 work[k].sort(key=lambda n: (scores[n], stable[n], n))
 
@@ -193,18 +193,22 @@ def median_with_transpose_polish(
 
 
 def nudged_median(neighbors, pos_in_layer):
-    if not neighbors: return -1.0
+    if not neighbors:
+        return -1.0
     vals = sorted(pos_in_layer[n] for n in neighbors if n in pos_in_layer)
-    if not vals: return -1.0
+    if not vals:
+        return -1.0
     m = len(vals) // 2
-    if len(vals) % 2 == 1: return float(vals[m])
-    if len(vals) == 2: return 0.5*(vals[0]+vals[1])
-    left, right = vals[m-1], vals[m]
-    leftspan  = left - vals[0]
+    if len(vals) % 2 == 1:
+        return float(vals[m])
+    if len(vals) == 2:
+        return 0.5 * (vals[0] + vals[1])
+    left, right = vals[m - 1], vals[m]
+    leftspan = left - vals[0]
     rightspan = vals[-1] - right
     if leftspan + rightspan == 0:
-        return 0.5*(left+right)
-    return (left*rightspan + right*leftspan) / (leftspan + rightspan)
+        return 0.5 * (left + right)
+    return (left * rightspan + right * leftspan) / (leftspan + rightspan)
 
 
 def transpose_phase(layers, parents, children, max_passes=8):
@@ -213,19 +217,19 @@ def transpose_phase(layers, parents, children, max_passes=8):
         changed = False
         for k in range(L):
             nodes = layers[k]
-            if len(nodes) < 2: continue
-            pos_upper = {n:i for i,n in enumerate(layers[k-1])} if k>0 else {}
-            pos_lower = {n:i for i,n in enumerate(layers[k+1])} if k+1<L else {}
-            for i in range(len(nodes)-1):
-                u, v = nodes[i], nodes[i+1]
-                before = local_uv_crossings(u, v, pos_upper, pos_lower,
-                                            children, parents, i, i+1)
-                after  = local_uv_crossings(v, u, pos_upper, pos_lower,
-                                            children, parents, i, i+1)
+            if len(nodes) < 2:
+                continue
+            pos_upper = {n: i for i, n in enumerate(layers[k - 1])} if k > 0 else {}
+            pos_lower = {n: i for i, n in enumerate(layers[k + 1])} if k + 1 < L else {}
+            for i in range(len(nodes) - 1):
+                u, v = nodes[i], nodes[i + 1]
+                before = local_uv_crossings(u, v, pos_upper, pos_lower, children, parents, i, i + 1)
+                after = local_uv_crossings(v, u, pos_upper, pos_lower, children, parents, i, i + 1)
                 if after < before:
-                    nodes[i], nodes[i+1] = v, u
+                    nodes[i], nodes[i + 1] = v, u
                     changed = True
-        if not changed: break
+        if not changed:
+            break
 
 
 def project_ordering_to_x(pos, layers, ordered_layers):
@@ -233,7 +237,8 @@ def project_ordering_to_x(pos, layers, ordered_layers):
     layer and reassigning to the ordered nodes. Preserves overlap-free."""
     new_pos = pos.detach().clone()
     for layer_nodes in ordered_layers:
-        if len(layer_nodes) < 2: continue
+        if len(layer_nodes) < 2:
+            continue
         idx = torch.tensor(layer_nodes, dtype=torch.long)
         xs = new_pos[idx, 0]
         sorted_xs, _ = torch.sort(xs)

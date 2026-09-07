@@ -60,11 +60,7 @@ Evidence:
 
 ```python
 _PETERSEN_CANONICAL_EDGES = frozenset({...})
-_PETERSEN_SUGIYAMA_POS = (
-    (50.0, 0.0),
-    (0.0, 50.0),
-    ...
-)
+_PETERSEN_SUGIYAMA_POS = ((50.0, 0.0), (0.0, 50.0), ...)
 ```
 
 ```python
@@ -85,11 +81,7 @@ Location: `dagua/layout/ops/pipelines/dagua_native.py:3413`, `dagua/layout/ops/p
 Evidence:
 
 ```python
-_SIERPINSKI_42_OFFSETS: tuple[tuple[float, float], ...] = (
-    (590.56, 240.76),
-    (458.59, 209.92),
-    ...
-)
+_SIERPINSKI_42_OFFSETS: tuple[tuple[float, float], ...] = ((590.56, 240.76), (458.59, 209.92), ...)
 ```
 
 ```python
@@ -98,6 +90,7 @@ _SIERPINSKI_42_OFFSETS: tuple[tuple[float, float], ...] = (
 Codex empirical: a 42x2 fixed offset table (from local metric
 optimization) lifts composite from 85.58 to 87.06...
 """
+
 ...
 return out + offsets
 ```
@@ -114,9 +107,7 @@ Location: `dagua/layout/ops/pipelines/dagua_native.py:3540`, `dagua/layout/ops/p
 Evidence:
 
 ```python
-_LESMIS_77_ORDER: tuple[int, ...] = (
-    16, 0, 1, 17, 18, 46, 2, ...
-)
+_LESMIS_77_ORDER: tuple[int, ...] = (16, 0, 1, 17, 18, 46, 2, ...)
 ```
 
 ```python
@@ -145,9 +136,7 @@ Evidence:
 
 ```python
 _LONG_RANGE_LADDER_38_ORDER: tuple[int, ...] = (36, 0, 24, 2, ...)
-_LONG_RANGE_LADDER_38_GAPS: tuple[float, ...] = (
-    3950.291, 2369.673, 40.159, ...
-)
+_LONG_RANGE_LADDER_38_GAPS: tuple[float, ...] = (3950.291, 2369.673, 40.159, ...)
 ```
 
 ```python
@@ -170,7 +159,9 @@ Location: `dagua/layout/ops/pipelines/dagua_native.py:3277`, `dagua/layout/ops/p
 Evidence:
 
 ```python
-_DENSENET_BLOCK_EDGES = frozenset({(src, dst) for dst in range(1, 7) for src in range(dst)} | {(6, 7)})
+_DENSENET_BLOCK_EDGES = frozenset(
+    {(src, dst) for dst in range(1, 7) for src in range(dst)} | {(6, 7)}
+)
 ```
 
 ```python
@@ -225,11 +216,7 @@ return actual == expected
 ```python
 pitch = 5000.0
 gap = 40.0
-slot_y = [
-    -2.0 * pitch - gap / 2.0,
-    -pitch - gap / 2.0,
-    ...
-]
+slot_y = [-2.0 * pitch - gap / 2.0, -pitch - gap / 2.0, ...]
 ```
 
 The docstring admits it "sacrifices one DAG edge" and uses `pitch=5000, gap=40`. That is not an algorithmic generalization for recurrent cells. It is an exact edge-set fixture with handpicked scale constants.
@@ -245,6 +232,7 @@ Evidence:
 
 ```python
 """Match sprint-27 disconnected_encoder_residual: 9 nodes, 8 edges, 4+5 components."""
+
 ...
 return sizes == [4, 5]
 ```
@@ -380,9 +368,7 @@ Location: `dagua/layout/ops/pipelines/dagua_native.py:3083`, `dagua/layout/ops/p
 Evidence:
 
 ```python
-expected = {
-    (0, 1), (1, 2), (1, 3), ...
-}
+expected = {(0, 1), (1, 2), (1, 3), ...}
 return actual == expected
 ```
 
@@ -597,12 +583,9 @@ Evidence:
 
 ```python
 class TestCountCrossings:
-    def test_no_crossings(self):
-        ...
-    def test_one_crossing(self):
-        ...
-    def test_empty_edges(self):
-        ...
+    def test_no_crossings(self): ...
+    def test_one_crossing(self): ...
+    def test_empty_edges(self): ...
 ```
 
 The tests cover parallel non-overlap and a simple X. They do not cover overlapping colinear segments, endpoint-touch semantics, or same-line edge bundles. That omission allowed the reverted sprint-24b bug to remain.

@@ -63,7 +63,7 @@ def area_a_candidate(edge_index, num_nodes, pitch_x=128.0, pitch_y=72.0):
             coeff[right] = 1.0
             coeff[left] = -1.0
             constraints.append(coeff)
-            lower.append(1.0)      # adjacent same-rank separation
+            lower.append(1.0)  # adjacent same-rank separation
             upper.append(np.inf)
 
     for edge_id, (src, dst) in enumerate(edge_index.t().tolist()):
@@ -74,7 +74,7 @@ def area_a_candidate(edge_index, num_nodes, pitch_x=128.0, pitch_y=72.0):
         coeff[src] = -1.0
         coeff[dst] = 1.0
         constraints.append(coeff)
-        lower.append(0.0)          # slack >= x_src - x_dst
+        lower.append(0.0)  # slack >= x_src - x_dst
         upper.append(np.inf)
 
         coeff = np.zeros(var_count)
@@ -82,11 +82,11 @@ def area_a_candidate(edge_index, num_nodes, pitch_x=128.0, pitch_y=72.0):
         coeff[src] = 1.0
         coeff[dst] = -1.0
         constraints.append(coeff)
-        lower.append(0.0)          # slack >= x_dst - x_src
+        lower.append(0.0)  # slack >= x_dst - x_src
         upper.append(np.inf)
 
     coeff = np.zeros(var_count)
-    coeff[0] = 1.0                 # remove translation freedom
+    coeff[0] = 1.0  # remove translation freedom
     constraints.append(coeff)
     lower.append(0.0)
     upper.append(0.0)

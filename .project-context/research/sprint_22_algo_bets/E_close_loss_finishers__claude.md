@@ -236,11 +236,14 @@ def fanout_uniform_x(pos, ei, n, alpha=0.5, min_fanout=4):
     a uniform spread relative to u."""
     for u in nodes:
         children = sorted(out_neighbors[u], key=lambda c: pos[c, 0])
-        if len(children) < min_fanout: continue
+        if len(children) < min_fanout:
+            continue
         x_min, x_max = pos[children, 0].min(), pos[children, 0].max()
         for j, c in enumerate(children):
-            target = pos[u, 0] + (j - (len(children)-1)/2) * (x_max-x_min)/(len(children)-1)
-            pos[c, 0] = (1-alpha)*pos[c, 0] + alpha*target
+            target = pos[u, 0] + (j - (len(children) - 1) / 2) * (x_max - x_min) / (
+                len(children) - 1
+            )
+            pos[c, 0] = (1 - alpha) * pos[c, 0] + alpha * target
 ```
 
 **Measured (alpha sweep, min_fanout=4):**
@@ -354,14 +357,16 @@ also horizontal. Self-loop length = 0.
 def detect_back_edges(ei, n):
     """DFS-based feedback arc detection. Returns [E] bool mask."""
     s, t = ei[0], ei[1]
-    self_mask = (s == t)
+    self_mask = s == t
     adj = build_adjacency(ei[~self_mask])
     color = [WHITE] * n
     back = zeros(E, dtype=bool)
     for src in nodes:
-        if color[src] != WHITE: continue
+        if color[src] != WHITE:
+            continue
         # iterative DFS
-        stack = [(src, iter(adj[src]))]; color[src] = GRAY
+        stack = [(src, iter(adj[src]))]
+        color[src] = GRAY
         while stack:
             u, it = stack[-1]
             try:
@@ -375,6 +380,7 @@ def detect_back_edges(ei, n):
                 color[u] = BLACK
                 stack.pop()
     return back | self_mask
+
 
 def relayer_polish(pos, ei, n, ns, blend=1.0):
     """Re-layer pos using longest-path layering on the forward subgraph."""
@@ -393,9 +399,9 @@ def relayer_polish(pos, ei, n, ns, blend=1.0):
         idx = where(layers == L)
         order = argsort(pos[idx, 0])  # preserve relative x order
         for j, oi in enumerate(order):
-            new_x[idx[oi]] = (j - (len(idx)-1)/2) * pitch_x
+            new_x[idx[oi]] = (j - (len(idx) - 1) / 2) * pitch_x
     out = stack([new_x, new_y], dim=1)
-    return (1-blend)*pos + blend*out
+    return (1 - blend) * pos + blend * out
 ```
 
 **Measured on recurrent_feedback_cell:**

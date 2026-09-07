@@ -46,7 +46,7 @@ Trace for `repulsiveforce=-2.0`:
 
 dagua (`dagua/layout/ops/pipelines/sfdp.py:539`):
 ```python
-denominator = pow(distance, 1.0 - self.repulsive_exponent)   # p=-2 -> pow(dist, 3.0)
+denominator = pow(distance, 1.0 - self.repulsive_exponent)  # p=-2 -> pow(dist, 3.0)
 ```
 plus `_sfdp_force_scales` (`sfdp.py:406-426`) uses p=-2 in `CRK = C**((2-p)/3)/K` and `KP = K**(1-p)`. Nothing in dagua negates or clamps `repulsive_exponent`. So dagua runs a genuinely different force law than the reference it is being scored against.
 

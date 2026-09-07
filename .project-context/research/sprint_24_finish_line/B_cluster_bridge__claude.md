@@ -381,8 +381,10 @@ if _should_try_cluster_tight(edge_index, cluster_ids, N):
     for scale in (0.03, 0.05, 0.10, 0.15, 0.20):
         cand = _cluster_tight_candidate(best_pos, cluster_ids, scale)
         cand_score, cand_metrics = score_fn(cand)
-        if (cand_score >= best_score + margin
-            and cand_metrics.get("overlap_count", 0) <= base_overlap):
+        if (
+            cand_score >= best_score + margin
+            and cand_metrics.get("overlap_count", 0) <= base_overlap
+        ):
             if cand_score > best_score:
                 best_pos, best_score = cand, cand_score
                 best_metrics = cand_metrics

@@ -32,16 +32,20 @@ def equalize_aspect_preserving(pos, edges, iters, step, *, lock_x, lock_y, resca
     if no_edges:
         return pos
     # capture original bbox
-    x0_min, x0_max = pos[:,0].min(), pos[:,0].max()
-    y0_min, y0_max = pos[:,1].min(), pos[:,1].max()
+    x0_min, x0_max = pos[:, 0].min(), pos[:, 0].max()
+    y0_min, y0_max = pos[:, 1].min(), pos[:, 1].max()
     x0_range = max(x0_max - x0_min, eps)
     y0_range = max(y0_max - y0_min, eps)
 
     def rescale(p):
         if lock_x:
-            p[:,0] = (p[:,0] - p[:,0].min()) / max(p[:,0].max() - p[:,0].min(), eps) * x0_range + x0_min
+            p[:, 0] = (p[:, 0] - p[:, 0].min()) / max(
+                p[:, 0].max() - p[:, 0].min(), eps
+            ) * x0_range + x0_min
         if lock_y:
-            p[:,1] = (p[:,1] - p[:,1].min()) / max(p[:,1].max() - p[:,1].min(), eps) * y0_range + y0_min
+            p[:, 1] = (p[:, 1] - p[:, 1].min()) / max(
+                p[:, 1].max() - p[:, 1].min(), eps
+            ) * y0_range + y0_min
         return p
 
     for _ in range(iters):
@@ -98,13 +102,21 @@ The y-locked-only variant ("snap y back, let x flow") is closer to the prompt's 
 
 ```python
 def gap_constrained_swap(
-    pos, edges, sizes, *, score_fn,
-    layer_eps=1.0, max_passes=2, max_nodes=600, only_long_edges=False, long_q=0.85,
+    pos,
+    edges,
+    sizes,
+    *,
+    score_fn,
+    layer_eps=1.0,
+    max_passes=2,
+    max_nodes=600,
+    only_long_edges=False,
+    long_q=0.85,
 ):
     pos = pos.detach().clone()
     if pos.shape[0] > max_nodes:
-        return pos                       # cost gate
-    band = sizes[:,1].mean() * layer_eps
+        return pos  # cost gate
+    band = sizes[:, 1].mean() * layer_eps
     if band <= 1e-6:
         return pos
     # Optional: restrict to nodes touching long edges (CV's worst contributors)
@@ -115,7 +127,7 @@ def gap_constrained_swap(
         long_mask = edge_lens >= thr
         interesting = set(unique(cat([edges[0][long_mask], edges[1][long_mask]])))
 
-    buckets = round(pos[:,1] / band).long()      # quantize y into "layer" bands
+    buckets = round(pos[:, 1] / band).long()  # quantize y into "layer" bands
     best = score_fn(pos)
     for pass_idx in range(max_passes):
         any_swap = False
@@ -123,18 +135,18 @@ def gap_constrained_swap(
             members = nonzero(buckets == bucket)
             if members.numel() < 2:
                 continue
-            ordered = members[argsort(pos[members, 0])]   # left-to-right by x
+            ordered = members[argsort(pos[members, 0])]  # left-to-right by x
             for i in range(ordered.numel() - 1):
-                a, b = ordered[i], ordered[i+1]
+                a, b = ordered[i], ordered[i + 1]
                 if interesting is not None and a not in interesting and b not in interesting:
                     continue
-                pos[a,0], pos[b,0] = pos[b,0].clone(), pos[a,0].clone()    # tentative swap
+                pos[a, 0], pos[b, 0] = pos[b, 0].clone(), pos[a, 0].clone()  # tentative swap
                 new = score_fn(pos)
                 if new > best + 1e-6:
                     best = new
                     any_swap = True
                 else:
-                    pos[a,0], pos[b,0] = pos[b,0].clone(), pos[a,0].clone()  # revert
+                    pos[a, 0], pos[b, 0] = pos[b, 0].clone(), pos[a, 0].clone()  # revert
         if not any_swap:
             break
     return pos

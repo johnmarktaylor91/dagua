@@ -29,11 +29,11 @@ All five inspected at 1600x600 panel pair (800px per panel side, RENDER_DPI=100,
 I read `scripts/build_gallery_audit.py` lines 75-110:
 
 ```python
-PANEL_HALF_WIDTH = 800        # pair fixture panel pixel width
+PANEL_HALF_WIDTH = 800  # pair fixture panel pixel width
 PANEL_HEIGHT = 600
-RENDER_DPI = 100              # dagua side
-CARD_DPI = 200                # combo / single-graph cards
-PANEL_FIGSIZE = (8.0, 6.0)    # inches at 100 DPI -> 800x600 px
+RENDER_DPI = 100  # dagua side
+CARD_DPI = 200  # combo / single-graph cards
+PANEL_FIGSIZE = (8.0, 6.0)  # inches at 100 DPI -> 800x600 px
 ```
 
 And graphviz invocation line 2309: `["dot", "-Gdpi=200", "-Tpng", ...]` — graphviz renders at **200 DPI** with auto-fit to the rendered bounding box, then PIL pastes it into the 800x600 panel (which the panel-compose code scales up to fill the panel content area).

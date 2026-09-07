@@ -113,7 +113,11 @@ coordinate hacks. Satisfies CONTEXT.md guards 1-6 by construction.
 
 ```python
 def _should_apply_brandes_koepf_refine(
-    structure, edge_index, layers, num_nodes, min_layers,
+    structure,
+    edge_index,
+    layers,
+    num_nodes,
+    min_layers,
 ):
     if num_nodes == 0:
         return False
@@ -134,12 +138,14 @@ def _should_apply_brandes_koepf_refine(
     if num_layers < min_layers:
         return False
     component_sizes = _weak_component_sizes(
-        edge_index=edge_index, num_nodes=num_nodes,
+        edge_index=edge_index,
+        num_nodes=num_nodes,
     )
     if component_sizes not in ([num_nodes], [num_nodes - 1, 1]):
         return False
     return _has_strict_forward_layering(
-        edge_index=edge_index, layers=layers,
+        edge_index=edge_index,
+        layers=layers,
     )
 ```
 

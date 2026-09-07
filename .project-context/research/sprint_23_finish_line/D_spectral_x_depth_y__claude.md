@@ -51,7 +51,7 @@ from dagua.utils import longest_path_layering
 def spectral_x_depth_y(
     edge_index: torch.Tensor,
     n: int,
-    node_sizes: torch.Tensor,        # [N, 2] required for pitch + overlap gate
+    node_sizes: torch.Tensor,  # [N, 2] required for pitch + overlap gate
     pitch_factor: float = 1.0,
 ) -> torch.Tensor:
     """Return [N, 2] candidate positions: Fiedler-x, LP-acyclic-y."""
@@ -63,20 +63,19 @@ def spectral_x_depth_y(
     s, t = src[keep], tgt[keep]
     rows = np.concatenate([s, t])
     cols = np.concatenate([t, s])
-    A = sp.coo_matrix((np.ones_like(rows, dtype=np.float64), (rows, cols)),
-                      shape=(n, n)).tocsr()
+    A = sp.coo_matrix((np.ones_like(rows, dtype=np.float64), (rows, cols)), shape=(n, n)).tocsr()
     A.data = np.minimum(A.data, 1.0)
     deg = np.asarray(A.sum(axis=1)).ravel()
     L = (sp.diags(deg) - A).tocsr()
 
     # 2. Fiedler vector via shift-invert eigsh; dense fallback on failure.
     try:
-        vals, vecs = spla.eigsh(L + 1e-9 * sp.eye(n), k=min(4, n - 1),
-                                sigma=0, which="LM")
+        vals, vecs = spla.eigsh(L + 1e-9 * sp.eye(n), k=min(4, n - 1), sigma=0, which="LM")
     except Exception:
         vals_full, vecs_full = np.linalg.eigh(L.toarray())
         order = np.argsort(vals_full)
-        vals = vals_full[order[:4]]; vecs = vecs_full[:, order[:4]]
+        vals = vals_full[order[:4]]
+        vecs = vecs_full[:, order[:4]]
     order = np.argsort(vals)
     vals, vecs = vals[order], vecs[:, order]
     fiedler = None
@@ -111,21 +110,21 @@ def gate_spectral_x_depth_y(graph, structure, baseline_metrics, candidate_metric
     """Picker gate. All must hold."""
     n = graph.num_nodes
     if n < 200:
-        return False                                             # small-graph noise
+        return False  # small-graph noise
     if "lattice" in graph.tags or "tree" in graph.tags:
-        return False                                             # spectral hurts both
+        return False  # spectral hurts both
     if not structure.has_cycle:
-        return False                                             # acyclic targets lose
+        return False  # acyclic targets lose
     e_over_n = graph.edge_index.shape[1] / max(n, 1)
     if not (2.5 <= e_over_n <= 4.5):
-        return False                                             # small-world band
+        return False  # small-world band
     back_frac = detect_back_edges(graph.edge_index, n).float().mean().item()
     if not (0.001 <= back_frac <= 0.05):
-        return False                                             # near-DAG-with-feedback
+        return False  # near-DAG-with-feedback
     if candidate_metrics["overlap_count"] != 0:
-        return False                                             # hard guard
+        return False  # hard guard
     if candidate_metrics["dag_consistency"] < 0.99:
-        return False                                             # respect feedback edges
+        return False  # respect feedback edges
     return composite(candidate_metrics) > composite(baseline_metrics) + 0.25
 ```
 

@@ -87,7 +87,9 @@ The "source layers increase while target layers decrease" condition is the key a
 Add a registered post-strip coordinate op, for example `NestedSkipSpineBend`, with no score callback and no composite picker. It should run after `StripDummyNodes()` and before `AspectRatioFit()` in the native layered-DAG pipeline so it acts on original real nodes and preserves y/depth.
 
 ```python
-def _nested_skip_spine_layers(edge_index: torch.Tensor, num_nodes: int) -> tuple[bool, torch.Tensor]:
+def _nested_skip_spine_layers(
+    edge_index: torch.Tensor, num_nodes: int
+) -> tuple[bool, torch.Tensor]:
     """Classify width-1 encoder-decoder DAGs with nested mirrored skips.
 
     Parameters

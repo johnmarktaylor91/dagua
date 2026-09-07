@@ -137,8 +137,7 @@ def _should_use_native_dummy_nodes(config, structure, edge_index, layer_assignme
         return False
     if int(getattr(structure, "num_layers", 0)) <= 1:
         return False
-    if (layer_assignments is None
-            or int(layer_assignments.shape[0]) < _DUMMY_NODE_MIN_NODES):
+    if layer_assignments is None or int(layer_assignments.shape[0]) < _DUMMY_NODE_MIN_NODES:
         return False
     # REMOVED: max_layer_width <= 1 early-out.
     # Width-1 layerings still benefit from dummy-node insertion when
@@ -146,8 +145,7 @@ def _should_use_native_dummy_nodes(config, structure, edge_index, layer_assignme
     # Brandes-Koepf, breaking colinearity with the chain.
     if "dense_dag" in getattr(structure, "topology_tags", ()):
         return False
-    return _has_long_layer_edges(edge_index=edge_index,
-                                 layer_assignments=layer_assignments)
+    return _has_long_layer_edges(edge_index=edge_index, layer_assignments=layer_assignments)
 
 
 def _should_apply_brandes_koepf_refine(config, structure, layer_assignments):

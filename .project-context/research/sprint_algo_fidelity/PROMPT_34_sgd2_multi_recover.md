@@ -38,7 +38,8 @@ to your reconstructed module instead of the broken /tmp/graph-drawing path.
 
 ```python
 from dagua.eval.competitors import get_competitor
-c = get_competitor('sgd2_multi_ref')
+
+c = get_competitor("sgd2_multi_ref")
 print(c.available())
 # ... run layout
 ```

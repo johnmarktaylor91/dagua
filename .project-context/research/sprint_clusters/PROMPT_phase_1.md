@@ -41,6 +41,7 @@ class ClusterTree:
     via `ClusterTree.from_flat_membership(...)`. Both args use the existing dagua conventions.
     """
 
+
 def compute_cluster_placement_bbox(
     inner_positions: torch.Tensor,  # [N_inner, 2] positions of placement-set members at this level
     inner_sizes: torch.Tensor,  # [N_inner, 2] (width, height) of each member

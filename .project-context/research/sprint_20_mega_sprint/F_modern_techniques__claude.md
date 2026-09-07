@@ -272,11 +272,12 @@ in `dagua/layout/ops/losses/`.
 @register_op("losses.separation_barrier")
 class SeparationBarrierLoss(LossOp):
     """log-barrier penalty: -mu * sum log(x_i - x_j - delta) for ordered pairs"""
+
     def forward(self, state):
         if not state.separation_constraints:  # list of (i, j, axis, delta)
             return torch.tensor(0.0)
         loss = 0.0
-        for (i, j, axis, delta) in state.separation_constraints:
+        for i, j, axis, delta in state.separation_constraints:
             d = state.pos[i, axis] - state.pos[j, axis] - delta
             loss = loss - state.mu * torch.log(torch.clamp(d, min=1e-6))
         return loss

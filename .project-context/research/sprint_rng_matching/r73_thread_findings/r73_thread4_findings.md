@@ -97,10 +97,11 @@ def _ogdf_tile_to_rows_packer(
     if not boxes:
         return []
     # Compute (width, height) with margin on each side
-    rects = [(box[2] - box[0] + 2*margin, box[3] - box[1] + 2*margin) for box in boxes]
+    rects = [(box[2] - box[0] + 2 * margin, box[3] - box[1] + 2 * margin) for box in boxes]
     # Sort by OGDF square-aspect-ratio area desc, preserving original index
-    order = sorted(range(len(boxes)),
-                   key=lambda i: -_ogdf_fmmm_square_aspect_area(rects[i][0], rects[i][1]))
+    order = sorted(
+        range(len(boxes)), key=lambda i: -_ogdf_fmmm_square_aspect_area(rects[i][0], rects[i][1])
+    )
 
     row_width = rects[order[0]][0]  # First (largest) component sets row width
     offsets = [(0.0, 0.0)] * len(boxes)
@@ -125,8 +126,10 @@ def _ogdf_tile_to_rows_packer(
             offsets[idx] = (0.0, cur_y)
 
     # Adjust from center-of-box to match _translate_packed_components_to_origin
-    return [(offsets[i][0] + margin - boxes[i][0],
-             offsets[i][1] + margin - boxes[i][1]) for i in range(len(boxes))]
+    return [
+        (offsets[i][0] + margin - boxes[i][0], offsets[i][1] + margin - boxes[i][1])
+        for i in range(len(boxes))
+    ]
 ```
 
 **NOTE:** The exact OGDF TileToRowsCCPacker logic (row_width = first component width, row

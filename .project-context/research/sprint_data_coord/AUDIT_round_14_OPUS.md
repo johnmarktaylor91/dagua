@@ -244,14 +244,16 @@ Refactor `_render_ratios` to take a fixture builder and a ratio extractor,
 then parameterize:
 
 ```python
-@pytest.mark.parametrize("fixture_name,extractor", [
-    ("pair", extract_pair_ratios),
-    ("cluster_solid", extract_cluster_solid_ratios),
-    ("double_circle", extract_double_circle_ratios),
-    ("cylinder", extract_cylinder_ratios),
-])
-def test_ratios_dpi_invariant(fixture_name, extractor):
-    ...
+@pytest.mark.parametrize(
+    "fixture_name,extractor",
+    [
+        ("pair", extract_pair_ratios),
+        ("cluster_solid", extract_cluster_solid_ratios),
+        ("double_circle", extract_double_circle_ratios),
+        ("cylinder", extract_cylinder_ratios),
+    ],
+)
+def test_ratios_dpi_invariant(fixture_name, extractor): ...
 ```
 
 Each fixture isolates one render code path; failure points clearly to

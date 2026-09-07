@@ -68,9 +68,7 @@ class ClusterAwareDriver:
             sub_problem = self._build_subproblem(problem, state, tree, cluster_name)
             sub_state = self._run_inner(sub_problem, state)
             inner_pos, inner_bbox = self._extract_inner_placement(sub_state, sub_problem)
-            placeholder = self._make_cluster_placeholder(
-                inner_pos, inner_bbox, label_metrics, ...
-            )
+            placeholder = self._make_cluster_placeholder(inner_pos, inner_bbox, label_metrics, ...)
             state.cluster_placements[cluster_name] = ClusterPlacement(
                 inner_pos=inner_pos, anchor=placeholder.anchor, bbox=placeholder.bbox
             )

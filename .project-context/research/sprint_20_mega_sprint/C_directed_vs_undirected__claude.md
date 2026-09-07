@@ -132,10 +132,9 @@ diagnostic tag in `classify_graph` is ~15 lines of code:
 layers_per_node = num_layers / max(num_nodes, 1)
 likely_spurious_layering = (
     num_nodes >= 10
-    and layers_per_node >= 0.4          # >40% of nodes are on their own layer
-    and not is_chain                    # chains are legitimately N-layered
-    and (max_layer_width <= 3 or
-         layer_width_cv <= 0.35 and max_layer_width <= 5)
+    and layers_per_node >= 0.4  # >40% of nodes are on their own layer
+    and not is_chain  # chains are legitimately N-layered
+    and (max_layer_width <= 3 or layer_width_cv <= 0.35 and max_layer_width <= 5)
 )
 # is_semantically_directed := not (likely_spurious_layering or user_flag == False)
 ```
@@ -270,7 +269,7 @@ Minimal, non-Frankenstein design. Three steps.
 @dataclass
 class DaguaGraph:
     ...
-    direction: str = "TB"      # existing: TB/BT/LR/RL
+    direction: str = "TB"  # existing: TB/BT/LR/RL
     is_semantically_directed: Optional[bool] = None  # NEW
     # None = infer; True = force layered; False = force undirected pipeline
 ```
@@ -287,7 +286,8 @@ the user didn't set it.**
 @dataclass(frozen=True)
 class GraphStructure:
     ...
-    is_semantically_directed: bool = True   # NEW
+    is_semantically_directed: bool = True  # NEW
+
 
 def _infer_semantically_directed(
     family: GraphFamily,
@@ -309,10 +309,10 @@ def _infer_semantically_directed(
     if not is_directed_acyclic:
         return False  # small_world, parallel_cycles — cyclic, no hierarchy
     if family in {GraphFamily.TREE, GraphFamily.CHAIN, GraphFamily.FOREST}:
-        return True   # trees are always semantically directed (or at least,
-                      # always benefit from radial/hierarchical layout)
+        return True  # trees are always semantically directed (or at least,
+        # always benefit from radial/hierarchical layout)
     if num_nodes < 8:
-        return True   # tiny graphs default to layered; not enough signal
+        return True  # tiny graphs default to layered; not enough signal
     if num_layers == 1:
         return False  # WIDE_LAYERED detected as single layer -> undirected
     layers_per_node = num_layers / num_nodes
@@ -337,10 +337,11 @@ correct. `random_dag_50` flag True (layers=12/97=0.12): correct.
 if config.algorithm is None:
     # Existing default: dagua_native (layered). Add undirected branch.
     if getattr(graph, "is_semantically_directed", None) is False:
-        chosen_algo = "dagua_flat"   # new pipeline, see below
+        chosen_algo = "dagua_flat"  # new pipeline, see below
     elif getattr(graph, "is_semantically_directed", None) is None:
         # Infer via classify_graph
         from dagua.layout.graph_classify import classify_graph
+
         s = classify_graph(graph.edge_index, graph.num_nodes)
         chosen_algo = "dagua_flat" if not s.is_semantically_directed else "dagua_native"
     else:
@@ -398,6 +399,7 @@ def composite_undirected(metrics: Dict[str, float]) -> float:
     else:
         score += 5
     return score
+
 
 def composite_auto(
     metrics: Dict[str, float],
@@ -742,41 +744,64 @@ given the same positions directory.
 ```python
 # /tmp/sprint20_C_alt_composite.py
 import torch, warnings
-warnings.filterwarnings('ignore')
+
+warnings.filterwarnings("ignore")
 from pathlib import Path
 from dagua.eval.graphs import get_test_graphs
 from dagua.metrics import full, composite
 
-pd = Path('eval_output/variant_bench_full/positions')
+pd = Path("eval_output/variant_bench_full/positions")
 tgs = {t.name: t for t in get_test_graphs()}
 
+
 def alt_composite(m):
-    score = 40 * max(0.0, 1.0 - m.get('edge_length_cv', 1.0))
-    score += 20 * (1.0 if m.get('overlap_count', 1) == 0 else 0.0)
-    score += 20 * max(0.0, 1.0 - m.get('crossing_rate', 0.5) * 10)
-    score += 10 * min(1.0, m.get('angular_res_mean_deg', 20.0) / 40.0)
-    score += 10 * min(1.0, m.get('cluster_mean_sep_ratio', 2.5) / 5.0)
+    score = 40 * max(0.0, 1.0 - m.get("edge_length_cv", 1.0))
+    score += 20 * (1.0 if m.get("overlap_count", 1) == 0 else 0.0)
+    score += 20 * max(0.0, 1.0 - m.get("crossing_rate", 0.5) * 10)
+    score += 10 * min(1.0, m.get("angular_res_mean_deg", 20.0) / 40.0)
+    score += 10 * min(1.0, m.get("cluster_mean_sep_ratio", 2.5) / 5.0)
     return score
 
-UNDIR = ['real_karate_34', 'weighted_karate_34', 'real_football_115',
-         'real_lesmis_77', 'small_world_100', 'small_world_500',
-         'petersen_10', 'hexagonal_lattice_42', 'planar_60', 'grid_5x5',
-         'parallel_cycles_4x5', 'triangular_lattice_36', 'regular_3_30',
-         'sierpinski_42', 'chung_lu_150']
-ENGS = ['dagua', 'igraph_kamada_kawai', 'graphviz_sfdp', 'graphviz_dot',
-        'igraph_sugiyama', 'elk_layered', 'dagre']
+
+UNDIR = [
+    "real_karate_34",
+    "weighted_karate_34",
+    "real_football_115",
+    "real_lesmis_77",
+    "small_world_100",
+    "small_world_500",
+    "petersen_10",
+    "hexagonal_lattice_42",
+    "planar_60",
+    "grid_5x5",
+    "parallel_cycles_4x5",
+    "triangular_lattice_36",
+    "regular_3_30",
+    "sierpinski_42",
+    "chung_lu_150",
+]
+ENGS = [
+    "dagua",
+    "igraph_kamada_kawai",
+    "graphviz_sfdp",
+    "graphviz_dot",
+    "igraph_sugiyama",
+    "elk_layered",
+    "dagre",
+]
 
 for name in UNDIR:
-    g = tgs[name].graph; g.compute_node_sizes()
+    g = tgs[name].graph
+    g.compute_node_sizes()
     row = [name]
     for eng in ENGS:
-        pf = pd / f'{name}__{eng}.pt'
+        pf = pd / f"{name}__{eng}.pt"
         if not pf.exists():
-            row.append('--')
+            row.append("--")
             continue
-        pos = torch.load(pf, map_location='cpu', weights_only=False)
+        pos = torch.load(pf, map_location="cpu", weights_only=False)
         m = full(pos, g.edge_index, node_sizes=g.node_sizes)
-        row.append(f'{composite(m):.1f}/{alt_composite(m):.1f}')
+        row.append(f"{composite(m):.1f}/{alt_composite(m):.1f}")
     print(row)
 ```
 

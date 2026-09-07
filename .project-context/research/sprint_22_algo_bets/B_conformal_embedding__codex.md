@@ -50,9 +50,9 @@ Complete working pseudocode:
 
 ```python
 def spectral_x_depth_y_layout(
-    edge_index: Tensor,          # [2, E], directed Dagua edges
-    baseline_pos: Tensor,        # [N, 2], current Dagua layout
-    node_sizes: Tensor,          # [N, 2]
+    edge_index: Tensor,  # [2, E], directed Dagua edges
+    baseline_pos: Tensor,  # [N, 2], current Dagua layout
+    node_sizes: Tensor,  # [N, 2]
     graph_name: str,
 ) -> Tensor:
     """Return a depth-preserving spectral-x candidate.

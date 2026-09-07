@@ -18,6 +18,7 @@
 ```python
 import torch
 from dagua.layout.cycle import make_acyclic_robust, _is_acyclic
+
 ei = torch.tensor([[0, 0, 1], [0, 1, 0]], dtype=torch.long)
 acyclic, mask = make_acyclic_robust(ei, 2)
 print(acyclic.tolist(), mask.tolist(), _is_acyclic(acyclic, 2))
@@ -60,6 +61,7 @@ print(acyclic.tolist(), mask.tolist(), _is_acyclic(acyclic, 2))
 ```python
 import torch
 from dagua.layout.init_placement import init_positions
+
 for n in (100, 101):
     pos = init_positions(torch.empty((2, 0), dtype=torch.long), n, torch.ones((n, 2)))
     print(n, round(pos[:, 0].mean().item(), 4))
@@ -100,8 +102,10 @@ for n in (100, 101):
 ```python
 import torch
 from dagua.layout.init_placement import _spectral_order
+
 ei = torch.tensor([[i for i in range(19)], [i + 1 for i in range(19)]], dtype=torch.long)
-a = _spectral_order(ei, 20, "cpu"); b = _spectral_order(ei, 20, "cpu")
+a = _spectral_order(ei, 20, "cpu")
+b = _spectral_order(ei, 20, "cpu")
 print(torch.allclose(a, b), float((a - b).abs().max()))
 ```
 
@@ -138,8 +142,11 @@ print(torch.allclose(a, b), float((a - b).abs().max()))
 ```python
 import torch
 from dagua.metrics import segments_intersect
-p1 = torch.tensor([[1., 0.]]); p2 = torch.tensor([[0., 1.]])
-p3 = torch.tensor([[0., 0.]]); p4 = torch.tensor([[1., 1.]])
+
+p1 = torch.tensor([[1.0, 0.0]])
+p2 = torch.tensor([[0.0, 1.0]])
+p3 = torch.tensor([[0.0, 0.0]])
+p4 = torch.tensor([[1.0, 1.0]])
 print(segments_intersect(p1, p2, p3, p4).item())
 ```
 
@@ -177,6 +184,7 @@ print(segments_intersect(p1, p2, p3, p4).item())
 ```python
 import torch
 from dagua.metrics import count_overlaps_detailed
+
 pos = torch.arange(2001, dtype=torch.float32).unsqueeze(1).repeat(1, 2) * 100
 pos[0, 0], pos[1, 0] = 10.9, 11.1
 print(count_overlaps_detailed(pos, torch.ones((2001, 2)) * 10))
@@ -216,7 +224,8 @@ print(count_overlaps_detailed(pos, torch.ones((2001, 2)) * 10))
 ```python
 import torch
 from dagua.metrics import sampled_crossing_rate
-pos = torch.tensor([[0., 0.], [1., 1.], [1., 0.], [0., 1.]])
+
+pos = torch.tensor([[0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0]])
 ei = torch.tensor([[0, 2, 0], [1, 3, 2]], dtype=torch.long)
 print(sampled_crossing_rate(pos, ei, n_samples=10000, seed=0))
 ```
@@ -254,7 +263,8 @@ print(sampled_crossing_rate(pos, ei, n_samples=10000, seed=0))
 ```python
 import torch
 from dagua.metrics import depth_position_correlation
-pos = torch.tensor([[0., 0.], [1., 0.], [2., 0.]])
+
+pos = torch.tensor([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
 depth = torch.tensor([0, 0, 0])
 print(depth_position_correlation(pos, depth))
 ```
@@ -292,10 +302,20 @@ print(depth_position_correlation(pos, depth))
 
 ```python
 from dagua.metrics import composite
-metrics = {'dag_consistency':1.0,'edge_length_cv':0.0,'depth_spearman_rho':1.0,
-           'overlap_count':0,'edge_straightness_mean_deg':0.0,'crossing_rate':0.0,
-           'angular_res_mean_deg':90.0,'cluster_mean_sep_ratio':10.0,
-           'edge_node_crossing_rate':0.0,'label_overlaps':0,'label_node_overlaps':0}
+
+metrics = {
+    "dag_consistency": 1.0,
+    "edge_length_cv": 0.0,
+    "depth_spearman_rho": 1.0,
+    "overlap_count": 0,
+    "edge_straightness_mean_deg": 0.0,
+    "crossing_rate": 0.0,
+    "angular_res_mean_deg": 90.0,
+    "cluster_mean_sep_ratio": 10.0,
+    "edge_node_crossing_rate": 0.0,
+    "label_overlaps": 0,
+    "label_node_overlaps": 0,
+}
 print(composite(metrics))
 ```
 
@@ -330,10 +350,18 @@ print(composite(metrics))
 ```python
 import torch
 from dagua.metrics import full
-pos = torch.cat([torch.stack([torch.zeros(20), torch.arange(20.)], 1),
-                 torch.stack([torch.ones(20), torch.arange(19, -1, -1.)], 1)])
+
+pos = torch.cat(
+    [
+        torch.stack([torch.zeros(20), torch.arange(20.0)], 1),
+        torch.stack([torch.ones(20), torch.arange(19, -1, -1.0)], 1),
+    ]
+)
 ei = torch.tensor([(i, 20 + j) for i in range(20) for j in range(20)], dtype=torch.long).T
-print(full(pos, ei, crossing_samples=2000)['crossing_rate'], full(pos, ei, crossing_samples=2000)['crossing_rate'])
+print(
+    full(pos, ei, crossing_samples=2000)["crossing_rate"],
+    full(pos, ei, crossing_samples=2000)["crossing_rate"],
+)
 ```
 
 **Actual**
@@ -370,6 +398,7 @@ print(full(pos, ei, crossing_samples=2000)['crossing_rate'], full(pos, ei, cross
 ```python
 import torch
 from dagua.metrics import compare
+
 print(compare(torch.zeros((2, 2)), torch.zeros((3, 2))))
 ```
 
@@ -406,6 +435,7 @@ print(compare(torch.zeros((2, 2)), torch.zeros((3, 2))))
 ```python
 import torch
 from dagua.metrics import layer_uniformity
+
 print(layer_uniformity(torch.empty((0, 2)), torch.empty((0,), dtype=torch.long)))
 ```
 

@@ -19,7 +19,7 @@ The key components (as Python pseudocode):
 class FullSugiyamaConfig:
     layer_sep: float = 80.0
     node_sep: float = 40.0
-    cg_width: int = 0           # 0 = auto: ceil(sqrt(N))
+    cg_width: int = 0  # 0 = auto: ceil(sqrt(N))
     use_cg: bool = True
     use_transpose: bool = True
 
@@ -86,13 +86,12 @@ def network_simplex_x(layered, node_sep) -> ndarray[N]:
 
 def full_sugiyama_layout(edge_index, n, config) -> Tensor[N, 2]:
     back = detect_back_edges_dfs(edge_index, n)
-    forward = [(u, v) for i, (u, v) in enumerate(edges)
-               if not back[i] and u != v]
+    forward = [(u, v) for i, (u, v) in enumerate(edges) if not back[i] and u != v]
     if config.use_cg:
         width = config.cg_width or max(2, int(ceil(sqrt(n))))
         layer = coffman_graham_with_depth_tiebreak(forward, n, width)
     else:
-        layer = lp_rank(forward, n)             # LP-rank, NOT longest-path
+        layer = lp_rank(forward, n)  # LP-rank, NOT longest-path
     layer = [l - min(layer) for l in layer]
     lg = insert_dummies(forward, layer, n)
     # Multi-start crossing-min: 30-80 random initial orderings, keep min
@@ -106,7 +105,8 @@ def full_sugiyama_layout(edge_index, n, config) -> Tensor[N, 2]:
         junger_mutzel_order(lg, sweeps=24)
         cc = crossing_count_layered(lg)
         if cc < best_cc:
-            best_cc = cc; best_lg = lg
+            best_cc = cc
+            best_lg = lg
     x = network_simplex_x(best_lg, config.node_sep)
     pos = stack(x, layer * config.layer_sep)
     return pos - pos.mean(0)
@@ -317,13 +317,17 @@ The `_should_full_sugiyama_polish` gate I would have written:
 ```python
 def _should_full_sugiyama_polish(pos, edge_index, node_sizes) -> bool:
     n = pos.shape[0]
-    if n < 8 or n > 64: return False
-    if _looks_like_lattice(pos, edge_index): return False
-    if _back_edges_present(edge_index, n): return False
+    if n < 8 or n > 64:
+        return False
+    if _looks_like_lattice(pos, edge_index):
+        return False
+    if _back_edges_present(edge_index, n):
+        return False
     deg = _degree_sequence(edge_index, n)
     if not (2.5 <= deg.median() <= 3.5 and deg.max() - deg.min() <= 2):
         return False
-    if _is_bipartite_complete(edge_index, n): return False
+    if _is_bipartite_complete(edge_index, n):
+        return False
     return True
 ```
 

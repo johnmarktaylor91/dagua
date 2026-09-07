@@ -238,8 +238,7 @@ triangular_lattice. Worth one engineering session.
 ## Recommended gate
 
 ```python
-def should_lattice_snap(structure, layer_assignments, num_nodes,
-                       polished_pos, edge_index):
+def should_lattice_snap(structure, layer_assignments, num_nodes, polished_pos, edge_index):
     if structure is None or layer_assignments is None:
         return False
     tags = set(structure.topology_tags)

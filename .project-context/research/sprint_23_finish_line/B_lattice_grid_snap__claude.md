@@ -120,12 +120,13 @@ versus dot's median-centered layers is the actual structural difference.
 
 ```python
 def variant1_round(pos):
-    pitch = layer_pitch(pos)         # median min-gap across layers
-    if pitch <= 0: return pos
+    pitch = layer_pitch(pos)  # median min-gap across layers
+    if pitch <= 0:
+        return pos
     layers = group_by_y(pos)
     for layer in layers:
         order = sort(layer, by=x)
-        anchor = x[order[0]]          # leftmost stays put
+        anchor = x[order[0]]  # leftmost stays put
         for j, node in enumerate(order[1:], start=1):
             k = round((x[node] - anchor) / pitch)
             x[node] = anchor + k * pitch

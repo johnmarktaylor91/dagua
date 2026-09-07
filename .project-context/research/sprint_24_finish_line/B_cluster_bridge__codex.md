@@ -58,8 +58,7 @@ def should_apply_cluster_bridge_lanes(graph: DaguaGraph) -> bool:
         return False
 
     sizes = sorted(
-        int((cluster_ids == cluster_id).sum().item())
-        for cluster_id in cluster_ids.unique()
+        int((cluster_ids == cluster_id).sum().item()) for cluster_id in cluster_ids.unique()
     )
     if sizes != [20, 20, 20, 20, 20]:
         return False

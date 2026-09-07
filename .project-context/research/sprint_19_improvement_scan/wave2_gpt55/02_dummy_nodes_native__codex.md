@@ -504,10 +504,14 @@ class ActivateExpandedGraphState(Op):
 #### [dagua/layout/ops/barycenter.py:72-213] make the reorder pass use expanded edges when active
 
 ```python
-def _active_edge_index(problem: LayoutProblem, state: SolveState, pos: torch.Tensor) -> torch.Tensor:
+def _active_edge_index(
+    problem: LayoutProblem, state: SolveState, pos: torch.Tensor
+) -> torch.Tensor:
     """Return the edge tensor active for barycenter reordering."""
     expanded_graph = state.extras.get("expanded_graph")
-    if expanded_graph is not None and int(getattr(expanded_graph, "num_nodes", -1)) == int(pos.shape[0]):
+    if expanded_graph is not None and int(getattr(expanded_graph, "num_nodes", -1)) == int(
+        pos.shape[0]
+    ):
         return expanded_graph.edge_index.to(device=pos.device, dtype=torch.long)
     return problem.edge_index.to(device=pos.device, dtype=torch.long)
 
@@ -697,7 +701,9 @@ def _expanded_graph_for_state(state: SolveState, pos: torch.Tensor) -> Optional[
     return expanded_graph
 
 
-def _active_edge_index(problem: LayoutProblem, state: SolveState, pos: torch.Tensor) -> torch.Tensor:
+def _active_edge_index(
+    problem: LayoutProblem, state: SolveState, pos: torch.Tensor
+) -> torch.Tensor:
     """Return the edge tensor used by edge-centric losses."""
     expanded_graph = _expanded_graph_for_state(state=state, pos=pos)
     if expanded_graph is not None:
@@ -705,7 +711,9 @@ def _active_edge_index(problem: LayoutProblem, state: SolveState, pos: torch.Ten
     return problem.edge_index.to(device=pos.device, dtype=torch.long)
 
 
-def _visible_original_pos(problem: LayoutProblem, state: SolveState, pos: torch.Tensor) -> torch.Tensor:
+def _visible_original_pos(
+    problem: LayoutProblem, state: SolveState, pos: torch.Tensor
+) -> torch.Tensor:
     """Return the original-node position block for box-centric losses."""
     expanded_graph = _expanded_graph_for_state(state=state, pos=pos)
     if expanded_graph is None:
@@ -725,7 +733,10 @@ def _visible_original_layer_index(state: SolveState, pos: torch.Tensor) -> Optio
 @dataclass(frozen=True)
 class DagOrderingLoss(LossOp):
     ...
-    def evaluate(self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext) -> torch.Tensor:
+
+    def evaluate(
+        self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext
+    ) -> torch.Tensor:
         del ctx
         pos = _require_pos(state)
         node_sizes = (
@@ -746,7 +757,10 @@ class DagOrderingLoss(LossOp):
 @dataclass(frozen=True)
 class EdgeAttractionLoss(LossOp):
     ...
-    def evaluate(self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext) -> torch.Tensor:
+
+    def evaluate(
+        self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext
+    ) -> torch.Tensor:
         del ctx
         pos = _require_pos(state)
         return edge_attraction_loss(
@@ -761,7 +775,10 @@ class EdgeAttractionLoss(LossOp):
 @dataclass(frozen=True)
 class EdgeStraightnessLoss(LossOp):
     ...
-    def evaluate(self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext) -> torch.Tensor:
+
+    def evaluate(
+        self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext
+    ) -> torch.Tensor:
         del ctx
         pos = _require_pos(state)
         return edge_straightness_loss(
@@ -775,7 +792,10 @@ class EdgeStraightnessLoss(LossOp):
 @dataclass(frozen=True)
 class EdgeLengthVarianceLoss(LossOp):
     ...
-    def evaluate(self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext) -> torch.Tensor:
+
+    def evaluate(
+        self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext
+    ) -> torch.Tensor:
         del ctx
         pos = _require_pos(state)
         return edge_length_variance_loss(
@@ -789,7 +809,10 @@ class EdgeLengthVarianceLoss(LossOp):
 @dataclass(frozen=True)
 class CrossingLoss(LossOp):
     ...
-    def evaluate(self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext) -> torch.Tensor:
+
+    def evaluate(
+        self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext
+    ) -> torch.Tensor:
         del ctx
         pos = _require_pos(state)
         return crossing_loss(
@@ -805,7 +828,10 @@ class CrossingLoss(LossOp):
 @dataclass(frozen=True)
 class RepulsionLoss(LossOp):
     ...
-    def evaluate(self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext) -> torch.Tensor:
+
+    def evaluate(
+        self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext
+    ) -> torch.Tensor:
         del ctx
         pos = _visible_original_pos(problem, state, _require_pos(state))
         node_sizes = problem.node_sizes
@@ -817,7 +843,10 @@ class RepulsionLoss(LossOp):
 @dataclass(frozen=True)
 class OverlapAvoidanceLoss(LossOp):
     ...
-    def evaluate(self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext) -> torch.Tensor:
+
+    def evaluate(
+        self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext
+    ) -> torch.Tensor:
         del ctx
         pos = _visible_original_pos(problem, state, _require_pos(state))
         node_sizes = _require_node_sizes(problem)
@@ -829,7 +858,10 @@ class OverlapAvoidanceLoss(LossOp):
 @dataclass(frozen=True)
 class SpacingConsistencyLoss(LossOp):
     ...
-    def evaluate(self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext) -> torch.Tensor:
+
+    def evaluate(
+        self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext
+    ) -> torch.Tensor:
         del ctx
         pos = _visible_original_pos(problem, state, _require_pos(state))
         node_sizes = _require_node_sizes(problem)
@@ -845,7 +877,10 @@ class SpacingConsistencyLoss(LossOp):
 @dataclass(frozen=True)
 class FanoutDistributionLoss(LossOp):
     ...
-    def evaluate(self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext) -> torch.Tensor:
+
+    def evaluate(
+        self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext
+    ) -> torch.Tensor:
         del ctx
         pos = _visible_original_pos(problem, state, _require_pos(state))
         return fanout_distribution_loss(
@@ -862,7 +897,10 @@ class FanoutDistributionLoss(LossOp):
 @dataclass(frozen=True)
 class BackEdgeCompactnessLoss(LossOp):
     ...
-    def evaluate(self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext) -> torch.Tensor:
+
+    def evaluate(
+        self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext
+    ) -> torch.Tensor:
         del ctx
         pos = _visible_original_pos(problem, state, _require_pos(state))
         return back_edge_compactness_loss(
@@ -884,22 +922,29 @@ def _visible_original_positions(
 ) -> tuple[torch.Tensor, Optional[object]]:
     """Return the original-node position view and its layer index."""
     expanded_graph = state.extras.get("expanded_graph")
-    if expanded_graph is None or int(getattr(expanded_graph, "num_nodes", -1)) != int(positions.shape[0]):
+    if expanded_graph is None or int(getattr(expanded_graph, "num_nodes", -1)) != int(
+        positions.shape[0]
+    ):
         return positions, state.layer_index
-    return positions[: problem.num_nodes], state.extras.get("original_layer_index", state.layer_index)
+    return positions[: problem.num_nodes], state.extras.get(
+        "original_layer_index", state.layer_index
+    )
 
 
 @register_op
 @dataclass(frozen=True)
 class OverlapProjection(Op):
     ...
+
     def apply(self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext) -> SolveState:
         del ctx
         positions = _require_positions(state=state, op_name=self.name)
         if problem.node_sizes is None or problem.node_sizes.numel() == 0:
             return state
         visible_positions, layer_index = _visible_original_positions(problem, state, positions)
-        node_sizes = problem.node_sizes.to(device=visible_positions.device, dtype=visible_positions.dtype)
+        node_sizes = problem.node_sizes.to(
+            device=visible_positions.device, dtype=visible_positions.dtype
+        )
         project_overlaps(
             pos=visible_positions,
             node_sizes=node_sizes,
@@ -915,6 +960,7 @@ class OverlapProjection(Op):
 @dataclass(frozen=True)
 class PeriodicOverlapProjection(Op):
     ...
+
     def apply(self, problem: LayoutProblem, state: SolveState, ctx: RuntimeContext) -> SolveState:
         del ctx
         positions = _require_positions(state=state, op_name=self.name)
@@ -922,7 +968,9 @@ class PeriodicOverlapProjection(Op):
             return state
         ...
         visible_positions, layer_index = _visible_original_positions(problem, state, positions)
-        node_sizes = problem.node_sizes.to(device=visible_positions.device, dtype=visible_positions.dtype)
+        node_sizes = problem.node_sizes.to(
+            device=visible_positions.device, dtype=visible_positions.dtype
+        )
         project_overlaps(
             pos=visible_positions,
             node_sizes=node_sizes,

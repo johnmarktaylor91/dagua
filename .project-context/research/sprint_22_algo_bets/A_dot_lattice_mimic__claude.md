@@ -62,9 +62,11 @@ def _make_hexagonal_lattice_graph(rows=6, cols=7):
     for r in range(rows):
         for c in range(cols):
             n = r * cols + c
-            if r + 1 < rows: edges.append((n, (r+1)*cols + c))           # vertical
-            if c + 1 < cols and (c % 2 == r % 2): edges.append((n, n+1)) # horizontal w/ parity
-    return _graph_from_integer_edges(num_nodes=rows*cols, edges=edges)
+            if r + 1 < rows:
+                edges.append((n, (r + 1) * cols + c))  # vertical
+            if c + 1 < cols and (c % 2 == r % 2):
+                edges.append((n, n + 1))  # horizontal w/ parity
+    return _graph_from_integer_edges(num_nodes=rows * cols, edges=edges)
 ```
 
 Mapping each node (r, c) to its dot y-rank gives `rank = r + c` exactly.
@@ -170,7 +172,7 @@ def dot_lp_replicate(graph, ranksep=72.0, nodesep=72.0):
     Total runtime on N <= 1000 graphs: < 300 ms via HiGHS.
     """
     n = graph.num_nodes
-    ei = graph.edge_index               # tensor[2, E]
+    ei = graph.edge_index  # tensor[2, E]
 
     # ---- Phase A: rank LP ------------------------------------------------
     # Minimise sum_e (rank(v) - rank(u))   subject to   rank(v) - rank(u) >= 1
@@ -196,7 +198,7 @@ def dot_lp_replicate(graph, ranksep=72.0, nodesep=72.0):
     pos = torch.zeros(n, 2)
     for v in range(n):
         pos[v, 0] = float(x[v])
-        pos[v, 1] = float(rank[v] * ranksep)   # depth-0 at top by dagua convention
+        pos[v, 1] = float(rank[v] * ranksep)  # depth-0 at top by dagua convention
     return pos
 
 
@@ -212,14 +214,17 @@ def rank_assignment_lp(edge_index, n):
     # Build LP
     c = np.zeros(n)
     for u, v in iter_edges(edge_index):
-        c[v] += 1.0           # rank(t) - rank(s) for t == v
-        c[u] -= 1.0           # rank(t) - rank(s) for s == u
+        c[v] += 1.0  # rank(t) - rank(s) for t == v
+        c[u] -= 1.0  # rank(t) - rank(s) for s == u
 
     A_ub, b_ub = [], []
     for u, v in iter_edges(edge_index):
         # rank(s) - rank(t) <= -1
-        row = np.zeros(n); row[u] = 1.0; row[v] = -1.0
-        A_ub.append(row); b_ub.append(-1.0)
+        row = np.zeros(n)
+        row[u] = 1.0
+        row[v] = -1.0
+        A_ub.append(row)
+        b_ub.append(-1.0)
 
     bounds = [(0, None)] * n
     res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
@@ -230,21 +235,21 @@ def rank_assignment_lp(edge_index, n):
 def add_virtual_nodes(rank, edge_index, n):
     """For each edge spanning > 1 layer, insert chain of virtual nodes."""
     new_rank = list(rank)
-    edges_w = []   # (u, v, weight)
+    edges_w = []  # (u, v, weight)
     for u, v in iter_edges(edge_index):
         ru, rv = rank[u], rank[v]
         if rv == ru + 1:
-            edges_w.append((u, v, 1.0))            # real-real
+            edges_w.append((u, v, 1.0))  # real-real
         elif rv > ru + 1:
-            prev, w = u, 2.0                       # real-virtual
+            prev, w = u, 2.0  # real-virtual
             for kk in range(ru + 1, rv):
                 virt = len(new_rank)
                 new_rank.append(kk)
                 edges_w.append((prev, virt, w))
-                prev, w = virt, 8.0                # virtual-virtual
-            edges_w.append((prev, v, 2.0))         # virtual-real
+                prev, w = virt, 8.0  # virtual-virtual
+            edges_w.append((prev, v, 2.0))  # virtual-real
         else:
-            edges_w.append((u, v, 0.0))            # back / within-layer: ignore
+            edges_w.append((u, v, 0.0))  # back / within-layer: ignore
     return new_rank, edges_w
 
 
@@ -254,8 +259,12 @@ def median_order(rank_full, edges_w, n_sweeps=24):
     layers = group_by_rank(rank_full)
 
     for sweep in range(n_sweeps):
-        layers = sort_by_neighbour_median(layers, rank_full, in_e if sweep % 2 == 0 else out_e,
-                                         direction="up" if sweep % 2 == 0 else "down")
+        layers = sort_by_neighbour_median(
+            layers,
+            rank_full,
+            in_e if sweep % 2 == 0 else out_e,
+            direction="up" if sweep % 2 == 0 else "down",
+        )
     return layers
 
 
@@ -273,25 +282,36 @@ def x_lp_assignment(rank_full, edges_w, layers, nodesep):
     A_ub, b_ub = [], []
     for k, (u, v, w) in enumerate(edges):
         # s_e - x(t) + x(s) >= 0  i.e.  x(t) - x(s) - s_e <= 0
-        row = np.zeros(n_vars); row[N + k] = -1.0; row[v] = 1.0; row[u] = -1.0
-        A_ub.append(row); b_ub.append(0.0)
-        row = np.zeros(n_vars); row[N + k] = -1.0; row[v] = -1.0; row[u] = 1.0
-        A_ub.append(row); b_ub.append(0.0)
+        row = np.zeros(n_vars)
+        row[N + k] = -1.0
+        row[v] = 1.0
+        row[u] = -1.0
+        A_ub.append(row)
+        b_ub.append(0.0)
+        row = np.zeros(n_vars)
+        row[N + k] = -1.0
+        row[v] = -1.0
+        row[u] = 1.0
+        A_ub.append(row)
+        b_ub.append(0.0)
 
     for r, ordered in layers.items():
         for i in range(len(ordered) - 1):
             a, b = ordered[i], ordered[i + 1]
-            row = np.zeros(n_vars); row[a] = 1.0; row[b] = -1.0
-            A_ub.append(row); b_ub.append(-nodesep)
+            row = np.zeros(n_vars)
+            row[a] = 1.0
+            row[b] = -1.0
+            A_ub.append(row)
+            b_ub.append(-nodesep)
 
-    A_eq = np.zeros((1, n_vars)); A_eq[0, 0] = 1.0      # anchor x(0)=0
+    A_eq = np.zeros((1, n_vars))
+    A_eq[0, 0] = 1.0  # anchor x(0)=0
     b_eq = np.array([0.0])
 
     bounds = [(None, None)] * N + [(0, None)] * E
-    res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
-                  bounds=bounds, method="highs")
+    res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method="highs")
     x = res.x[:N]
-    return x - x.min()                                  # left-justify
+    return x - x.min()  # left-justify
 ```
 
 ### 2.1 Edge cases the prototype handles
@@ -404,15 +424,22 @@ Add to the polish picker config:
 ```python
 def is_dot_lp_candidate(graph, edge_index, rank_lp_stats):
     n = graph.num_nodes
-    if n > 2000: return False                 # LP too slow
-    if not rank_lp_stats.is_dag: return False
-    if rank_lp_stats.components > 1: return False
-    if rank_lp_stats.hub_ratio > 4.0: return False
+    if n > 2000:
+        return False  # LP too slow
+    if not rank_lp_stats.is_dag:
+        return False
+    if rank_lp_stats.components > 1:
+        return False
+    if rank_lp_stats.hub_ratio > 4.0:
+        return False
     s = rank_lp_stats.span_stats
-    if s is None: return False
+    if s is None:
+        return False
     mean_span, frac_span1, max_span = s
-    if max_span > 3: return False             # too many virtual nodes
-    if frac_span1 < 0.6: return False         # most edges should span 1
+    if max_span > 3:
+        return False  # too many virtual nodes
+    if frac_span1 < 0.6:
+        return False  # most edges should span 1
     return True
 ```
 

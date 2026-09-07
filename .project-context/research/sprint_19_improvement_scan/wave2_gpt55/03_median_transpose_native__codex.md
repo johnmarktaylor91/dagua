@@ -95,7 +95,7 @@ if enable_native_median_transpose and is_acyclic:
 
 ```python
 # in the final pipeline composition, replace the single barycenter op
-*crossing_reduction_ops,
+(*crossing_reduction_ops,)
 ```
 
 That patch is deliberately narrow:

@@ -271,17 +271,19 @@ Changes:
 1. Replace the current bare instantiation at line `439`:
 
 ```python
-AspectRatioFit(AspectRatioFitConfig()),
+(AspectRatioFit(AspectRatioFitConfig()),)
 ```
 
 with:
 
 ```python
-AspectRatioFit(
-    AspectRatioFitConfig(
-        target_aspect=getattr(config, "_dagua_native_target_aspect", None),
-    )
-),
+(
+    AspectRatioFit(
+        AspectRatioFitConfig(
+            target_aspect=getattr(config, "_dagua_native_target_aspect", None),
+        )
+    ),
+)
 ```
 
 2. Pass the already-classified structure into `LayoutProblem` so downstream ops

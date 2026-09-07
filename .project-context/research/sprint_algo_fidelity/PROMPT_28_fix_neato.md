@@ -38,6 +38,7 @@ def layout_neato_pipeline(...): ...
 Register it. Add a public-API test:
 ```python
 import dagua
+
 g = dagua.DaguaGraph(...)
 pos = dagua.layout(g, dagua.LayoutConfig(algorithm="neato"))
 ```

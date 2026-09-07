@@ -33,15 +33,15 @@ Ops share state via `SolveState`:
 ```python
 @dataclass
 class SolveState:
-    pos: Tensor          # [N, 2] positions
-    edge_index: Tensor   # [2, E] edge pairs
-    N: int               # node count
-    E: int               # edge count
-    adj: Tensor          # adjacency (sparse or dense)
-    graph_data: dict     # arbitrary graph metadata
-    rng: Any             # algorithm-matched RNG (torch/numpy/Python random)
-    extras: dict         # algorithm-specific state ("tsne_gains", etc.)
-    optimizer: Any       # optional optimizer reference
+    pos: Tensor  # [N, 2] positions
+    edge_index: Tensor  # [2, E] edge pairs
+    N: int  # node count
+    E: int  # edge count
+    adj: Tensor  # adjacency (sparse or dense)
+    graph_data: dict  # arbitrary graph metadata
+    rng: Any  # algorithm-matched RNG (torch/numpy/Python random)
+    extras: dict  # algorithm-specific state ("tsne_gains", etc.)
+    optimizer: Any  # optional optimizer reference
 ```
 
 Key op modules:

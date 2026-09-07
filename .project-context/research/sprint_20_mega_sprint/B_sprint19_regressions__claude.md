@@ -384,13 +384,13 @@ Ship'd code at `dagua/layout/resolve.py:149-157`:
 
 ```python
 if "lattice_like" in tags:
-    return 0.05, 1.0      # plan said 0.60
+    return 0.05, 1.0  # plan said 0.60
 if "planar_dag" in tags:
-    return 0.08, 1.0      # plan said 0.45
+    return 0.08, 1.0  # plan said 0.45
 if "wide_layered" in tags or structure.family == GraphFamily.BIPARTITE_DAG:
-    return 0.85, 1.0      # matches plan
+    return 0.85, 1.0  # matches plan
 if "dense_dag" in tags:
-    return 0.05, 1.0      # plan said 0.45
+    return 0.05, 1.0  # plan said 0.45
 return 0.25, 1.0
 ```
 

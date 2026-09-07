@@ -87,8 +87,7 @@ fewer edges relax to wider x-spreads.
 ### Polish 1: outer_face_rotation (~70 LOC)
 
 ```python
-def _outer_face_rotation(pos, edge_index, node_sizes,
-                         trials=12, score_fn=None):
+def _outer_face_rotation(pos, edge_index, node_sizes, trials=12, score_fn=None):
     """Try K rigid rotations + 3 reflections about the centroid;
     pick the best by composite.
 
@@ -100,7 +99,7 @@ def _outer_face_rotation(pos, edge_index, node_sizes,
     """
     pos = pos.detach()
     n = pos.shape[0]
-    if n < 4 or n > 200:                  # gate: small graphs only
+    if n < 4 or n > 200:  # gate: small graphs only
         return pos
     if not _is_outerplanar_or_small_planar(edge_index, n):
         return pos
@@ -109,7 +108,7 @@ def _outer_face_rotation(pos, edge_index, node_sizes,
     best, best_score = pos, score_fn(pos)
     # Rotations
     for k in range(1, trials):
-        theta = math.pi * k / trials      # half-circle suffices
+        theta = math.pi * k / trials  # half-circle suffices
         c, s = math.cos(theta), math.sin(theta)
         R = torch.tensor([[c, -s], [s, c]], dtype=pos.dtype)
         cand = centered @ R.t() + centroid
@@ -143,8 +142,7 @@ metric-noise floor, so regression risk is bounded by the gate.
 ### Polish 2: multi_component_arrange (~80 LOC)
 
 ```python
-def _multi_component_arrange(pos, edge_index, node_sizes,
-                             score_fn=None):
+def _multi_component_arrange(pos, edge_index, node_sizes, score_fn=None):
     """Try inter-component reflection / ordering / row-major-vs-
     column-major tile; pick best.
 
@@ -155,7 +153,7 @@ def _multi_component_arrange(pos, edge_index, node_sizes,
     cost is ~64 metric calls -> ~1-2s on N <= 200.
     """
     comps = _connected_components(edge_index, n)
-    if len(comps) < 3:                    # gate: 3+ components
+    if len(comps) < 3:  # gate: 3+ components
         return pos
     # Pre-extract per-component bbox + AABB-normalized local coords
     bbox_w, bbox_h, local = [], [], []
@@ -166,9 +164,11 @@ def _multi_component_arrange(pos, edge_index, node_sizes,
         local.append((idx, cp))
         bbox_w.append(float(cp[:, 0].max()) + EPS)
         bbox_h.append(float(cp[:, 1].max()) + EPS)
-    gap = max(node_sizes[:, 0].mean() * 1.5,
-              node_sizes[:, 1].mean() * 1.5,
-              max(max(bbox_w), max(bbox_h)) * 0.05)
+    gap = max(
+        node_sizes[:, 0].mean() * 1.5,
+        node_sizes[:, 1].mean() * 1.5,
+        max(max(bbox_w), max(bbox_h)) * 0.05,
+    )
     best, best_score = pos, score_fn(pos)
     base_order = sorted(range(len(comps)), key=lambda i: -len(comps[i]))
     for order in [base_order, base_order[::-1]]:
@@ -176,8 +176,8 @@ def _multi_component_arrange(pos, edge_index, node_sizes,
             for cols in (sqrt_K, K // 2, 1, K):
                 for rx, ry in product([False, True], repeat=2):
                     cand = _retile_with_reflections(
-                        pos, local, bbox_w, bbox_h, gap,
-                        order, major, cols, rx, ry)
+                        pos, local, bbox_w, bbox_h, gap, order, major, cols, rx, ry
+                    )
                     sc = score_fn(cand)
                     if sc > best_score:
                         best_score, best = sc, cand
@@ -280,15 +280,17 @@ it clears 0.5. This adds 12*K candidate evaluations per graph
 ```python
 # In _best_of_polish, in the polish_candidates list:
 (
-    "outer_face_rotation",
-    lambda pos, edges, sizes: _outer_face_rotation(
-        best_edge_pos,            # apply on top of edge_equalize seed
-        edges,
-        sizes,
-        trials=12,
-        score_fn=score,
+    (
+        "outer_face_rotation",
+        lambda pos, edges, sizes: _outer_face_rotation(
+            best_edge_pos,  # apply on top of edge_equalize seed
+            edges,
+            sizes,
+            trials=12,
+            score_fn=score,
+        ),
     ),
-),
+)
 ```
 
 Where `best_edge_pos` is the existing variable holding the best

@@ -42,11 +42,7 @@ def spectral_x_depth_y(edge_index, node_sizes, mode):
     layers = np.asarray(layers, dtype=float)
 
     # Symmetric unweighted Laplacian from the original graph.
-    pairs = {
-        (min(s, t), max(s, t))
-        for s, t in edge_index.T.tolist()
-        if s != t
-    }
+    pairs = {(min(s, t), max(s, t)) for s, t in edge_index.T.tolist() if s != t}
     degree = np.zeros(n)
     rows, cols, data = [], [], []
     for s, t in pairs:

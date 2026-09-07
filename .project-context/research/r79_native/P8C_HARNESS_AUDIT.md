@@ -118,8 +118,8 @@ dagua's own per-node label-measured box size, for EVERY engine's positions).
 # /tmp/r80_size_fairness_check.py
 graph = graphs["shape_and_routing_matrix"].graph
 graph.compute_node_sizes()
-dot_src = _graph_to_dot(graph)          # what graphviz actually receives
-data = json.loads(subprocess.run(["dot","-Tjson", ...]).stdout)  # what graphviz assumed
+dot_src = _graph_to_dot(graph)  # what graphviz actually receives
+data = json.loads(subprocess.run(["dot", "-Tjson", ...]).stdout)  # what graphviz assumed
 # compare graph.node_sizes (dagua's convention, used for scoring ALL engines)
 # against the width/height graphviz reports it actually used
 ```

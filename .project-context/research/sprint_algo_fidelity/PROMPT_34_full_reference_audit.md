@@ -23,16 +23,17 @@ engines. Goals:
    ```python
    from dagua.eval.competitors import get_competitor, _COMPETITORS
    from dagua.eval.graphs import get_test_graphs
-   tg = [t for t in get_test_graphs() if t.name == 'linear_3layer_mlp'][0]
+
+   tg = [t for t in get_test_graphs() if t.name == "linear_3layer_mlp"][0]
    for name in sorted(_COMPETITORS.keys()):
        c = get_competitor(name)
        avail = c.available()
        try:
            r = c.layout(tg.graph, seed=42)
            ok = r.pos is not None and r.error is None
-           print(f'{name:50s} avail={avail} ok={ok} err={r.error[:60] if r.error else ""}')
+           print(f"{name:50s} avail={avail} ok={ok} err={r.error[:60] if r.error else ''}")
        except Exception as e:
-           print(f'{name:50s} avail={avail} EXCEPTION={str(e)[:80]}')
+           print(f"{name:50s} avail={avail} EXCEPTION={str(e)[:80]}")
    ```
 
 3. For each broken engine: check if fix is cheap (adapter bug, import path, missing

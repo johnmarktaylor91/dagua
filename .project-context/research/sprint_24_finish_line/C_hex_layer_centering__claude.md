@@ -106,18 +106,24 @@ A faithful "hex shear" candidate is therefore Variant 1' below.
 ```python
 def hex_monotonic_shear(pos, ei, n, frac=0.5):
     """Add per-rank monotonic x-shift of frac * pitch to LP output."""
-    if not is_honeycomb(ei, n):              # gate (~25 LOC)
+    if not is_honeycomb(ei, n):  # gate (~25 LOC)
         return pos
     out = pos.detach().clone()
     layers = group_by_y(out, tol=1.0)
-    if len(layers) < 4: return out
+    if len(layers) < 4:
+        return out
     # Median pitch from intra-layer min-gaps
-    gaps = [b - a
-            for layer in layers if len(layer) >= 2
-            for a, b in zip(sorted(out[i, 0].item() for i in layer),
-                            sorted(out[i, 0].item() for i in layer)[1:])
-            if b - a > 1e-6]
-    if not gaps: return out
+    gaps = [
+        b - a
+        for layer in layers
+        if len(layer) >= 2
+        for a, b in zip(
+            sorted(out[i, 0].item() for i in layer), sorted(out[i, 0].item() for i in layer)[1:]
+        )
+        if b - a > 1e-6
+    ]
+    if not gaps:
+        return out
     pitch = sorted(gaps)[len(gaps) // 2]
     layers_sorted = sorted(layers, key=lambda lyr: out[lyr[0], 1].item())
     for r, layer in enumerate(layers_sorted):
@@ -134,15 +140,17 @@ def hex_monotonic_shear(pos, ei, n, frac=0.5):
 ```python
 def lattice_bk_layer_center(pos, ei, n):
     """Per-layer additive shift so each layer's median x = global median."""
-    if not _should_dot_lattice_lp(ei, n): return pos
+    if not _should_dot_lattice_lp(ei, n):
+        return pos
     out = pos.detach().clone()
     layers = group_by_y(out, tol=1.0)
-    if len(layers) < 3: return out
+    if len(layers) < 3:
+        return out
     g = float(out[:, 0].median())
     for layer in layers:
         m = float(out[layer, 0].median())
         for i in layer:
-            out[i, 0] += (g - m)
+            out[i, 0] += g - m
     return out - out.mean(dim=0, keepdim=True)
 ```
 
@@ -158,10 +166,14 @@ def group_by_y(pos, tol=1.0):
     layers, cur, cur_y = [], [], None
     for i in order:
         if cur_y is None or abs(ys[i] - cur_y) <= tol:
-            cur.append(i); cur_y = ys[i] if cur_y is None else cur_y
+            cur.append(i)
+            cur_y = ys[i] if cur_y is None else cur_y
         else:
-            layers.append(cur); cur = [i]; cur_y = ys[i]
-    if cur: layers.append(cur)
+            layers.append(cur)
+            cur = [i]
+            cur_y = ys[i]
+    if cur:
+        layers.append(cur)
     return layers
 ```
 

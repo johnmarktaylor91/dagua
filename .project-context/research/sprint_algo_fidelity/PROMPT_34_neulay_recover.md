@@ -33,12 +33,14 @@ Update `dagua/eval/competitors/neulay_competitor.py` (or create one) so the
 
 ```python
 from dagua.eval.competitors import get_competitor
-c = get_competitor('neulay')
+
+c = get_competitor("neulay")
 print(c.available())  # should now be True
 from dagua.eval.graphs import get_test_graphs
-tg = [t for t in get_test_graphs() if t.name == 'linear_3layer_mlp'][0]
+
+tg = [t for t in get_test_graphs() if t.name == "linear_3layer_mlp"][0]
 r = c.layout(tg.graph, seed=42)
-print('shape:', r.pos.shape if r.pos is not None else 'NONE', 'err:', r.error)
+print("shape:", r.pos.shape if r.pos is not None else "NONE", "err:", r.error)
 ```
 
 Then bounded live_compare:

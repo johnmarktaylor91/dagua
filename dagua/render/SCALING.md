@@ -44,8 +44,8 @@ Use that conversion at the rendering boundary, then build a filled polygon,
 ring, or ribbon in data coordinates. The patch or collection should use:
 
 ```python
-linewidth=0.0
-edgecolor="none"
+linewidth = 0.0
+edgecolor = "none"
 ```
 
 Examples include node borders, cluster borders, arrowhead bodies, text outline

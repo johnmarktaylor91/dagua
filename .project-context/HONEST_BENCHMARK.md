@@ -326,12 +326,12 @@ from dagua.config import LayoutConfig
 pos = dagua.layout(g)
 
 # Specialist via the same API — pick by graph class
-pos = dagua.layout(g, LayoutConfig(algorithm="kk"))             # Kamada-Kawai
-pos = dagua.layout(g, LayoutConfig(algorithm="fr"))             # Fruchterman-Reingold
-pos = dagua.layout(g, LayoutConfig(algorithm="sugiyama"))       # full Sugiyama
+pos = dagua.layout(g, LayoutConfig(algorithm="kk"))  # Kamada-Kawai
+pos = dagua.layout(g, LayoutConfig(algorithm="fr"))  # Fruchterman-Reingold
+pos = dagua.layout(g, LayoutConfig(algorithm="sugiyama"))  # full Sugiyama
 pos = dagua.layout(g, LayoutConfig(algorithm="stress_majorization"))
-pos = dagua.layout(g, LayoutConfig(algorithm="sgd2_multi"))     # (SGD)²
-pos = dagua.layout(g, LayoutConfig(algorithm="fa2"))            # ForceAtlas2
+pos = dagua.layout(g, LayoutConfig(algorithm="sgd2_multi"))  # (SGD)²
+pos = dagua.layout(g, LayoutConfig(algorithm="fa2"))  # ForceAtlas2
 
 # CUDA path
 pos = dagua.layout(g, LayoutConfig(device="cuda"))

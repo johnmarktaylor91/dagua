@@ -106,19 +106,19 @@ abstraction.
 `dagua_native.py:989-1021` is the crux:
 
 ```python
-is_acyclic = bool(structure.is_directed_acyclic)                  # sprint-19f,g,h gate
+is_acyclic = bool(structure.is_directed_acyclic)  # sprint-19f,g,h gate
 enable_native_median_transpose = bool(config.use_native_median_transpose)
 enable_brandes_koepf_refine = bool(config.brandes_koepf_refine)
 crossing_reduction_ops = [BarycenterReorder(...)]
-if enable_native_median_transpose and is_acyclic:                  # silent no-op on cyclic
+if enable_native_median_transpose and is_acyclic:  # silent no-op on cyclic
     crossing_reduction_ops.extend([MedianSweep(...), TransposeHeuristic(...)])
-crossing_reduction_ops.append(BrandesKoepfHorizontalRefine(...))   # sprint-19g
+crossing_reduction_ops.append(BrandesKoepfHorizontalRefine(...))  # sprint-19g
 ```
 
 And `dagua_native.py:1110-1117` is:
 
 ```python
-*([InsertDummyNodes(), ActivateExpandedGraphState()] if resolved_use_dummy_nodes else []),
+(*([InsertDummyNodes(), ActivateExpandedGraphState()] if resolved_use_dummy_nodes else []),)
 ```
 
 The adapter runs its own component-decomp loop at
@@ -167,12 +167,12 @@ practice, only do anything for certain graph families.
 `graph_classify.py:31-46`:
 
 ```python
-family: GraphFamily            # GENERAL/TREE/FOREST/CHAIN/BIPARTITE_DAG/WIDE_LAYERED/GRID (unused)
+family: GraphFamily  # GENERAL/TREE/FOREST/CHAIN/BIPARTITE_DAG/WIDE_LAYERED/GRID (unused)
 num_components, max_degree
 num_layers, avg_layer_width, max_layer_width, layer_width_cv
 is_planar_hint, is_acyclic, is_directed_acyclic
 edge_to_node_ratio
-topology_tags: tuple[str, ...]   # lattice_like, planar_dag, wide_layered, dense_dag, bipartite_dag
+topology_tags: tuple[str, ...]  # lattice_like, planar_dag, wide_layered, dense_dag, bipartite_dag
 ```
 
 The enum has `GRID` but no code path emits it
@@ -209,22 +209,22 @@ existing topology tags):
 Add to `GraphStructure` (`graph_classify.py:31-46`):
 
 ```python
-num_layers_effective: int         # Hide the Sugiyama-style long-path
-                                  # layering when it's just a contrived
-                                  # chain. Defined as the number of layers
-                                  # that contain >= 2 nodes when layers
-                                  # are collapsed so singleton-chains
-                                  # merge with their neighbor.
-cyclicity_ratio: float            # fraction of edges NOT in a valid
-                                  # DAG skeleton -- i.e., how back-edge
-                                  # heavy is this graph?
-has_dominant_component: bool      # largest_comp >= 0.85 * N
-                                  # (moves the gate out of the native
-                                  # adapter into the classifier)
-family: GraphFamily               # Extend enum with LAYERED_DAG,
-                                  # FORCE_DIRECTED, HYBRID.
-                                  # GENERAL becomes a fallback for
-                                  # degenerate / empty graphs.
+num_layers_effective: int  # Hide the Sugiyama-style long-path
+# layering when it's just a contrived
+# chain. Defined as the number of layers
+# that contain >= 2 nodes when layers
+# are collapsed so singleton-chains
+# merge with their neighbor.
+cyclicity_ratio: float  # fraction of edges NOT in a valid
+# DAG skeleton -- i.e., how back-edge
+# heavy is this graph?
+has_dominant_component: bool  # largest_comp >= 0.85 * N
+# (moves the gate out of the native
+# adapter into the classifier)
+family: GraphFamily  # Extend enum with LAYERED_DAG,
+# FORCE_DIRECTED, HYBRID.
+# GENERAL becomes a fallback for
+# degenerate / empty graphs.
 ```
 
 `cyclicity_ratio` and `num_layers_effective` change nothing about the cost
@@ -452,15 +452,17 @@ The new user-facing surface:
 @dataclass
 class NativeOverrides:
     """Advanced overrides; users rarely touch these."""
-    force_pipeline: Literal["auto","tree","layered_dag","force_directed","hybrid"] = "auto"
+
+    force_pipeline: Literal["auto", "tree", "layered_dag", "force_directed", "hybrid"] = "auto"
     median_passes: int = 4
     transpose_passes: int = 8
-    w_stress_auto: bool = True     # let dispatcher raise w_stress for force_directed
+    w_stress_auto: bool = True  # let dispatcher raise w_stress for force_directed
     skip_component_decompose: bool = False
+
 
 class LayoutConfig:
     ...
-    native: NativeOverrides | None = None   # None -> all defaults
+    native: NativeOverrides | None = None  # None -> all defaults
 ```
 
 The `force_pipeline` knob lets anyone benchmark a specific sub-pipeline
@@ -474,9 +476,12 @@ translate at `layout()` entry:
 
 ```python
 if config.insert_dummy_nodes is False:
-    warnings.warn("insert_dummy_nodes is deprecated; use "
-                  "NativeOverrides(force_pipeline='force_directed') to "
-                  "disable dummy-node insertion.", DeprecationWarning)
+    warnings.warn(
+        "insert_dummy_nodes is deprecated; use "
+        "NativeOverrides(force_pipeline='force_directed') to "
+        "disable dummy-node insertion.",
+        DeprecationWarning,
+    )
     # silent degrade: flag has no effect on auto dispatch
 ```
 

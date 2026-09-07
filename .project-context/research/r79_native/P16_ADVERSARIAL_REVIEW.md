@@ -53,8 +53,8 @@ error that competitor row).
 
 Repro (verified):
 ```python
-pos = torch.tensor([[0.,0.],[float('nan'),1.],[2.,2.],[3.,3.]])
-route_edges(pos, torch.tensor([[0,1,2],[1,2,3]]), torch.tensor([[30.,20.]]*4))
+pos = torch.tensor([[0.0, 0.0], [float("nan"), 1.0], [2.0, 2.0], [3.0, 3.0]])
+route_edges(pos, torch.tensor([[0, 1, 2], [1, 2, 3]]), torch.tensor([[30.0, 20.0]] * 4))
 # ValueError: cannot convert float NaN to integer
 ```
 Only triggers on already-broken (divergent) layouts, so severity is MEDIUM not HIGH.

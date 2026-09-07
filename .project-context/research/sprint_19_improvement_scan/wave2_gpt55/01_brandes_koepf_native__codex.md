@@ -533,7 +533,9 @@ def test_brandes_koepf_gate_only_applies_to_deep_connected_dag_like_graphs() -> 
     setattr(enabled_config, "_dagua_native_enable_brandes_koepf", True)
     setattr(enabled_config, "_dagua_native_brandes_koepf_min_layers", 6)
 
-    deep_state = _run_native_pipeline(edge_index=edge_index, node_sizes=node_sizes, config=enabled_config)
+    deep_state = _run_native_pipeline(
+        edge_index=edge_index, node_sizes=node_sizes, config=enabled_config
+    )
 
     assert deep_state.extras["brandes_koepf_horizontal_refine_applied"] is True
 

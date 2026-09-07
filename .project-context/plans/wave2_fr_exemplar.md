@@ -56,6 +56,7 @@ No such op exists. Create:
 class InitTemperatureFromExtentConfig:
     scale: float = 0.1  # multiplier on max extent
 
+
 class InitTemperatureFromExtent(Op):
     """Set state.temperature from the bounding-box extent of state.pos."""
 ```
@@ -64,7 +65,7 @@ class InitTemperatureFromExtent(Op):
 Classic FR computes repulsion + attraction in ONE combined einsum over the
 full NxN delta matrix:
 ```python
-displacement = einsum("ijk,ij->ik", delta, (k^2/d^2 - A*d/k))
+displacement = einsum("ijk,ij->ik", delta, (k ^ 2 / d ^ 2 - A * d / k))
 ```
 The existing InverseDistanceRepulsion + UniformSpringAttraction compute these
 separately (different float accumulation order -> not bit-identical).
@@ -92,6 +93,7 @@ Create:
 @dataclass(frozen=True)
 class FRConvergenceCheckConfig:
     threshold: float = 1e-4
+
 
 class FRConvergenceCheck(Op):
     """FR-specific convergence: frobenius_norm(delta_pos) / N < threshold."""
@@ -133,15 +135,18 @@ This adapter:
 class TestFRPipelineFidelity:
     """Bit-identical fidelity tests for the FR pipeline vs classic."""
 
-    @pytest.mark.parametrize("num_nodes,seed", [
-        (0, 42),      # empty graph
-        (1, 42),      # single node
-        (2, 42),      # single edge
-        (5, 42),      # small graph
-        (5, 99),      # different seed
-        (20, 42),     # medium
-        (50, 7),      # larger
-    ])
+    @pytest.mark.parametrize(
+        "num_nodes,seed",
+        [
+            (0, 42),  # empty graph
+            (1, 42),  # single node
+            (2, 42),  # single edge
+            (5, 42),  # small graph
+            (5, 99),  # different seed
+            (20, 42),  # medium
+            (50, 7),  # larger
+        ],
+    )
     def test_bit_identical(self, num_nodes, seed):
         """Pipeline must produce torch.equal() output vs classic."""
         # Build a simple graph (chain or random edges)

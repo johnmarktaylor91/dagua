@@ -135,17 +135,17 @@ code. v4 uses the EXACT existing enum from `fidelity_analysis.py`:
 # From load_layout() at :785-806 and validate_positions() at :722-752:
 REJECTION_REASONS = (
     # load_layout direct returns
-    "missing_positions_file",   # positions_file is None (line 786)
-    "h5_load_failure",          # HDF5 read raised (line 797)
-    "load_failure",             # torch.load raised (line 803) -- covers .pt missing
-    "not_tensor",               # loaded object is not a torch.Tensor (line 805)
+    "missing_positions_file",  # positions_file is None (line 786)
+    "h5_load_failure",  # HDF5 read raised (line 797)
+    "load_failure",  # torch.load raised (line 803) -- covers .pt missing
+    "not_tensor",  # loaded object is not a torch.Tensor (line 805)
     # validate_positions returns (lines 740-751)
-    "tensor_not_2d",            # positions.ndim != 2
-    "tensor_not_xy",            # positions.shape[1] != 2
-    "too_few_nodes",            # positions.shape[0] < MIN_VALID_NODE_COUNT
-    "node_count_mismatch",      # positions.shape[0] != expected_nodes
-    "contains_nan",             # torch.isnan().any()
-    "contains_inf",             # torch.isinf().any()
+    "tensor_not_2d",  # positions.ndim != 2
+    "tensor_not_xy",  # positions.shape[1] != 2
+    "too_few_nodes",  # positions.shape[0] < MIN_VALID_NODE_COUNT
+    "node_count_mismatch",  # positions.shape[0] != expected_nodes
+    "contains_nan",  # torch.isnan().any()
+    "contains_inf",  # torch.isinf().any()
 )
 ```
 
@@ -268,7 +268,7 @@ def load_position_tensor(
     *,
     record_key: str,
     positions_file: Optional[str],  # e.g. "positions/graph__engine.pt", may be None
-    input_dir: Path,                # benchmark root (NOT the positions/ subdir)
+    input_dir: Path,  # benchmark root (NOT the positions/ subdir)
     h5_file: Optional["h5py.File"] = None,  # worker-local handle, or None
 ) -> tuple[Optional[torch.Tensor], Optional[str]]:
     """Raw position loader. Returns (tensor, reason).
@@ -322,6 +322,7 @@ def open_h5_for_worker(h5_path: Path) -> Optional["h5py.File"]:
     if not h5_path.exists():
         return None
     import h5py
+
     return h5py.File(h5_path, "r")
 
 
@@ -333,6 +334,7 @@ def aspect_ratio_deviation(positions: torch.Tensor) -> float:
     with a zero at ratio=1.0.
     """
     from dagua.metrics import aspect_ratio
+
     raw = aspect_ratio(positions)
     ratio = float(raw.get("aspect_ratio", 1.0))
     if ratio <= 1e-9:
@@ -450,6 +452,7 @@ routing.**
       v = _safe_float(row.get(col))
       return math.isfinite(v) and v < 0.05
 
+
   procrustes_tost_1x_pass = _pass("procrustes_tost_pvalue_1x_bh")
   procrustes_tost_2x_pass = _pass("procrustes_tost_pvalue_2x_bh")
   metric_tost_1x_pass_rate = _compute_metric_tost_pass_rate(row, "1x")
@@ -487,11 +490,11 @@ leaves the verdict logic broken.
       "edge_length_cv",
       "edge_straightness_mean_deg",
       "depth_spearman_rho",
-      "overlap_count",              # quick() already computes; needs FIX-S for determinism
+      "overlap_count",  # quick() already computes; needs FIX-S for determinism
   )
   SAMPLED_QUALITY_METRICS: tuple[str, ...] = (
-      "sampled_stress",             # already deterministic
-      "crossing_rate",              # needs FIX-S
+      "sampled_stress",  # already deterministic
+      "crossing_rate",  # needs FIX-S
   )
   ```
 - `load_layout()` at `:814-822` filters `quick()` output against
@@ -504,9 +507,12 @@ leaves the verdict logic broken.
 - After the existing `quick()` call, also invoke:
   ```python
   from dagua.eval.pipeline_io import stable_seed
+
   layout_seed = stable_seed(record.graph_name, variant_id, side, str(record.seed or 0))
   sampled = compute_sampled_metrics(
-      positions, edge_index, num_nodes=int(node_sizes.shape[0]),
+      positions,
+      edge_index,
+      num_nodes=int(node_sizes.shape[0]),
       seed=layout_seed,
   )
   metrics.update({k: v for k, v in sampled.items() if k in SAMPLED_QUALITY_METRICS})
@@ -584,8 +590,8 @@ data).
   `process_group` at `:1458, :1704, :1711`
 - Extend `ResultRecord`:
   ```python
-  error_message: str | None = None    # status == "error"
-  skip_reason: str | None = None       # status == "skipped"
+  error_message: str | None = None  # status == "error"
+  skip_reason: str | None = None  # status == "skipped"
   ```
   (Both fields already exist in `results.json` per `run_benchmark.py:178-180, :190-191`.)
 - In `process_group`, accumulate a `rejection_breakdown` dict with
@@ -696,18 +702,25 @@ Path B with a small fixture h5 file.
 
 _worker_h5: "h5py.File | None" = None
 
+
 def _worker_init(h5_path: Path):
     global _worker_h5
     from dagua.eval.pipeline_io import open_h5_for_worker
+
     _worker_h5 = open_h5_for_worker(h5_path)
+
 
 def _worker_compute(task):
     global _worker_h5
     from dagua.eval.pipeline_io import (
-        load_position_tensor, validate_positions, stable_seed,
-        compute_quick_metrics_seeded, compute_sampled_metrics_seeded,
+        load_position_tensor,
+        validate_positions,
+        stable_seed,
+        compute_quick_metrics_seeded,
+        compute_sampled_metrics_seeded,
         aspect_ratio_deviation,
     )
+
     tensor, reason = load_position_tensor(
         record_key=task.record_key,
         positions_file=task.positions_file,
@@ -722,11 +735,16 @@ def _worker_compute(task):
 
     seed = stable_seed(task.graph_name, task.engine_name, str(task.layout_seed or 0))
     quick_metrics = compute_quick_metrics_seeded(
-        tensor, task.edge_index, task.node_sizes,
-        seed=seed, metric_filter=QR_QUICK_METRICS,
+        tensor,
+        task.edge_index,
+        task.node_sizes,
+        seed=seed,
+        metric_filter=QR_QUICK_METRICS,
     )
     sampled_metrics = compute_sampled_metrics_seeded(
-        tensor, task.edge_index, task.num_nodes,
+        tensor,
+        task.edge_index,
+        task.num_nodes,
         seed=seed,
         stress_sources=task.config.stress_sources,
         stress_targets=task.config.stress_targets,
@@ -734,6 +752,7 @@ def _worker_compute(task):
     )
     quick_metrics["aspect_ratio_deviation"] = aspect_ratio_deviation(tensor)
     return (task, {**quick_metrics, **sampled_metrics}, None)
+
 
 def run(input_dir, output_dir, workers):
     h5_path = input_dir / "positions.h5"
@@ -793,18 +812,18 @@ needed if those modules change.
 # In scripts/quality_runtime_analysis.py
 
 QR_QUICK_METRICS = {
-    "edge_length_cv",              # already deterministic
-    "dag_consistency",             # deterministic
-    "depth_spearman_rho",          # deterministic
-    "overlap_count",               # FIX-S seeded
+    "edge_length_cv",  # already deterministic
+    "dag_consistency",  # deterministic
+    "depth_spearman_rho",  # deterministic
+    "overlap_count",  # FIX-S seeded
     "edge_straightness_mean_deg",  # deterministic
     # aspect_ratio_deviation computed separately via pipeline_io helper
 }
 
 QR_SAMPLED_METRICS = {
-    "sampled_stress",              # already deterministic
-    "crossing_rate",               # FIX-S seeded
-    "edge_crossings",              # FIX-S seeded (E > 500 branch)
+    "sampled_stress",  # already deterministic
+    "crossing_rate",  # FIX-S seeded
+    "edge_crossings",  # FIX-S seeded (E > 500 branch)
 }
 ```
 
@@ -962,15 +981,15 @@ sanity check.
 
 ```python
 THRESHOLDS = {
-    "dag_consistency":            {"steal_abs": 0.05, "premium_abs": 0.10},
-    "depth_spearman_rho":         {"steal_abs": 0.05, "premium_abs": 0.10},
-    "edge_straightness_mean_deg": {"steal_abs": 3.0,  "premium_abs": 5.0},
-    "overlap_count":              {"steal_abs": 5,    "premium_abs": 20},
-    "sampled_stress":             {"steal_pct": 0.15, "premium_pct": 0.30, "floor": 1e-3},
-    "edge_length_cv":             {"steal_pct": 0.15, "premium_pct": 0.30, "floor": 1e-3},
-    "crossing_rate":              {"steal_pct": 0.15, "premium_pct": 0.30, "floor": 1e-4},
-    "edge_crossings":             {"steal_pct": 0.15, "premium_pct": 0.30, "floor": 1.0},
-    "aspect_ratio_deviation":     {"steal_abs": 0.10, "premium_abs": 0.30},
+    "dag_consistency": {"steal_abs": 0.05, "premium_abs": 0.10},
+    "depth_spearman_rho": {"steal_abs": 0.05, "premium_abs": 0.10},
+    "edge_straightness_mean_deg": {"steal_abs": 3.0, "premium_abs": 5.0},
+    "overlap_count": {"steal_abs": 5, "premium_abs": 20},
+    "sampled_stress": {"steal_pct": 0.15, "premium_pct": 0.30, "floor": 1e-3},
+    "edge_length_cv": {"steal_pct": 0.15, "premium_pct": 0.30, "floor": 1e-3},
+    "crossing_rate": {"steal_pct": 0.15, "premium_pct": 0.30, "floor": 1e-4},
+    "edge_crossings": {"steal_pct": 0.15, "premium_pct": 0.30, "floor": 1.0},
+    "aspect_ratio_deviation": {"steal_abs": 0.10, "premium_abs": 0.30},
 }
 # All metrics additionally require runtime ratio <= 1.25 (steal) or <= 2.0 (premium).
 ```

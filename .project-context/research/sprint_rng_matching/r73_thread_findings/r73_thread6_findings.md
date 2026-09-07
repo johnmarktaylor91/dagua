@@ -217,24 +217,29 @@ but is a report-stage artifact (BH over all combos dilutes the signal).
 **After line 449**, insert the distributional-TOST promotion gate:
 
 ```python
-        # Promote to quality_identical if ALL three distributional quality
-        # metrics pass their TOST (stress_p_tost, cross_p_tost, np_p_tost < 0.05).
-        # This applies to both Mode-A and Mode-B combos where the strict 2%-margin
-        # battery fails but the looser distributional TOST confirms quality equivalence.
-        # Rationale: the distributional TOST uses reference-distribution variance in
-        # its margin (5% of mean reference), making it appropriate for FP-floor cases
-        # where the position distribution differs but quality metrics agree.
-        if not row.get("quality_identical"):
-            s_p = as_float(row.get("stress_p_tost"))
-            c_p = as_float(row.get("cross_p_tost"))
-            n_p = as_float(row.get("np_p_tost"))
-            if (s_p is not None and s_p < 0.05 and
-                    c_p is not None and c_p < 0.05 and
-                    n_p is not None and n_p < 0.05):
-                row["quality_identical"] = True
-                row.setdefault("final_annotations", [])
-                if "quality_identical_distributional" not in row["final_annotations"]:
-                    row["final_annotations"].append("quality_identical_distributional")
+# Promote to quality_identical if ALL three distributional quality
+# metrics pass their TOST (stress_p_tost, cross_p_tost, np_p_tost < 0.05).
+# This applies to both Mode-A and Mode-B combos where the strict 2%-margin
+# battery fails but the looser distributional TOST confirms quality equivalence.
+# Rationale: the distributional TOST uses reference-distribution variance in
+# its margin (5% of mean reference), making it appropriate for FP-floor cases
+# where the position distribution differs but quality metrics agree.
+if not row.get("quality_identical"):
+    s_p = as_float(row.get("stress_p_tost"))
+    c_p = as_float(row.get("cross_p_tost"))
+    n_p = as_float(row.get("np_p_tost"))
+    if (
+        s_p is not None
+        and s_p < 0.05
+        and c_p is not None
+        and c_p < 0.05
+        and n_p is not None
+        and n_p < 0.05
+    ):
+        row["quality_identical"] = True
+        row.setdefault("final_annotations", [])
+        if "quality_identical_distributional" not in row["final_annotations"]:
+            row["final_annotations"].append("quality_identical_distributional")
 ```
 
 Note: `as_float()` is already defined in the same file at line 3218. The p < 0.05 criterion

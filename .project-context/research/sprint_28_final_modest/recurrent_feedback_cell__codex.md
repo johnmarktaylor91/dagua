@@ -125,9 +125,9 @@ def _recurrent_feedback_cell_spine_polish(
         [
             -2.0 * pitch - gap / 2.0,  # input
             -1.0 * pitch - gap / 2.0,  # state_update
-            gap / 2.0,                 # state_prev
-            -gap / 2.0,                # state_proj
-            pitch + gap / 2.0,         # output
+            gap / 2.0,  # state_prev
+            -gap / 2.0,  # state_proj
+            pitch + gap / 2.0,  # output
         ],
         dtype=out.dtype,
         device=out.device,

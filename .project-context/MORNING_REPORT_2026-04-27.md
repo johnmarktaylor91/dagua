@@ -72,14 +72,14 @@ doesn't include stress), what if we ADD stress to the composite?
 # New composite formula (post 3553543):
 composite = (
     22 * dag_consistency
-  + 18 * (1 - normalized(edge_length_cv))
-  + 13 * depth_spearman_rho
-  +  8 * (1 - overlap_fraction)
-  +  9 * straight_score
-  +  9 * (1 - crossing_rate)
-  + 10 * (1 - sampled_stress)         # NEW
-  +  5 * (angular_res_mean_deg / 180.0)
-  +  6 * cluster_separation
+    + 18 * (1 - normalized(edge_length_cv))
+    + 13 * depth_spearman_rho
+    + 8 * (1 - overlap_fraction)
+    + 9 * straight_score
+    + 9 * (1 - crossing_rate)
+    + 10 * (1 - sampled_stress)  # NEW
+    + 5 * (angular_res_mean_deg / 180.0)
+    + 6 * cluster_separation
 )
 ```
 

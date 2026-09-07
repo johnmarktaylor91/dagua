@@ -119,6 +119,7 @@ Or launch the widget directly inside an existing notebook:
 
 ```python
 import dagua
+
 dagua.launch_playground()
 ```
 

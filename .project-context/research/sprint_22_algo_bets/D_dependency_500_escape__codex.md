@@ -162,7 +162,9 @@ def gap_validated_search(
 
     for _, left, right in sorted(ranked)[:max_candidates]:
         trial = swap_x(best, left, right)
-        trial_score = composite(full(trial, edge_index, topo_depth=topo_depth, node_sizes=node_sizes))
+        trial_score = composite(
+            full(trial, edge_index, topo_depth=topo_depth, node_sizes=node_sizes)
+        )
         if trial_score > best_score:
             best = trial
             best_score = trial_score

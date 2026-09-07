@@ -219,7 +219,7 @@ is_ogdf_fidelity = _uses_ogdf_fidelity_coordinates(
     distance_scale=distance_scale,
 )
 # ...
-PivotMDSFinalizePositions(skip_normalization=is_ogdf_fidelity),
+(PivotMDSFinalizePositions(skip_normalization=is_ogdf_fidelity),)
 ```
 
 Note: `_uses_ogdf_fidelity_coordinates()` is already computed at line 93 to select the `coordinate_op`. Reuse that boolean -- capture it in a variable rather than calling twice.
@@ -237,10 +237,14 @@ import torch
 
 g = make_real_karate_graph()
 pos = layout_pivot_mds_pipeline(
-    g.edge_index, g.num_nodes,
-    n_pivots=50, seed=42,
-    first_pivot="first_node", first_pivot_index=None,
-    compute_dtype=torch.float64, distance_scale=100.0,
+    g.edge_index,
+    g.num_nodes,
+    n_pivots=50,
+    seed=42,
+    first_pivot="first_node",
+    first_pivot_index=None,
+    compute_dtype=torch.float64,
+    distance_scale=100.0,
     ogdf_path_special_case=True,
 )
 # Run OGDF reference with n_pivots=50, seed=42

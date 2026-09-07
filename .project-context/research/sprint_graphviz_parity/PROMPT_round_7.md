@@ -126,14 +126,15 @@ Not done until:
    ```python
    from PIL import Image
    import os
-   src = 'eval_output/graphviz_theme_round_7/three_way'
-   dst = 'eval_output/graphviz_theme_round_7/two_way'
+
+   src = "eval_output/graphviz_theme_round_7/three_way"
+   dst = "eval_output/graphviz_theme_round_7/two_way"
    os.makedirs(dst, exist_ok=True)
    for f in os.listdir(src):
-       if f.endswith('.png'):
-           img = Image.open(f'{src}/{f}')
+       if f.endswith(".png"):
+           img = Image.open(f"{src}/{f}")
            w, h = img.size
-           img.crop((0, 0, int(w * 2/3), h)).save(f'{dst}/{f}')
+           img.crop((0, 0, int(w * 2 / 3), h)).save(f"{dst}/{f}")
    ```
 6. Visually verify by reading: long_labels.png (R1 fix), arrow_types.png (R2/R3/R4 fixes), state_machine.png (R5/R7 fixes), diamond.png (R8 fix), pipeline.png (sanity check).
 7. ONE commit: `feat(theme): graphviz_strict cosmetic round 7 — uniform sqrt(2) ellipse, crow/open arrow fill, edge label size, cluster opacity, arrow tip trim, edge label collision`.

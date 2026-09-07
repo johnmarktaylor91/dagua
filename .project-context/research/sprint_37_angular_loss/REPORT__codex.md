@@ -25,10 +25,9 @@ The graph-drawing literature defines angular resolution as the smallest angle fo
 Recommended objective: undirected, degree-adaptive, soft-margin minimum-angle loss over incident edge pairs. Use the ideal local target `2*pi/degree(v)`, capped to avoid impossible aggression on high-degree hubs.
 
 ```python
-def angular_resolution_loss(pos, edge_index, min_avg_degree=3.0,
-                            max_pairs_per_node=64,
-                            target_cap_deg=45.0,
-                            eps=1e-6):
+def angular_resolution_loss(
+    pos, edge_index, min_avg_degree=3.0, max_pairs_per_node=64, target_cap_deg=45.0, eps=1e-6
+):
     # Structural anti-gaming gate. No graph names, no signatures.
     n = pos.shape[0]
     e = edge_index.shape[1]
@@ -55,7 +54,7 @@ def angular_resolution_loss(pos, edge_index, min_avg_degree=3.0,
 
         # For degree d, perfect straight-line angular spacing is 2*pi/d.
         # Cap keeps high-degree hubs from forcing huge global distortion.
-        theta_target = min(2*pi / degree[v], radians(target_cap_deg))
+        theta_target = min(2 * pi / degree[v], radians(target_cap_deg))
         margin = relu(theta_target - angle)
         losses.append(mean((margin / theta_target) ** 2))
 

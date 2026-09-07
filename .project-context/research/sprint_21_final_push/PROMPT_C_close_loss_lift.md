@@ -23,11 +23,9 @@ bucket. For each graph in close-loss or tie:
 ```python
 # Per-graph score breakdown
 torch.manual_seed(0)
-m_dagua = composite(full(layout(g, LayoutConfig(seed=42)),
-                         g.edge_index, node_sizes=g.node_sizes))
+m_dagua = composite(full(layout(g, LayoutConfig(seed=42)), g.edge_index, node_sizes=g.node_sizes))
 torch.manual_seed(0)
-m_comp = composite(full(competitor_pos, g.edge_index,
-                        node_sizes=g.node_sizes))
+m_comp = composite(full(competitor_pos, g.edge_index, node_sizes=g.node_sizes))
 # compare component by component
 ```
 

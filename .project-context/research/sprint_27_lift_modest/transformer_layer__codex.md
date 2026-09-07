@@ -45,9 +45,25 @@ def _is_transformer_layer_signature(edge_index: torch.Tensor, num_nodes: int) ->
         return False
     actual = {(int(src), int(dst)) for src, dst in edge_index.t().cpu().tolist()}
     expected = {
-        (0, 1), (1, 2), (1, 3), (1, 4), (2, 5), (3, 5), (5, 6),
-        (4, 6), (6, 7), (7, 8), (1, 8), (8, 9), (9, 10),
-        (10, 11), (11, 12), (12, 13), (9, 13), (13, 14), (14, 15),
+        (0, 1),
+        (1, 2),
+        (1, 3),
+        (1, 4),
+        (2, 5),
+        (3, 5),
+        (5, 6),
+        (4, 6),
+        (6, 7),
+        (7, 8),
+        (1, 8),
+        (8, 9),
+        (9, 10),
+        (10, 11),
+        (11, 12),
+        (12, 13),
+        (9, 13),
+        (13, 14),
+        (14, 15),
     }
     return actual == expected
 
