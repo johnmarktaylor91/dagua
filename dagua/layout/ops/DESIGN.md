@@ -128,9 +128,9 @@ class Op(ABC):
     # Class-level metadata
     name: str = "unnamed_op"
     category: OpCategory = OpCategory.UNKNOWN
-    reads: tuple[str, ...] = ()    # SolveState fields read
-    writes: tuple[str, ...] = ()   # SolveState fields written
-    requires: tuple[str, ...] = () # fields that should already be set
+    reads: tuple[str, ...] = ()  # SolveState fields read
+    writes: tuple[str, ...] = ()  # SolveState fields written
+    requires: tuple[str, ...] = ()  # fields that should already be set
 
     @abstractmethod
     def apply(self, problem, state, ctx) -> SolveState: ...
@@ -153,10 +153,12 @@ Every configurable Op has a companion frozen dataclass:
 @dataclass(frozen=True)
 class RepulsionConfig:
     """Configuration for repulsion force computation."""
+
     exact_threshold: int = 2000
     sample_k: int = 128
     rvs_threshold: int = 5000
     rvs_nn_k: int = 20
+
 
 class RepulsionLoss(Op):
     name = "repulsion"
@@ -357,12 +359,14 @@ CONTROL       Pipeline, Repeat, Conditional, LossGroup, VCycle
 ### 1. Pipeline (sequential)
 
 ```python
-Pipeline([
-    ClassifyGraph(),
-    InitPositions(),
-    OptimizationLoop,
-    DirectionTransform(),
-])
+Pipeline(
+    [
+        ClassifyGraph(),
+        InitPositions(),
+        OptimizationLoop,
+        DirectionTransform(),
+    ]
+)
 ```
 
 REVISED: Pipeline now calls ctx.trace_sink.op_start/op_end at each
@@ -371,11 +375,14 @@ boundary when trace_between=True.
 ### 2. Repeat (fixed iteration loop)
 
 ```python
-Repeat(n=50, ops=[
-    ComputeForces(),
-    ApplyDisplacement(),
-    LinearCool(),
-])
+Repeat(
+    n=50,
+    ops=[
+        ComputeForces(),
+        ApplyDisplacement(),
+        LinearCool(),
+    ],
+)
 ```
 
 No changes from v1.
@@ -418,7 +425,7 @@ In per_loss mode: each loss backward() separately, intermediates freed.
 MultilevelVCycle(
     coarsen_op=LayerAwareCoarsen(config=...),
     base_layout=Pipeline([...]),  # coarsest level
-    refine=Pipeline([...]),       # per-level refinement
+    refine=Pipeline([...]),  # per-level refinement
     min_nodes=2000,
     max_levels=20,
 )
@@ -432,11 +439,14 @@ for this sprint -- concrete implementation comes in the migration sprint.
 Used inside Repeat to break out of the loop:
 
 ```python
-Repeat(n=500, ops=[
-    ComputeForces(),
-    ApplyDisplacement(),
-    EarlyBreak(predicate=lambda p, s, c: s.converged),
-])
+Repeat(
+    n=500,
+    ops=[
+        ComputeForces(),
+        ApplyDisplacement(),
+        EarlyBreak(predicate=lambda p, s, c: s.converged),
+    ],
+)
 ```
 
 EarlyBreak sets state.converged = True. Repeat checks this flag
@@ -447,89 +457,110 @@ after each iteration and stops if set.
 ### Fruchterman-Reingold
 
 ```python
-Pipeline([
-    RandomUniformInit(config=RandomUniformInitConfig(scale="sqrt_n")),
-    Repeat(n=50, ops=[
-        CoulombRepulsion(config=CoulombConfig(k_formula="area")),
-        SpringAttraction(config=SpringConfig(k_formula="area")),
-        MovementClamp(config=ClampConfig(mode="temperature")),
-        LinearCool(config=LinearCoolConfig()),
-        EarlyBreak(predicate=mean_displacement_below(1e-4)),
-    ]),
-    CenterAndScale(config=ScaleConfig(factor="sqrt_n_times_50")),
-], name="fruchterman_reingold")
+Pipeline(
+    [
+        RandomUniformInit(config=RandomUniformInitConfig(scale="sqrt_n")),
+        Repeat(
+            n=50,
+            ops=[
+                CoulombRepulsion(config=CoulombConfig(k_formula="area")),
+                SpringAttraction(config=SpringConfig(k_formula="area")),
+                MovementClamp(config=ClampConfig(mode="temperature")),
+                LinearCool(config=LinearCoolConfig()),
+                EarlyBreak(predicate=mean_displacement_below(1e-4)),
+            ],
+        ),
+        CenterAndScale(config=ScaleConfig(factor="sqrt_n_times_50")),
+    ],
+    name="fruchterman_reingold",
+)
 ```
 
 ### Sugiyama (Hierarchical DAG)
 
 ```python
-Pipeline([
-    MakeAcyclic(),
-    LongestPathLayering(),
-    LayerPromotion(),
-    InsertDummyNodes(),
-    Repeat(n=24, ops=[
-        BarycenterSweep(config=SweepConfig(direction="down")),
-        BarycenterSweep(config=SweepConfig(direction="up")),
-    ]),
-    BrandesKopf4Pass(config=BrandesKopfConfig(node_sep=1.0, rank_sep=1.0)),
-    StripDummyNodes(),
-    DirectionTransform(),
-], name="sugiyama")
+Pipeline(
+    [
+        MakeAcyclic(),
+        LongestPathLayering(),
+        LayerPromotion(),
+        InsertDummyNodes(),
+        Repeat(
+            n=24,
+            ops=[
+                BarycenterSweep(config=SweepConfig(direction="down")),
+                BarycenterSweep(config=SweepConfig(direction="up")),
+            ],
+        ),
+        BrandesKopf4Pass(config=BrandesKopfConfig(node_sep=1.0, rank_sep=1.0)),
+        StripDummyNodes(),
+        DirectionTransform(),
+    ],
+    name="sugiyama",
+)
 ```
 
 ### Native Dagua Engine
 
 ```python
-Pipeline([
-    ClassifyGraph(),
-    BuildLayerIndex(),
-    Conditional(
-        predicate=is_tree_or_chain,
-        op=OverrideTreeWeights(),
-    ),
-    InitPositions(config=InitPosConfig(use_spectral_for_large=True)),
-    Conditional(
-        predicate=exceeds_multilevel_threshold,
-        op=MultilevelVCycle(
-            coarsen_op=LayerAwareCoarsen(),
-            base_layout=optimization_loop(steps="coarse"),
-            refine=optimization_loop(steps="refine"),
+Pipeline(
+    [
+        ClassifyGraph(),
+        BuildLayerIndex(),
+        Conditional(
+            predicate=is_tree_or_chain,
+            op=OverrideTreeWeights(),
         ),
-        else_op=optimization_loop(steps="total"),
-    ),
-    Conditional(predicate=has_relax_steps, op=RelaxPass()),
-    DirectionTransform(),
-], name="dagua_native")
+        InitPositions(config=InitPosConfig(use_spectral_for_large=True)),
+        Conditional(
+            predicate=exceeds_multilevel_threshold,
+            op=MultilevelVCycle(
+                coarsen_op=LayerAwareCoarsen(),
+                base_layout=optimization_loop(steps="coarse"),
+                refine=optimization_loop(steps="refine"),
+            ),
+            else_op=optimization_loop(steps="total"),
+        ),
+        Conditional(predicate=has_relax_steps, op=RelaxPass()),
+        DirectionTransform(),
+    ],
+    name="dagua_native",
+)
 ```
 
 Where optimization_loop is:
 
 ```python
 def optimization_loop(steps):
-    return Repeat(n=steps, ops=[
-        BuildEdgeBatchCtx(),
-        RefreshSampledNodeCtx(config=SampleConfig(interval=5)),
-        WeightAnnealing(),
-        LossGroup(
-            losses=[
-                DagOrderingLoss(), RepulsionLoss(),
-                OverlapAvoidanceLoss(), CrossingLoss(),
-                EdgeAttractionLoss(), EdgeStraightnessLoss(),
-                # ... all 16 losses
-            ],
-            backward_mode="auto",  # per_loss when N > 50K
-        ),
-        ClipGradNorm(config=ClipConfig(max_norm=100.0)),
-        OptimizerStep(),
-        HardPinProjection(),
-        Conditional(
-            predicate=is_projection_step,
-            op=OverlapProjection(),
-        ),
-        StallCount(config=StallConfig(limit=5, rel_threshold=1e-4)),
-        EarlyBreak(predicate=lambda p, s, c: s.converged),
-    ])
+    return Repeat(
+        n=steps,
+        ops=[
+            BuildEdgeBatchCtx(),
+            RefreshSampledNodeCtx(config=SampleConfig(interval=5)),
+            WeightAnnealing(),
+            LossGroup(
+                losses=[
+                    DagOrderingLoss(),
+                    RepulsionLoss(),
+                    OverlapAvoidanceLoss(),
+                    CrossingLoss(),
+                    EdgeAttractionLoss(),
+                    EdgeStraightnessLoss(),
+                    # ... all 16 losses
+                ],
+                backward_mode="auto",  # per_loss when N > 50K
+            ),
+            ClipGradNorm(config=ClipConfig(max_norm=100.0)),
+            OptimizerStep(),
+            HardPinProjection(),
+            Conditional(
+                predicate=is_projection_step,
+                op=OverlapProjection(),
+            ),
+            StallCount(config=StallConfig(limit=5, rel_threshold=1e-4)),
+            EarlyBreak(predicate=lambda p, s, c: s.converged),
+        ],
+    )
 ```
 
 ## Registry and Discovery
@@ -539,18 +570,22 @@ def optimization_loop(steps):
 
 _OP_REGISTRY: dict[str, type[Op]] = {}
 
+
 def register_op(cls: type[Op]) -> type[Op]:
     """Class decorator. Registers an Op by its name."""
     _OP_REGISTRY[cls.name] = cls
     return cls
 
+
 def get_op_class(name: str) -> type[Op]:
     """Look up a registered Op class by name."""
     return _OP_REGISTRY[name]
 
+
 def list_ops(category: OpCategory | None = None) -> list[str]:
     """List registered op names, optionally filtered by category."""
     ...
+
 
 def list_categories() -> list[OpCategory]:
     """List all OpCategory values."""
