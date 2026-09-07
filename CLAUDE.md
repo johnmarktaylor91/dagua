@@ -43,19 +43,21 @@ import dagua
 
 # Tier 0: Zero config
 dagua.draw(g)
-dagua.set_theme('dark')
+dagua.set_theme("dark")
 
 # Tier 1: Flat configure + flex
-dagua.configure(font_size=10, node_sep=40, background_color='#1A1E24')
-with dagua.defaults(theme='minimal'):
+dagua.configure(font_size=10, node_sep=40, background_color="#1A1E24")
+with dagua.defaults(theme="minimal"):
     dagua.draw(g)
 
 # Flex: soft layout targets
 g.pin("input", x=0, y=0)
 g.align(["a", "b", "c"], axis="x")
-config = dagua.LayoutConfig(flex=dagua.LayoutFlex(
-    node_sep=dagua.Flex.firm(40),
-))
+config = dagua.LayoutConfig(
+    flex=dagua.LayoutFlex(
+        node_sep=dagua.Flex.firm(40),
+    )
+)
 
 # Tier 1.5: Algorithm selection
 config = dagua.LayoutConfig(algorithm="fr")  # Fruchterman-Reingold
@@ -64,7 +66,7 @@ config = dagua.LayoutConfig(algorithm="kk", algorithm_params={"spring_k": 1.5})
 
 # Tier 2: Full control
 pos = dagua.layout(g, config)
-dagua.render(g, pos, config, output='graph.png')
+dagua.render(g, pos, config, output="graph.png")
 ```
 
 ## Relationship to TorchLens

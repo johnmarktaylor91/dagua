@@ -19,11 +19,13 @@ Most agent tasks should start here:
 import dagua
 from dagua import DaguaGraph, LayoutConfig
 
-g = DaguaGraph.from_edge_list([
-    ("input", "prep"),
-    ("prep", "model"),
-    ("model", "output"),
-])
+g = DaguaGraph.from_edge_list(
+    [
+        ("input", "prep"),
+        ("prep", "model"),
+        ("model", "output"),
+    ]
+)
 
 fig, ax = dagua.draw(
     g,
@@ -157,7 +159,9 @@ g2 = dagua.load("graph.yaml")
 ### Turn an image into a graph, dict, code, or theme
 
 ```python
-dagua.configure_image_ai(provider="openai", api_key_env="OPENAI_API_KEY")  # pragma: allowlist secret
+dagua.configure_image_ai(
+    provider="openai", api_key_env="OPENAI_API_KEY"
+)  # pragma: allowlist secret
 
 graph = dagua.from_image("diagram.png")
 graph_dict = dagua.graph_dict_from_image("diagram.png")
@@ -220,9 +224,7 @@ Increase:
 Use `LayoutFlex` pins:
 
 ```python
-g.flex = LayoutFlex(
-    pins={"input": (Flex.locked(0.0), Flex.locked(0.0))}
-)
+g.flex = LayoutFlex(pins={"input": (Flex.locked(0.0), Flex.locked(0.0))})
 ```
 
 ### “These peers should line up”
@@ -230,9 +232,7 @@ g.flex = LayoutFlex(
 Use `AlignGroup`:
 
 ```python
-g.flex = LayoutFlex(
-    align_y=[AlignGroup(["a", "b", "c"], weight=6.0)]
-)
+g.flex = LayoutFlex(align_y=[AlignGroup(["a", "b", "c"], weight=6.0)])
 ```
 
 ### “The edges are ugly”
