@@ -144,3 +144,7 @@ service-account*.json
 *_token.txt
 config.env
 # --- end secrets block ---
+
+# internal notes: local only, never public
+.project-context/
+.research/
