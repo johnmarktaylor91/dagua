@@ -208,6 +208,10 @@ class _OGDFBase(CompetitorBase):
 
     algorithm: str = ""
     requires_planar: bool = False
+    # requires_planar rows are ok-vs-error gated by dagua-side check_planarity
+    # (pipelines/planar.py); declared for all ogdf_* since the import is
+    # module-level and the gate is shared (dry-well R3-B3-Fable F4).
+    source_delegate_modules = ("dagua.layout.ops.pipelines.planar",)
 
     def layout(
         self,

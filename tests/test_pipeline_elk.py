@@ -34,6 +34,22 @@ def _diamond_inputs() -> tuple[torch.Tensor, torch.Tensor]:
     return edge_index, node_sizes
 
 
+def _compound_inputs() -> tuple[torch.Tensor, torch.Tensor, dict[str, list[int]]]:
+    """Return a small clustered graph with one cross-hierarchy edge.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor, dict[str, list[int]]]
+        Edge index ``[2, 3]``, fixed node sizes ``[4, 2]``, and one cluster.
+    """
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.tensor(
+        [[40.0, 30.0], [40.0, 30.0], [40.0, 30.0], [40.0, 30.0]],
+        dtype=torch.float64,
+    )
+    return edge_index, node_sizes, {"alpha": [0, 1, 2]}
+
+
 def test_elk_pipeline_and_ops_are_registered() -> None:
     """Register ELK algorithms and composable ops.
 
@@ -52,6 +68,7 @@ def test_elk_pipeline_and_ops_are_registered() -> None:
     assert get_pipeline_function("elk_layered_bk") is layout_elk_layered_bk_pipeline
     assert get_pipeline_function("elk_lp") is layout_elk_lp_pipeline
     assert get_op_class("elk_prepare_graph").__name__ == "ElkPrepareGraph"
+    assert get_op_class("elk_recursive_compound").__name__ == "ElkRecursiveCompound"
     assert get_op_class("elk_place_nodes").__name__ == "ElkPlaceNodes"
 
 
@@ -162,6 +179,137 @@ def test_elk_variant_position_pins() -> None:
         )
 
 
+def test_elk_empty_clusters_preserve_flat_positions() -> None:
+    """Keep the non-compound ELK caller path byte-identical.
+
+    Returns
+    -------
+    None
+        Passing an empty cluster mapping must not engage the recursion wrapper.
+    """
+    edge_index, node_sizes = _diamond_inputs()
+
+    flat = layout_elk_pipeline(edge_index, 4, node_sizes, seed=9, random_seed=9)
+    empty_cluster = layout_elk_pipeline(
+        edge_index,
+        4,
+        node_sizes,
+        seed=9,
+        random_seed=9,
+        clusters={},
+    )
+
+    assert torch.equal(flat, empty_cluster)
+
+
+def test_elk_compound_is_byte_deterministic() -> None:
+    """Pin deterministic wrapper behavior for flat and compound rows.
+
+    Returns
+    -------
+    None
+        Repeated calls with identical inputs must produce identical tensors.
+    """
+    edge_index, node_sizes, clusters = _compound_inputs()
+
+    compound_a = layout_elk_pipeline(edge_index, 4, node_sizes, clusters=clusters, seed=7)
+    compound_b = layout_elk_pipeline(edge_index, 4, node_sizes, clusters=clusters, seed=7)
+    flat_a = layout_elk_pipeline(edge_index, 4, node_sizes, seed=7)
+    flat_b = layout_elk_pipeline(edge_index, 4, node_sizes, seed=7)
+
+    assert torch.equal(compound_a, compound_b)
+    assert torch.equal(flat_a, flat_b)
+
+
+def test_elk_compound_child_layout_uses_child_defaults() -> None:
+    """Assert separate-children recursion around the existing flat pipeline.
+
+    Returns
+    -------
+    None
+        The cluster-internal chain must match a standalone flat ELK run with
+        ELK child defaults, while the cross-hierarchy edge is ignored.
+    """
+    edge_index, node_sizes, clusters = _compound_inputs()
+    compound = layout_elk_pipeline(edge_index, 4, node_sizes, clusters=clusters, seed=99)
+    induced_child = torch.tensor(
+        [[12.0, 12.0], [72.0, 12.0], [132.0, 12.0]],
+        dtype=torch.float64,
+    )
+
+    cluster_offset = compound[0] - induced_child[0]
+    torch.testing.assert_close(compound[:3] - cluster_offset, induced_child, rtol=0.0, atol=1.0e-7)
+    assert float(compound[3, 1].item()) < float(compound[0, 1].item())
+
+
+def test_elk_compound_op_records_cross_hierarchy_drops() -> None:
+    """Pin structural diagnostics for ELK's dropped compound edges.
+
+    Returns
+    -------
+    None
+        The wrapper must report cross-hierarchy edges while retaining
+        same-container edges.
+    """
+    from dagua.layout.ops.elk_compound import ElkRecursiveCompound, _CompoundOptions
+
+    edge_index, node_sizes, clusters = _compound_inputs()
+    state = ElkRecursiveCompound(
+        _CompoundOptions(
+            direction="DOWN",
+            node_node_spacing=40.0,
+            between_layers_spacing=60.0,
+            cycle_breaking_strategy="greedy",
+            layering_strategy="network_simplex",
+            crossing_minimization_strategy="layer_sweep",
+            node_placement_strategy="brandes_koepf",
+            random_seed=3,
+            thoroughness=7,
+        )
+    ).apply(
+        LayoutProblem(
+            edge_index=edge_index,
+            num_nodes=4,
+            node_sizes=node_sizes,
+            clusters=clusters,
+            seed=3,
+        ),
+        SolveState(),
+        RuntimeContext(plan=ExecutionPlan(device="cpu")),
+    )
+
+    assert state.extras["elk_compound"]["dropped_edges"] == [(2, 3)]
+    assert state.extras["elk_compound"]["clusters"]["alpha"]["local_edges"] == [(0, 1), (1, 2)]
+
+
+def test_elk_nested_compound_recurses_before_parent_layout() -> None:
+    """Pin nested child containers as rigid boxes in their parent layout.
+
+    Returns
+    -------
+    None
+        The inner cluster layout must remain equivalent to a standalone child
+        default run even when its parent also contains a direct leaf.
+    """
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    node_sizes = torch.tensor([[40.0, 30.0], [40.0, 30.0], [40.0, 30.0]], dtype=torch.float64)
+    clusters = {"outer": [0, 1, 2], "inner": [0, 1]}
+    cluster_parents = {"inner": "outer"}
+
+    compound = layout_elk_pipeline(
+        edge_index,
+        3,
+        node_sizes,
+        clusters=clusters,
+        cluster_parents=cluster_parents,
+        seed=5,
+    )
+    inner = torch.tensor([[12.0, 12.0], [72.0, 12.0]], dtype=torch.float64)
+
+    inner_offset = compound[0] - inner[0]
+    torch.testing.assert_close(compound[:2] - inner_offset, inner, rtol=0.0, atol=1.0e-7)
+
+
 def test_layout_config_algorithm_elk_dispatches() -> None:
     """Exercise public engine dispatch for ``LayoutConfig(algorithm='elk')``.
 
@@ -187,9 +335,50 @@ def test_elk_production_pipeline_has_no_runtime_delegation() -> None:
     """
     source_paths = [
         Path(__file__).parents[1] / "dagua" / "layout" / "ops" / "elk.py",
+        Path(__file__).parents[1] / "dagua" / "layout" / "ops" / "elk_compound.py",
         Path(__file__).parents[1] / "dagua" / "layout" / "ops" / "pipelines" / "elk.py",
     ]
     source = "\n".join(path.read_text() for path in source_paths)
     assert "subprocess" not in source
     assert "ElkLayered" not in source
     assert "node_modules" not in source
+
+
+def test_layout_config_elk_named_variants_match_dedicated_wrappers() -> None:
+    """Pin registry dispatch of the ELK named variants to the direct path.
+
+    The named-variant wrappers previously used bare ``(*args, **kwargs)``
+    signatures, so the engine's signature-filtered dispatch dropped every
+    kwarg and the wrappers crashed via ``LayoutConfig(algorithm=...)``.
+
+    Returns
+    -------
+    None
+        Engine dispatch must equal the dedicated wrapper output (float32)
+        for each named variant, proving graph tensors and seed reach the
+        wrapper through the registry path.
+    """
+    variant_functions = {
+        "elk_layered_ns": layout_elk_layered_ns_pipeline,
+        "elk_layered_bk": layout_elk_layered_bk_pipeline,
+        "elk_lp": layout_elk_lp_pipeline,
+    }
+    edges = [("root", "left"), ("root", "right"), ("left", "sink"), ("right", "sink")]
+    for algorithm, variant_fn in variant_functions.items():
+        engine_positions = layout(
+            DaguaGraph.from_edge_list(edges),
+            LayoutConfig(algorithm=algorithm, seed=11),
+        )
+
+        direct_graph = DaguaGraph.from_edge_list(edges)
+        direct_graph.compute_node_sizes()
+        direct_positions = variant_fn(
+            direct_graph.edge_index,
+            direct_graph.num_nodes,
+            node_sizes=direct_graph.node_sizes,
+            seed=11,
+        ).to(torch.float32)
+
+        assert engine_positions.shape == (4, 2)
+        assert torch.isfinite(engine_positions).all()
+        assert torch.equal(engine_positions, direct_positions), algorithm

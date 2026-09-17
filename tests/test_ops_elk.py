@@ -364,3 +364,44 @@ def test_elk_prepare_accepts_direction_alias() -> None:
     state = ElkPrepareGraph(direction="TB").apply(problem, SolveState(), _context())
 
     assert state.extras["elk_graph"].direction == "DOWN"
+
+
+def test_elk_prepare_accepts_zero_element_sizes_on_empty_graph() -> None:
+    """Accept degenerate 0-element node sizes for the empty graph.
+
+    Empty graphs can carry a 0-element size tensor of shape ``[0]`` (the
+    engine computes sizes as a flat empty tensor when there are no nodes);
+    ELK preparation must not reject it.
+
+    Returns
+    -------
+    None
+        Preparation must succeed and produce an empty ELK graph.
+    """
+    problem = LayoutProblem(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=0,
+        node_sizes=torch.empty((0,), dtype=torch.float32),
+    )
+    state = ElkPrepareGraph().apply(problem, SolveState(), _context())
+
+    assert state.extras["elk_graph"].active_edges == []
+
+
+def test_elk_stress_returns_empty_positions_on_empty_graph() -> None:
+    """Return an empty ``[0, 2]`` tensor for the empty graph.
+
+    Returns
+    -------
+    None
+        ELK Stress must not crash when both nodes and sizes are empty.
+    """
+    from dagua.layout.ops.elk_secondary import layout_elk_stress
+
+    pos = layout_elk_stress(
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        num_nodes=0,
+        node_sizes=torch.empty((0,), dtype=torch.float32),
+    )
+
+    assert pos.shape == (0, 2)

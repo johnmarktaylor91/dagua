@@ -11,7 +11,7 @@ import math
 import warnings
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -747,44 +747,134 @@ def graphviz_osage_array_positions(
     out_device = torch.device("cpu") if device is None else device
     if num_nodes <= 0:
         return _empty_positions(num_nodes=num_nodes, dtype=dtype, device=out_device)
-    if node_sizes is None:
-        sizes = np.tile(np.array([[54.0, 36.0]], dtype=np.float64), (num_nodes, 1))
-    else:
-        sizes = node_sizes.detach().cpu().to(dtype=torch.float64).numpy()
-    rounded_sizes = np.round(sizes)
-    order = sorted(range(num_nodes), key=lambda node: (-rounded_sizes[node, 0], node))
-    columns = max(1, int(math.ceil(math.sqrt(num_nodes))))
-    rows = int(math.ceil(num_nodes / columns))
-
-    column_widths = np.zeros(columns, dtype=np.float64)
-    row_heights = np.zeros(rows, dtype=np.float64)
-    slots: dict[int, tuple[int, int]] = {}
-    for slot, node in enumerate(order):
-        row = slot // columns
-        column = slot % columns
-        slots[node] = (row, column)
-        column_widths[column] = max(column_widths[column], rounded_sizes[node, 0])
-        row_heights[row] = max(row_heights[row], rounded_sizes[node, 1])
-
-    x_centers = np.zeros(columns, dtype=np.float64)
-    cursor = 0.0
-    for column, width in enumerate(column_widths):
-        x_centers[column] = cursor + width / 2.0
-        cursor += width + separation
-
-    y_centers = np.zeros(rows, dtype=np.float64)
-    total_height = float(row_heights.sum() + separation * max(0, rows - 1))
-    cursor = total_height
-    for row, height in enumerate(row_heights):
-        cursor -= height
-        y_centers[row] = -(cursor + height / 2.0)
-        cursor -= separation
-
-    pos = np.zeros((num_nodes, 2), dtype=np.float64)
-    for node, (row, column) in slots.items():
-        pos[node, 0] = x_centers[column]
-        pos[node, 1] = y_centers[row]
+    sizes = np.round(_graphviz_osage_node_sizes(num_nodes=num_nodes, node_sizes=node_sizes))
+    rects = [(0.0, 0.0, float(width), float(height)) for width, height in sizes]
+    centers = graphviz_array_rects(rects=rects, margin=separation)
+    pos = centers.copy()
+    min_x = min(center[0] - width / 2.0 for center, (width, _height) in zip(centers, sizes))
+    min_y = min(center[1] - height / 2.0 for center, (_width, height) in zip(centers, sizes))
+    pos[:, 0] -= float(min_x)
+    pos[:, 1] -= float(min_y)
+    pos[:, 1] *= -1.0
     return _to_tensor(pos=pos, dtype=dtype, device=out_device)
+
+
+def _graphviz_osage_node_sizes(
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor],
+) -> np.ndarray:
+    """Return Graphviz osage node boxes in point units.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of graph nodes.
+    node_sizes : torch.Tensor | None
+        Optional node-size tensor with shape ``[N, 2]`` in points.
+
+    Returns
+    -------
+    numpy.ndarray
+        Node-size array with shape ``[N, 2]`` and ``float64`` dtype.
+    """
+    if node_sizes is None:
+        return np.tile(np.array([[54.0, 36.0]], dtype=np.float64), (num_nodes, 1))
+    return node_sizes.detach().cpu().to(dtype=torch.float64).numpy()
+
+
+def _graphviz_trunc(value: float) -> float:
+    """Truncate one coordinate the way Graphviz 7.0.5 stores ``point`` fields.
+
+    Parameters
+    ----------
+    value : float
+        Floating-point placement value from ``arrayRects``.
+
+    Returns
+    -------
+    float
+        Coordinate after C ``double`` to ``int`` conversion.
+    """
+    return float(math.trunc(value))
+
+
+def graphviz_array_rects(
+    rects: List[Tuple[float, float, float, float]],
+    margin: float = 4.0,
+) -> np.ndarray:
+    """Return Graphviz 7.0.5 ``arrayRects``-packed rectangle centers.
+
+    Parameters
+    ----------
+    rects : list[tuple[float, float, float, float]]
+        Input rectangles as ``(llx, lly, urx, ury)`` in point units. The
+        returned rows preserve this input order.
+    margin : float, default=4.0
+        Graphviz pack margin in points, added to every cell footprint.
+
+    Returns
+    -------
+    numpy.ndarray
+        Packed rectangle centers with shape ``[N, 2]`` in Graphviz's y-up
+        coordinate frame.
+
+    Notes
+    -----
+    This ports Graphviz 7.0.5 ``lib/pack/pack.c:arrayRects`` in default
+    row-major array mode: ``ceil(sqrt(N))`` columns, descending sort by
+    ``width + height`` including the margin, stable tie order on this platform,
+    centered cell placement, and integer ``point`` truncation for lower-left
+    offsets.
+    """
+    if not rects:
+        return np.zeros((0, 2), dtype=np.float64)
+
+    count = len(rects)
+    columns = max(1, int(math.ceil(math.sqrt(count))))
+    rows = int(math.ceil(count / columns))
+    widths = np.zeros(columns + 1, dtype=np.float64)
+    heights = np.zeros(rows + 1, dtype=np.float64)
+
+    footprints: List[Tuple[float, float, int]] = []
+    for index, (llx, lly, urx, ury) in enumerate(rects):
+        width = float(urx) - float(llx) + float(margin)
+        height = float(ury) - float(lly) + float(margin)
+        footprints.append((width, height, index))
+
+    sorted_footprints = sorted(footprints, key=lambda item: (-(item[0] + item[1]), item[2]))
+    slots: List[Tuple[int, int, int]] = []
+    row = 0
+    column = 0
+    for width, height, index in sorted_footprints:
+        widths[column] = max(widths[column], width)
+        heights[row] = max(heights[row], height)
+        slots.append((index, row, column))
+        column += 1
+        if column == columns:
+            column = 0
+            row += 1
+
+    cursor = 0.0
+    for column in range(columns + 1):
+        value = widths[column]
+        widths[column] = cursor
+        cursor += value
+
+    cursor = 0.0
+    for row in range(rows, 0, -1):
+        value = heights[row - 1]
+        heights[row] = cursor
+        cursor += value
+    heights[0] = cursor
+
+    centers = np.zeros((count, 2), dtype=np.float64)
+    for index, row, column in slots:
+        llx, lly, urx, ury = rects[index]
+        place_x = _graphviz_trunc((widths[column] + widths[column + 1] - urx - llx) / 2.0)
+        place_y = _graphviz_trunc((heights[row] + heights[row + 1] - ury - lly) / 2.0)
+        centers[index, 0] = place_x + (float(llx) + float(urx)) / 2.0
+        centers[index, 1] = place_y + (float(lly) + float(ury)) / 2.0
+    return centers
 
 
 @register_op
@@ -953,6 +1043,7 @@ class NetworkXSimpleLayout(Op):
 
 __all__ = [
     "NetworkXSimpleLayout",
+    "graphviz_array_rects",
     "graphviz_osage_array_positions",
     "nx_arf_positions",
     "nx_bfs_layers",

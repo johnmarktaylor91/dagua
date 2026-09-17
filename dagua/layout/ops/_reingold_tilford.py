@@ -985,13 +985,20 @@ def layout_igraph_reingold_tilford(
         roots=roots,
         rootlevel=rootlevel,
     )
-    sys.setrecursionlimit(max(sys.getrecursionlimit(), extended_count * 2 + 100))
-    layout = _layout_units(
-        edges=extended_edges,
-        num_nodes=extended_count,
-        traversal_mode=traversal_mode,
-        root=real_root,
-    )
+    # Raise the recursion limit for the recursive unit layout, then restore it
+    # so the process-wide setting does not leak past this call (WP05-F08
+    # convention, matching scc.py and coordinate.py).
+    previous_recursion_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(previous_recursion_limit, extended_count * 2 + 100))
+    try:
+        layout = _layout_units(
+            edges=extended_edges,
+            num_nodes=extended_count,
+            traversal_mode=traversal_mode,
+            root=real_root,
+        )
+    finally:
+        sys.setrecursionlimit(previous_recursion_limit)
 
     scale = 50.0 if output_scale is None else float(output_scale)
     positions = torch.zeros((num_nodes, 2), dtype=torch.float32)

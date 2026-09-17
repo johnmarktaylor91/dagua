@@ -39,6 +39,34 @@ class CompetitorBase(ABC):
     max_nodes: int = 0
     supports_clusters: bool = False
     variant_param_names: frozenset[str] = frozenset()
+    # Dotted names of modules this adapter executes but does not define
+    # (wrapper/pipeline delegates); their files join the adapter's
+    # cache-signature source closure via source_files() (dry-well R2-B3).
+    source_delegate_modules: tuple = ()
+    # Non-module artifacts this adapter executes (raw file paths, e.g. a
+    # runtime-compiled .java driver); hashed into the cache-signature closure
+    # like delegate modules (dry-well R2-B3-Fable F2b).
+    source_delegate_files: tuple = ()
+    # System-metadata key naming the shared external backend whose version
+    # keys this adapter's cache signature (e.g. "graphviz", "elk",
+    # "networkx", "igraph"). Declared ONCE on each family's base class so
+    # every present and future member inherits the version component
+    # structurally -- the old per-name table in benchmark.py silently
+    # dropped sibling aliases (dry-well R4-B3-Sol HIGH). None = no shared
+    # versioned backend (Dagua-owned engines, availability-probed backends).
+    backend_version_key: Optional[str] = None
+    # True when the adapter's substantive layout implementation is Dagua-owned
+    # code under dagua/layout/** (all pipeline reimplementations, plus
+    # adapters that defer to archived Dagua implementations). The cache
+    # signature then ALSO includes the same whole-dagua-tree source component
+    # that dagua/classic_* engines already use (_dagua_source_signature),
+    # killing the import-closure-chasing game structurally: ANY dagua source
+    # edit invalidates these rows, exactly like classic_* semantics
+    # (dry-well R2-B3-Fable F2a). Leave False for adapters whose backend is
+    # genuinely external (subprocess binaries, java, node, external ML
+    # models); those keep the cheap per-file closure and declare their
+    # dagua-side prep modules/artifacts explicitly.
+    executes_dagua_source: bool = False
 
     @abstractmethod
     def layout(
@@ -98,6 +126,78 @@ class CompetitorBase(ABC):
         """
         del variant_params
         return self.layout(graph, timeout=timeout, seed=seed)
+
+    def source_files(self) -> tuple:
+        """Dagua-owned source files forming this adapter's implementation closure.
+
+        Consumed by the benchmark cache-signature machinery
+        (``_adapter_source_signature`` in dagua/eval/benchmark.py): the bytes
+        of these files are hashed into the adapter's cache key, so editing any
+        of them invalidates the adapter's cached benchmark rows (dry-well
+        R2-B3).
+
+        Default: the defining module of every resolvable class on the
+        adapter's MRO, plus every module declared in
+        ``source_delegate_modules``. Walking the MRO (instead of just
+        ``type(self)``) makes dynamically generated classes resolve correctly:
+        a ``type(...)``-built reimplementation class reports
+        ``__module__ == "abc"`` and would hash the interpreter's stdlib
+        ``abc.py`` -- such classes are skipped (their real implementation is
+        the parent class plus delegate hooks). Adapters that delegate
+        execution to another module declare it via
+        ``source_delegate_modules`` (static delegates) or override this
+        method (dynamic delegates); non-module artifacts (e.g. a
+        runtime-compiled .java driver) are declared as raw paths via
+        ``source_delegate_files``.
+
+        Returns
+        -------
+        tuple
+            Resolved, de-duplicated ``pathlib.Path`` objects in MRO order,
+            followed by declared delegate modules.
+        """
+        import inspect
+        from importlib import import_module
+        from pathlib import Path
+
+        files: list = []
+        for klass in type(self).__mro__:
+            if getattr(klass, "__module__", None) in {None, "abc", "builtins"}:
+                # Dynamically generated classes (type(...) factories) report
+                # __module__ == "abc" and would resolve to the interpreter's
+                # stdlib abc.py (as does ABC itself); skip them -- their real
+                # implementation is covered by parent classes and delegates.
+                continue
+            try:
+                path = Path(inspect.getfile(klass)).resolve()
+            except (TypeError, OSError):
+                continue
+            if path not in files:
+                files.append(path)
+        for module_name in self.source_delegate_modules:
+            try:
+                module = import_module(module_name)
+            except ImportError:
+                continue
+            module_file = getattr(module, "__file__", None)
+            if module_file is None:
+                continue
+            try:
+                path = Path(module_file).resolve()
+            except OSError:
+                continue
+            if path not in files:
+                files.append(path)
+        for raw_path in self.source_delegate_files:
+            try:
+                path = Path(raw_path).resolve()
+                if not path.is_file():
+                    continue
+            except OSError:
+                continue
+            if path not in files:
+                files.append(path)
+        return tuple(files)
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────

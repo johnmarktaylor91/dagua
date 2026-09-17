@@ -131,9 +131,14 @@ def build_layer_index(
     Parameters
     ----------
     layer_assignments : list[int] | torch.Tensor
-        Layer IDs for each node with shape ``[N]``.
+        Layer IDs for each node with shape ``[N]``. Must be non-negative:
+        layer ``k`` maps to ``layer_offsets[k]``, so negative IDs have no
+        slot (and ``torch.bincount`` would reject them).
     device : str, default="cpu"
-        Device for the returned ``LayerIndex`` tensors.
+        Device for the returned ``LayerIndex`` tensors. This controls OUTPUT
+        placement only -- the internal argsort may still run on CUDA when
+        available and VRAM permits (intentional: GPU sort, CPU output).
+        Pass ``enable_cuda_sort=False`` to keep the computation off the GPU.
     verbose : bool, default=False
         Whether to emit CUDA activation and fallback logs.
     progress : Callable[[str], None], optional
@@ -165,6 +170,14 @@ def build_layer_index(
     else:
         n = len(layer_assignments)
         node_to_layer = torch.tensor(layer_assignments, dtype=index_dtype, device=device)
+    if n > 0:
+        min_layer = int(node_to_layer.min().item())
+        if min_layer < 0:
+            raise ValueError(
+                "build_layer_index: layer_assignments must be non-negative "
+                f"(layer k maps to layer_offsets[k]); got min={min_layer}. "
+                "Normalize rank assignments (e.g. subtract the minimum) first."
+            )
     num_layers = int(node_to_layer.max().item()) + 1 if n > 0 else 0
 
     sorted_indices: torch.Tensor

@@ -426,41 +426,6 @@ def _gem_degree_weights(
     return degrees / 2.5 + 1.0
 
 
-def _spring_lengths_by_node(
-    problem: LayoutProblem,
-    state: SolveState,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    """Resolve per-node desired spring lengths for GEM-style attraction.
-
-    Parameters
-    ----------
-    problem : LayoutProblem
-        Immutable layout inputs.
-    state : SolveState
-        Mutable solve state.
-    device : torch.device
-        Target device for the result.
-    dtype : torch.dtype
-        Target dtype for the result.
-
-    Returns
-    -------
-    torch.Tensor
-        Desired lengths with shape ``[N]``.
-    """
-    if state.spring_lengths is None:
-        return torch.full((problem.num_nodes,), 20.0, device=device, dtype=dtype)
-
-    spring_lengths = state.spring_lengths.to(device=device, dtype=dtype)
-    if spring_lengths.ndim != 1:
-        raise ValueError("state.spring_lengths must be one-dimensional.")
-    if spring_lengths.shape[0] != problem.num_nodes:
-        raise ValueError("GEM-style desired lengths require state.spring_lengths with shape [N].")
-    return spring_lengths
-
-
 def _pair_force_delta(pos: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Build pairwise displacement vectors and distances.
 
@@ -1166,73 +1131,6 @@ class UniformSpringAttraction(Op):
         updated.index_add_(0, src, contribution)
         updated.index_add_(0, dst, -contribution)
         state.forces = updated
-        return state
-
-
-@dataclass(frozen=True)
-class GraphOptApplyConfig:
-    """Configuration for :class:`GraphOptApply`.
-
-    Parameters
-    ----------
-    node_mass : float
-        Shared mass used to convert force into displacement.
-    max_sa_movement : float
-        Maximum absolute displacement per axis per iteration.
-    """
-
-    node_mass: float = 30.0
-    max_sa_movement: float = 5.0
-
-
-@register_op
-@dataclass(frozen=True)
-class GraphOptApplyDisplacement(Op):
-    """Apply GraphOpt-style clamp-to-axis-step displacement."""
-
-    config: GraphOptApplyConfig = field(default_factory=GraphOptApplyConfig)
-
-    name: ClassVar[str] = "graphopt_apply_displacement"
-    category: ClassVar[OpCategory] = OpCategory.FORCE
-    reads: ClassVar[Tuple[str, ...]] = ("pos", "forces")
-    writes: ClassVar[Tuple[str, ...]] = ("pos",)
-    requires: ClassVar[Tuple[str, ...]] = ("pos", "forces")
-
-    def apply(
-        self,
-        problem: LayoutProblem,
-        state: SolveState,
-        ctx: RuntimeContext,
-    ) -> SolveState:
-        """Update positions with a clamped force/mass step.
-
-        Parameters
-        ----------
-        problem : LayoutProblem
-            Immutable layout inputs.
-        state : SolveState
-            Mutable solve state.
-        ctx : RuntimeContext
-            Execution context.
-
-        Returns
-        -------
-        SolveState
-            State with updated positions.
-        """
-        del problem, ctx
-
-        if self.config.node_mass <= 0.0:
-            raise ValueError("GraphOptApplyDisplacement node_mass must be positive.")
-
-        positions = _require_positions(state)
-        forces = _require_forces(state)
-        movement = torch.clamp(
-            forces / float(self.config.node_mass),
-            min=-float(self.config.max_sa_movement),
-            max=float(self.config.max_sa_movement),
-        )
-        state.pos = positions + movement
         return state
 
 
@@ -2365,6 +2263,10 @@ class BarnesHutForce(Op):
         if quadtree is None:
             quadtree = state.extras.get("quadtree")
         if quadtree is None:
+            if pos.shape[0] == 0:
+                # BuildQuadTree deliberately stores ``None`` for empty inputs;
+                # with no nodes there is no repulsion to accumulate.
+                return state
             raise ValueError("BarnesHutForce requires state.quadtree or extras['quadtree'].")
 
         if isinstance(quadtree, _SFDPQuadTreeNode):
@@ -2962,6 +2864,10 @@ class GEMNodeTick(Op):
         """
         pos = _require_positions(state)
         forces = _require_forces(state)
+        if problem.num_nodes == 0:
+            # Sequential node selection pops from a permutation; empty graphs
+            # have no node to tick, so the op is a structural no-op.
+            return state
 
         node_index = _resolve_gem_node_index(problem=problem, state=state, ctx=ctx)
         degree_weights = _gem_degree_weights(

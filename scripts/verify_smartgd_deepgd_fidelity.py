@@ -112,14 +112,19 @@ def _corpus() -> list[tuple[str, torch.Tensor, int]]:
 
 
 def _reference_device() -> torch.device:
-    """Return the preferred deterministic inference device.
+    """Return the pinned deterministic inference device.
+
+    Pinned to CPU to match the benchmark adapters in
+    ``dagua/eval/competitors/neural_reference_competitor.py``: the fidelity
+    comparison must run the reference on the same device the benchmark rows
+    use, and cuda-when-available made rows machine-dependent.
 
     Returns
     -------
     torch.device
-        CUDA when available, otherwise CPU.
+        Always CPU.
     """
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device("cpu")
 
 
 def _set_deterministic(seed: int) -> None:

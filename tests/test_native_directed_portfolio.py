@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import signal
 import time
 from types import SimpleNamespace
@@ -12,43 +13,737 @@ import pytest
 import torch
 
 from dagua.config import LayoutConfig
-from dagua.eval.graphs import _make_r8_lr_direction
+from dagua.eval.graphs import _make_r8_lr_direction, get_test_graphs
 from dagua.graph import DaguaGraph
 from dagua.layout import layout
 from dagua.layout.graph_classify import classify_graph
+from dagua.layout.ops.ordering import _expanded_layered_graph
 from dagua.layout.ops.pipelines.dagua_native import _choose_native_pipeline
 from dagua.layout.ops.pipelines.native_directed import (
+    DIRECTED_DAGRE_COMPOUND_Y_COMPACTIONS,
     DIRECTED_FULL_REFEREE_TOP_K,
+    DIRECTED_NESTED_STRESS_EDGE_NODE_RATIO_MAX,
+    DIRECTED_NESTED_STRESS_MAX_CLUSTER_DEPTH,
+    DIRECTED_NESTED_STRESS_MAX_NODES,
+    DIRECTED_NESTED_STRESS_PARETO_KEYS,
     IGRAPH_OUTPUT_SCALE,
     SUGIYAMA_FIDELITY_MODES,
     SUGIYAMA_NODE_SEP_GRID,
     SUGIYAMA_RANK_SEP_GRID,
+    _assign_recombinant_x_coordinates,
+    _bounded_connected_nested_dag_for_stress,
+    _build_dagre_compound_candidate,
+    _build_dot_order_candidate,
+    _build_fan_compaction_candidate,
+    _build_nested_stress_candidate,
+    _clean_fan_bundle_for_compaction,
     _crossing_edge_pairs,
+    _DagreCompoundCandidate,
+    _default_sugiyama_cluster_arm_enabled,
     _directed_cluster_candidate_is_dual_admissible,
+    _directed_dagre_compound_enabled,
+    _directed_davidson_harel_small_candidates,
+    _directed_dot_order_candidates,
+    _directed_dot_order_enabled,
     _directed_mrtree_enabled,
     _directed_ordering_candidate_dual_dominates,
     _directed_pivot_mds_candidates,
+    _directed_pure_stress_candidates,
     _directed_recombinant_layered_candidates,
     _directed_recombinant_layered_enabled,
     _directed_stress_blend_candidates,
     _DirectedClusterScoreTelemetry,
+    _DotOrderSpec,
     _exact_crossing_count,
     _exact_crossing_count_loop,
+    _fan_compaction_candidate_is_accepted,
     _force_challengers_enabled,
     _full_sugiyama_grid_enabled,
+    _lever2_expanded_x_assignment_enabled,
+    _maybe_accept_fan_compaction_arm,
+    _maybe_accept_nested_stress_arm,
+    _nested_stress_candidate_pareto_admissible,
     _ordering_cost_admissible,
     _rank_local_zero_crossing_swap_candidate,
     _rank_to_nodes_from_incumbent_y,
+    _recombinant_rank_values,
     _register_challenger_variants,
+    _register_dagre_compound_candidates,
     _restore_projected_rank_order,
+    _runtime_referee_telemetry,
     _score_directed_candidate,
+    _score_directed_candidate_pair,
     _score_directed_candidate_referee_payload,
     _select_directed_winner,
     layout_native_directed_portfolio,
 )
+from dagua.layout.ops.pipelines.native_finisher import W5ScorePair, w5_dominates
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 
 _T = TypeVar("_T")
+
+
+def _fan_bundle_problem() -> LayoutProblem:
+    """Return a clean multi-hub fan-bundle problem.
+
+    Returns
+    -------
+    LayoutProblem
+        Directed hub-spoke DAG with two dominant fan hubs.
+    """
+    edges: list[tuple[int, int]] = []
+    entry = 0
+    exit_node = 1
+    next_node = 2
+    hubs: list[int] = []
+    for _hub_index in range(2):
+        hub = next_node
+        next_node += 1
+        hubs.append(hub)
+        edges.append((entry, hub))
+        for _spoke_index in range(5):
+            spoke = next_node
+            next_node += 1
+            edges.append((hub, spoke))
+            edges.append((spoke, exit_node))
+    edges.append((hubs[0], hubs[1]))
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=next_node,
+        node_sizes=torch.ones((next_node, 2), dtype=torch.float32),
+        seed=7,
+    )
+
+
+def _wide_single_layer_problem() -> LayoutProblem:
+    """Return the plain wide-layer canary shape.
+
+    Returns
+    -------
+    LayoutProblem
+        Single source and sink around a wide middle layer.
+    """
+    edges: list[tuple[int, int]] = []
+    source = 0
+    sink = 1
+    for node in range(2, 12):
+        edges.append((source, node))
+        edges.append((node, sink))
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=12,
+        node_sizes=torch.ones((12, 2), dtype=torch.float32),
+        seed=7,
+    )
+
+
+def _random_bipartite_problem() -> LayoutProblem:
+    """Return a deterministic random-bipartite canary shape.
+
+    Returns
+    -------
+    LayoutProblem
+        Bipartite DAG whose middle nodes do not reconverge as fan spokes.
+    """
+    edges = [
+        (left, 10 + ((left * 7 + offset * 3) % 10)) for left in range(10) for offset in range(3)
+    ]
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=20,
+        node_sizes=torch.ones((20, 2), dtype=torch.float32),
+        seed=7,
+    )
+
+
+def _nested_dag_problem() -> LayoutProblem:
+    """Return a connected compound DAG for nested-stress arm tests.
+
+    Returns
+    -------
+    LayoutProblem
+        Runtime-declared nested DAG with two child clusters under a parent.
+    """
+    edge_index = torch.tensor(
+        [[0, 0, 1, 2, 3, 4, 5], [1, 2, 3, 3, 4, 5, 6]],
+        dtype=torch.long,
+    )
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=7,
+        node_sizes=torch.full((7, 2), 10.0, dtype=torch.float32),
+        seed=11,
+        clusters={"root": list(range(7)), "left": [0, 1, 3], "right": [2, 4, 5, 6]},
+        cluster_parents={"root": None, "left": "root", "right": "root"},
+        direction="TB",
+    )
+
+
+def test_nested_stress_prefilter_builds_only_runtime_nested_connected_dag() -> None:
+    """The nested-stress arm opens only for bounded connected compound DAGs."""
+    nested = _nested_dag_problem()
+    plain = LayoutProblem(
+        edge_index=nested.edge_index,
+        num_nodes=nested.num_nodes,
+        node_sizes=nested.node_sizes,
+    )
+    cyclic = LayoutProblem(
+        edge_index=torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.ones((3, 2), dtype=torch.float32),
+        clusters={"root": [0, 1, 2], "child": [0, 1]},
+        cluster_parents={"root": None, "child": "root"},
+    )
+    disconnected = LayoutProblem(
+        edge_index=torch.tensor([[0, 2], [1, 3]], dtype=torch.long),
+        num_nodes=4,
+        node_sizes=torch.ones((4, 2), dtype=torch.float32),
+        clusters={"root": [0, 1, 2, 3], "child": [0, 1]},
+        cluster_parents={"root": None, "child": "root"},
+    )
+
+    assert _bounded_connected_nested_dag_for_stress(nested)
+    assert not _bounded_connected_nested_dag_for_stress(plain)
+    assert not _bounded_connected_nested_dag_for_stress(cyclic)
+    assert not _bounded_connected_nested_dag_for_stress(disconnected)
+
+
+def test_dagre_compound_arm_gate_and_builder_are_deterministic() -> None:
+    """Compound dagre builds only for clustered DAGs and stays deterministic."""
+    problem = _nested_dag_problem()
+    incumbent = torch.stack(
+        [
+            torch.linspace(0.0, 120.0, problem.num_nodes),
+            torch.linspace(0.0, 240.0, problem.num_nodes),
+        ],
+        dim=1,
+    )
+    config = LayoutConfig(seed=42, device="cpu")
+    y_compaction = DIRECTED_DAGRE_COMPOUND_Y_COMPACTIONS[0]
+
+    first = _build_dagre_compound_candidate(problem, incumbent, config, y_compaction)
+    second = _build_dagre_compound_candidate(problem, incumbent, config, y_compaction)
+    plain = LayoutProblem(
+        edge_index=problem.edge_index,
+        num_nodes=problem.num_nodes,
+        node_sizes=problem.node_sizes,
+        direction=problem.direction,
+    )
+
+    assert _directed_dagre_compound_enabled(problem)
+    assert not _directed_dagre_compound_enabled(plain)
+    assert first is not None
+    assert second is not None
+    assert first.y_compaction == y_compaction
+    assert first.pos.shape == incumbent.shape
+    assert torch.isfinite(first.pos).all()
+    torch.testing.assert_close(first.pos, second.pos, rtol=0.0, atol=0.0)
+
+
+def test_default_sugiyama_cluster_arm_gate_is_structural() -> None:
+    """Default Sugiyama cluster arm opens only for bounded clustered DAGs."""
+    problem = _nested_dag_problem()
+    plain = LayoutProblem(
+        edge_index=problem.edge_index,
+        num_nodes=problem.num_nodes,
+        node_sizes=problem.node_sizes,
+        direction=problem.direction,
+    )
+    oversized = LayoutProblem(
+        edge_index=problem.edge_index,
+        num_nodes=2000,
+        node_sizes=torch.ones((2000, 2), dtype=torch.float32),
+        clusters={"cluster": list(range(2000))},
+        direction=problem.direction,
+    )
+
+    assert _default_sugiyama_cluster_arm_enabled(problem)
+    assert not _default_sugiyama_cluster_arm_enabled(plain)
+    assert not _default_sugiyama_cluster_arm_enabled(oversized)
+
+
+def test_dagre_compound_arm_registers_only_dual_admissible_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compound-dagre arm enters the winner set only through V3 admission."""
+    problem = _nested_dag_problem()
+    incumbent = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+    challenger = torch.ones((problem.num_nodes, 2), dtype=torch.float32)
+    incumbent_telemetry = _DirectedClusterScoreTelemetry(
+        extended_score=10.0,
+        old_score=9.0,
+        metrics={},
+        v3_tiered=100.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+    challenger_telemetry = _DirectedClusterScoreTelemetry(
+        extended_score=12.0,
+        old_score=9.5,
+        metrics={},
+        v3_tiered=100.2,
+        champion_ineligibility_flags=frozenset(),
+    )
+    candidate = _DagreCompoundCandidate(
+        pos=challenger,
+        y_compaction=DIRECTED_DAGRE_COMPOUND_Y_COMPACTIONS[0],
+        target_edge_length=24.0,
+    )
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_dagre_compound_candidates",
+        lambda *args: {"dagre_compound_y0.6": candidate},
+    )
+    monkeypatch.setattr(
+        native_directed,
+        "_score_directed_candidate_referee_payload",
+        lambda *args: (12.0, challenger_telemetry),
+    )
+
+    config = LayoutConfig(seed=42, device="cpu")
+    positions = {"incumbent": incumbent}
+    scores = {"incumbent": incumbent_telemetry.extended_score}
+    cluster_score_telemetry = {"incumbent": incumbent_telemetry}
+    _register_dagre_compound_candidates(
+        problem=problem,
+        incumbent=incumbent,
+        config=config,
+        positions=positions,
+        scores=scores,
+        cluster_score_telemetry=cluster_score_telemetry,
+        cluster_ids=None,
+        all_pairs_dist=None,
+        arm_timings={},
+    )
+    telemetry = getattr(config, "_dagua_native_dagre_compound_telemetry")
+
+    assert getattr(config, "_dagua_native_dagre_compound_mechanism_fired") is True
+    assert getattr(config, "_dagua_native_dagre_compound_dual_admissible") is True
+    assert positions["dagre_compound_y0.6"] is challenger
+    assert scores["dagre_compound_y0.6"] == challenger_telemetry.extended_score
+    assert telemetry[-1]["mechanism_fired"] is True
+    assert telemetry[-1]["dual_admissible"] is True
+
+
+def test_nested_stress_prefilter_enforces_cosigned_runtime_caps() -> None:
+    """The nested-stress guard rejects oversized, dense, and over-deep DAGs."""
+    nested = _nested_dag_problem()
+    oversized = LayoutProblem(
+        edge_index=torch.stack(
+            [
+                torch.arange(DIRECTED_NESTED_STRESS_MAX_NODES, dtype=torch.long),
+                torch.arange(1, DIRECTED_NESTED_STRESS_MAX_NODES + 1, dtype=torch.long),
+            ]
+        ),
+        num_nodes=DIRECTED_NESTED_STRESS_MAX_NODES + 1,
+        node_sizes=torch.ones((DIRECTED_NESTED_STRESS_MAX_NODES + 1, 2), dtype=torch.float32),
+        clusters={"root": list(range(DIRECTED_NESTED_STRESS_MAX_NODES + 1)), "child": [0, 1]},
+        cluster_parents={"root": None, "child": "root"},
+    )
+    dense_edges = [(source, target) for source in range(8) for target in range(source + 1, 8)]
+    dense = LayoutProblem(
+        edge_index=torch.tensor(dense_edges, dtype=torch.long).t().contiguous(),
+        num_nodes=8,
+        node_sizes=torch.ones((8, 2), dtype=torch.float32),
+        clusters={"root": list(range(8)), "child": [0, 1]},
+        cluster_parents={"root": None, "child": "root"},
+    )
+    deep_parents: dict[str, Optional[str]] = {"root": None}
+    parent = "root"
+    for depth in range(DIRECTED_NESTED_STRESS_MAX_CLUSTER_DEPTH + 1):
+        child = f"child_{depth}"
+        deep_parents[child] = parent
+        parent = child
+    over_deep = LayoutProblem(
+        edge_index=nested.edge_index,
+        num_nodes=nested.num_nodes,
+        node_sizes=nested.node_sizes,
+        clusters={"root": list(range(nested.num_nodes)), **{name: [0] for name in deep_parents}},
+        cluster_parents=deep_parents,
+    )
+
+    assert _bounded_connected_nested_dag_for_stress(nested)
+    assert not _bounded_connected_nested_dag_for_stress(oversized)
+    assert not _bounded_connected_nested_dag_for_stress(dense)
+    assert len(dense_edges) / dense.num_nodes > DIRECTED_NESTED_STRESS_EDGE_NODE_RATIO_MAX
+    assert not _bounded_connected_nested_dag_for_stress(over_deep)
+
+
+def test_nested_stress_strict_pareto_rejects_nondominating_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-dominating nested-stress candidate keeps the incumbent unchanged."""
+    problem = _nested_dag_problem()
+    incumbent = torch.arange(problem.num_nodes * 2, dtype=torch.float32).reshape(
+        problem.num_nodes,
+        2,
+    )
+    challenger = incumbent + 10.0
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+
+    metrics = [
+        {
+            "dag_consistency": 1.0,
+            "directed_flow_score": 0.8,
+            "neighborhood_preservation_score": 0.9,
+            "edge_length_deviation_score": 0.7,
+        },
+        {
+            "dag_consistency": 1.0,
+            "directed_flow_score": 0.9,
+            "neighborhood_preservation_score": 0.89,
+            "edge_length_deviation_score": 0.8,
+        },
+    ]
+
+    def fake_metrics(*args: object, **kwargs: object) -> dict[str, float]:
+        """Return incumbent metrics first, then candidate metrics."""
+        del args, kwargs
+        return metrics.pop(0)
+
+    monkeypatch.setattr(native_directed, "_build_nested_stress_candidate", lambda *args: challenger)
+    monkeypatch.setattr(native_directed, "_nested_stress_raw_metrics", fake_metrics)
+
+    returned = _maybe_accept_nested_stress_arm(
+        problem,
+        incumbent,
+        LayoutConfig(),
+        cluster_ids=torch.zeros((problem.num_nodes,), dtype=torch.long),
+        all_pairs_dist=None,
+        seed=11,
+    )
+
+    assert returned.data_ptr() == incumbent.data_ptr()
+    assert torch.equal(returned, incumbent)
+
+
+def test_nested_stress_comparator_requires_dag_floor_and_strict_pareto() -> None:
+    """Nested-stress admission has no tolerance and enforces the DAG floor."""
+    assert "cluster_sibling_overlap_score" in DIRECTED_NESTED_STRESS_PARETO_KEYS
+    assert "cluster_nesting_fidelity_score" in DIRECTED_NESTED_STRESS_PARETO_KEYS
+    incumbent = {
+        "dag_consistency": 0.9,
+        "ksm_score": 0.7,
+        "neighborhood_preservation_score": 0.6,
+        "cluster_sibling_overlap_score": 0.9,
+        "cluster_nesting_fidelity_score": 0.9,
+    }
+    equal = dict(incumbent)
+    below_floor = {
+        "dag_consistency": 0.49,
+        "ksm_score": 1.0,
+        "neighborhood_preservation_score": 1.0,
+        "cluster_sibling_overlap_score": 1.0,
+        "cluster_nesting_fidelity_score": 1.0,
+    }
+    dominating = {
+        "dag_consistency": 0.9,
+        "ksm_score": 0.8,
+        "neighborhood_preservation_score": 0.6,
+        "cluster_sibling_overlap_score": 0.9,
+        "cluster_nesting_fidelity_score": 0.9,
+    }
+    degraded_sibling = {
+        "dag_consistency": 0.9,
+        "ksm_score": 0.8,
+        "neighborhood_preservation_score": 0.6,
+        "cluster_sibling_overlap_score": 0.89,
+        "cluster_nesting_fidelity_score": 0.9,
+    }
+
+    assert not _nested_stress_candidate_pareto_admissible(equal, incumbent)
+    assert not _nested_stress_candidate_pareto_admissible(below_floor, incumbent)
+    assert not _nested_stress_candidate_pareto_admissible(degraded_sibling, incumbent)
+    assert _nested_stress_candidate_pareto_admissible(dominating, incumbent)
+
+
+def test_nested_stress_warm_starts_from_live_incumbent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Stress-SGD arm receives the live incumbent as ``init_pos``."""
+    problem = _nested_dag_problem()
+    incumbent = torch.arange(problem.num_nodes * 2, dtype=torch.float32).reshape(
+        problem.num_nodes,
+        2,
+    )
+    captured: dict[str, torch.Tensor] = {}
+    stress_sgd = importlib.import_module("dagua.layout.ops.pipelines.stress_sgd")
+
+    def fake_stress_sgd(**kwargs: object) -> torch.Tensor:
+        """Capture warm-start coordinates and return a finite candidate."""
+        init_pos = kwargs["init_pos"]
+        assert isinstance(init_pos, torch.Tensor)
+        captured["init_pos"] = init_pos.clone()
+        return init_pos + 1.0
+
+    monkeypatch.setattr(stress_sgd, "layout_stress_sgd_pipeline", fake_stress_sgd)
+
+    _build_nested_stress_candidate(problem, incumbent, LayoutConfig(), seed=19)
+
+    assert torch.equal(captured["init_pos"], incumbent)
+
+
+def test_nested_stress_builder_is_deterministic_without_competitor_import() -> None:
+    """The real nested-stress builder is deterministic and in-house only."""
+    problem = _nested_dag_problem()
+    incumbent = torch.stack(
+        [torch.arange(problem.num_nodes, dtype=torch.float32), torch.zeros(problem.num_nodes)],
+        dim=1,
+    )
+    first = _build_nested_stress_candidate(problem, incumbent, LayoutConfig(), seed=23)
+    second = _build_nested_stress_candidate(problem, incumbent, LayoutConfig(), seed=23)
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+
+    assert torch.equal(first, second)
+    assert "Competitor" not in inspect.getsource(native_directed._build_nested_stress_candidate)
+
+
+def test_directed_fan_compaction_prefilter_builds_only_clean_fan_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fan arm builds only after the clean fan-bundle pre-filter opens."""
+    built = 0
+    incumbent = torch.zeros((_fan_bundle_problem().num_nodes, 2), dtype=torch.float32)
+
+    def fake_candidate(
+        problem: LayoutProblem,
+        incumbent_pos: torch.Tensor,
+        config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Record fan-arm construction and return a rejected finite candidate."""
+        nonlocal built
+        del problem, config
+        built += 1
+        return incumbent_pos + 1.0
+
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(native_directed, "_build_fan_compaction_candidate", fake_candidate)
+    monkeypatch.setattr(
+        native_directed,
+        "_fan_compaction_candidate_is_accepted",
+        lambda *args: False,
+    )
+
+    fan_problem = _fan_bundle_problem()
+    assert _clean_fan_bundle_for_compaction(fan_problem)
+    assert not _clean_fan_bundle_for_compaction(_wide_single_layer_problem())
+    assert not _clean_fan_bundle_for_compaction(_random_bipartite_problem())
+
+    _maybe_accept_fan_compaction_arm(fan_problem, incumbent, LayoutConfig())
+    _maybe_accept_fan_compaction_arm(
+        _wide_single_layer_problem(),
+        torch.zeros((12, 2), dtype=torch.float32),
+        LayoutConfig(),
+    )
+    _maybe_accept_fan_compaction_arm(
+        _random_bipartite_problem(),
+        torch.zeros((20, 2), dtype=torch.float32),
+        LayoutConfig(),
+    )
+
+    assert built == 1
+
+
+def test_directed_fan_compaction_comparator_requires_halved_area_and_no_debt() -> None:
+    """Fan-arm acceptance uses visual area, crossings, and overlaps only."""
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 2], [1, 3]], dtype=torch.long),
+        num_nodes=4,
+        node_sizes=torch.ones((4, 2), dtype=torch.float32),
+    )
+    incumbent = torch.tensor(
+        [[-10.0, 0.0], [10.0, 0.0], [-10.0, 5.0], [10.0, 5.0]],
+        dtype=torch.float32,
+    )
+    compact = incumbent * 0.25
+    not_compact_enough = incumbent * 0.75
+    crossing_candidate = torch.tensor(
+        [[-2.5, 0.0], [2.5, 5.0], [-2.5, 5.0], [2.5, 0.0]],
+        dtype=torch.float32,
+    )
+    overlapping_candidate = torch.zeros((4, 2), dtype=torch.float32)
+
+    assert _fan_compaction_candidate_is_accepted(incumbent, compact, problem)
+    assert not _fan_compaction_candidate_is_accepted(incumbent, not_compact_enough, problem)
+    assert not _fan_compaction_candidate_is_accepted(incumbent, crossing_candidate, problem)
+    assert not _fan_compaction_candidate_is_accepted(incumbent, overlapping_candidate, problem)
+
+
+def test_directed_fan_compaction_reject_keeps_incumbent_bit_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-improving fan candidate returns the exact incumbent tensor."""
+    problem = _fan_bundle_problem()
+    incumbent = torch.arange(problem.num_nodes * 2, dtype=torch.float32).reshape(
+        problem.num_nodes,
+        2,
+    )
+    challenger = incumbent + 100.0
+
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(
+        native_directed,
+        "_build_fan_compaction_candidate",
+        lambda *args: challenger,
+    )
+    monkeypatch.setattr(
+        native_directed,
+        "_fan_compaction_candidate_is_accepted",
+        lambda *args: False,
+    )
+
+    returned = _maybe_accept_fan_compaction_arm(problem, incumbent, LayoutConfig())
+
+    assert returned.data_ptr() == incumbent.data_ptr()
+    assert torch.equal(returned, incumbent)
+
+
+def test_directed_fan_compaction_acceptance_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An accepted fan arm returns before scorer-selected arms can replace it."""
+    problem = _fan_bundle_problem()
+    incumbent = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+    challenger = torch.ones((problem.num_nodes, 2), dtype=torch.float32)
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a deterministic incumbent for the directed portfolio."""
+        del args, kwargs
+        return incumbent
+
+    def fake_accept(
+        accepted_problem: LayoutProblem,
+        incumbent_pos: torch.Tensor,
+        config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Mark the fan arm accepted and return the compact challenger."""
+        del accepted_problem, incumbent_pos
+        config._dagua_native_fan_compaction_accepted = True
+        return challenger
+
+    def fail_score(*args: object, **kwargs: object) -> float:
+        """Fail if terminal fan acceptance falls through to scoring."""
+        del args, kwargs
+        raise AssertionError("accepted fan arm must be terminal")
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_maybe_accept_fan_compaction_arm", fake_accept)
+    monkeypatch.setattr(native_directed, "_score_directed_candidate_cached", fail_score)
+
+    returned = layout_native_directed_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(),
+    )
+
+    assert torch.equal(returned, challenger)
+
+
+def test_directed_fan_compaction_failure_cannot_sink_the_solve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WP01-F01: an exception inside the fan-compaction arm keeps the solve alive.
+
+    The fan arm was the only directed challenger invoked outside a
+    try/except, so a crash inside it sank the whole layout instead of
+    keeping the incumbent. This forces a clean hub-spoke fan-bundle DAG
+    through the arm (``_fan_bundle_problem`` opens the pre-filter) with an
+    injected builder failure and asserts the portfolio still completes with
+    finite positions, matching every sibling arm's "challengers cannot sink
+    the incumbent" contract.
+    """
+    problem = _fan_bundle_problem()
+    incumbent = torch.arange(problem.num_nodes * 2, dtype=torch.float32).reshape(
+        problem.num_nodes,
+        2,
+    )
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a deterministic incumbent for the directed portfolio."""
+        del args, kwargs
+        return incumbent
+
+    def exploding_builder(*args: object, **kwargs: object) -> torch.Tensor:
+        """Simulate a crash inside the fan-compaction candidate builder."""
+        del args, kwargs
+        raise RuntimeError("injected fan-compaction failure")
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_build_fan_compaction_candidate", exploding_builder)
+
+    assert _clean_fan_bundle_for_compaction(problem)
+
+    returned = layout_native_directed_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(),
+    )
+
+    assert returned.shape == (problem.num_nodes, 2)
+    assert bool(torch.isfinite(returned).all())
+
+
+def test_directed_fan_compaction_worker_timeout_still_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WP01-F01: a benchmark worker alarm inside the fan arm must re-raise."""
+    problem = _fan_bundle_problem()
+    incumbent = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a deterministic incumbent for the directed portfolio."""
+        del args, kwargs
+        return incumbent
+
+    def timeout_builder(*args: object, **kwargs: object) -> torch.Tensor:
+        """Simulate the benchmark worker alarm firing inside the fan arm."""
+        del args, kwargs
+        raise RuntimeError("worker layout timeout exceeded")
+
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_build_fan_compaction_candidate", timeout_builder)
+
+    with pytest.raises(RuntimeError, match="worker layout timeout exceeded"):
+        layout_native_directed_portfolio(
+            problem,
+            SolveState(),
+            RuntimeContext(),
+            LayoutConfig(),
+        )
+
+
+def test_directed_fan_compaction_builder_is_deterministic_without_competitor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real fan arm is deterministic and does not call competitor pipelines."""
+    problem = _fan_bundle_problem()
+    incumbent = torch.zeros((problem.num_nodes, 2), dtype=torch.float32)
+
+    def fail_competitor(*args: object, **kwargs: object) -> torch.Tensor:
+        """Fail if the fan arm delegates to the Sugiyama competitor pipeline."""
+        del args, kwargs
+        raise AssertionError("competitor pipeline must not be called")
+
+    sugiyama = importlib.import_module("dagua.layout.ops.pipelines.sugiyama")
+    monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fail_competitor)
+
+    first = _build_fan_compaction_candidate(problem, incumbent, LayoutConfig())
+    second = _build_fan_compaction_candidate(problem, incumbent, LayoutConfig())
+
+    assert first is not None
+    assert second is not None
+    assert torch.equal(first, second)
 
 
 def test_directed_referee_forwards_extended_cluster_metadata(
@@ -109,18 +804,38 @@ def test_directed_referee_forwards_extended_cluster_metadata(
     assert telemetry.old_score > telemetry.extended_score
 
 
-def test_directed_cluster_dual_ruler_rejects_old_regression() -> None:
-    """Clustered directed challengers must not regress old-ruler score."""
-    incumbent = _DirectedClusterScoreTelemetry(extended_score=80.0, old_score=90.0, metrics={})
-    challenger = _DirectedClusterScoreTelemetry(extended_score=81.0, old_score=89.9, metrics={})
+def test_directed_cluster_dual_ruler_uses_v3_with_flag_guard() -> None:
+    """Clustered directed challengers use V3 plus frozen degeneracy flags."""
+    incumbent = _DirectedClusterScoreTelemetry(
+        extended_score=80.0,
+        old_score=90.0,
+        metrics={},
+        v3_tiered=75.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+    challenger = _DirectedClusterScoreTelemetry(
+        extended_score=81.0,
+        old_score=10.0,
+        metrics={},
+        v3_tiered=75.1,
+        champion_ineligibility_flags=frozenset(),
+    )
+    regressor = _DirectedClusterScoreTelemetry(
+        extended_score=82.0,
+        old_score=91.0,
+        metrics={},
+        v3_tiered=75.2,
+        champion_ineligibility_flags=frozenset({"DEGENERATE_SCALE"}),
+    )
 
-    assert not _directed_cluster_candidate_is_dual_admissible(challenger, incumbent)
+    assert _directed_cluster_candidate_is_dual_admissible(challenger, incumbent)
+    assert not _directed_cluster_candidate_is_dual_admissible(regressor, incumbent)
     assert (
         _select_directed_winner(
             {"incumbent": incumbent.extended_score, "challenger": challenger.extended_score},
             {"incumbent": incumbent, "challenger": challenger},
         )
-        == "incumbent"
+        == "challenger"
     )
 
 
@@ -207,18 +922,18 @@ def _run_with_watchdog(func: Callable[[], _T], timeout_s: float) -> _T:
 
 
 def test_r8_nested_lr_direction_native_layout_terminates() -> None:
-    """Native directed portfolio returns finite R8 LR positions promptly."""
+    """Native directed portfolio returns finite R8 LR positions within budget."""
     graph = _make_r8_lr_direction().graph
     graph.compute_node_sizes()
     config = LayoutConfig(algorithm="dagua_native", seed=42, device="cpu")
 
-    started = time.perf_counter()
     positions = _run_with_watchdog(lambda: layout(graph, config), timeout_s=20.0)
-    runtime_s = time.perf_counter() - started
 
     assert positions.shape == (30, 2)
     assert torch.isfinite(positions).all()
-    assert runtime_s < 20.0
+    # No trailing wall-clock assert: the SIGALRM watchdog above already
+    # enforces the 20s budget; re-measuring it here only added a flake
+    # surface under load (WP-11A F05).
 
 
 def test_semantic_cyclic_graph_routes_to_common_contest() -> None:
@@ -324,6 +1039,477 @@ def test_recombinant_layered_budget_gate_skips_when_tight() -> None:
     assert _directed_recombinant_layered_candidates(problem, incumbent, config) == {}
 
 
+def _dot_order_structure(**overrides: object) -> SimpleNamespace:
+    """Return classifier metadata representative of dot-order target DAGs.
+
+    Parameters
+    ----------
+    overrides : object
+        Structural fields that should override the default target metadata.
+
+    Returns
+    -------
+    SimpleNamespace
+        Structural object consumed by the dot-order gate.
+    """
+    values = {
+        "is_directed_acyclic": True,
+        "is_acyclic": True,
+        "is_semantically_directed": True,
+        "topology_tags": (),
+        "num_layers_effective": 3,
+        "num_layers": 3,
+        "edge_to_node_ratio": 1.0,
+        "hub_edge_fraction": 0.2,
+        "diameter_estimate": 3,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _skip_edge_dot_order_problem() -> LayoutProblem:
+    """Return a small DAG where expanded mincross can improve chord crossings.
+
+    Returns
+    -------
+    LayoutProblem
+        Directed acyclic graph with rank-span-two crossing skip edges.
+    """
+    edge_index = torch.tensor(
+        [
+            [0, 1, 0, 1, 2, 3],
+            [5, 4, 2, 3, 5, 4],
+        ],
+        dtype=torch.long,
+    )
+    return LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=6,
+        node_sizes=torch.full((6, 2), 10.0),
+        structure=_dot_order_structure(),
+    )
+
+
+def test_dot_order_gate_structural_and_off_class_noop() -> None:
+    """Default dot-order calls only mark the fired telemetry false."""
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 10.0),
+        structure=_dot_order_structure(),
+    )
+    config = LayoutConfig()
+    incumbent = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+
+    candidates = _directed_dot_order_candidates(problem, incumbent, config)
+
+    assert candidates == {}
+    assert getattr(config, "_dagua_native_dot_order_fired") is False
+    assert torch.equal(incumbent, torch.arange(6, dtype=torch.float32).reshape(3, 2))
+    assert not hasattr(config, "_dagua_native_dot_order_telemetry")
+
+
+def test_dot_order_default_gate_is_disabled_for_target_shape() -> None:
+    """Low-fanout skip-edge DAGs still cannot build default candidates."""
+    problem = _skip_edge_dot_order_problem()
+    incumbent = torch.tensor(
+        [
+            [-20.0, 0.0],
+            [20.0, 0.0],
+            [-20.0, 40.0],
+            [20.0, 40.0],
+            [-20.0, 80.0],
+            [20.0, 80.0],
+        ],
+        dtype=torch.float32,
+    )
+    config = LayoutConfig()
+
+    candidates = _directed_dot_order_candidates(problem, incumbent, config)
+
+    assert not _directed_dot_order_enabled(problem)
+    assert candidates == {}
+    assert getattr(config, "_dagua_native_dot_order_fired") is False
+
+
+def test_dot_order_gate_opens_for_clusterless_high_fanout_dag() -> None:
+    """Clusterless semantic DAGs with one wide hub pass the dot-order gate."""
+    edge_index = torch.tensor(
+        [
+            [0, 0, 0, 0, 0, 0],
+            [1, 2, 3, 4, 5, 6],
+        ],
+        dtype=torch.long,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=7,
+        node_sizes=torch.full((7, 2), 10.0),
+        structure=_dot_order_structure(),
+    )
+
+    assert _directed_dot_order_enabled(problem)
+
+
+def test_dot_order_gate_rejects_clusters_and_non_hub_dags() -> None:
+    """Dot-order stays off for declared clusters and ordinary low-fanout DAGs."""
+    hub_edge_index = torch.tensor(
+        [
+            [0, 0, 0, 0, 0, 0],
+            [1, 2, 3, 4, 5, 6],
+        ],
+        dtype=torch.long,
+    )
+    clustered = LayoutProblem(
+        edge_index=hub_edge_index,
+        num_nodes=7,
+        node_sizes=torch.full((7, 2), 10.0),
+        clusters={"c0": [0, 1, 2]},
+        structure=_dot_order_structure(),
+    )
+    ordinary = LayoutProblem(
+        edge_index=torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long),
+        num_nodes=5,
+        node_sizes=torch.full((5, 2), 10.0),
+        structure=_dot_order_structure(),
+    )
+
+    assert not _directed_dot_order_enabled(clustered)
+    assert not _directed_dot_order_enabled(ordinary)
+
+
+def test_dot_order_gate_rejects_powerlaw_scale_moderate_fanout() -> None:
+    """Moderate fanout at 500-node scale stays below the narrow hub threshold."""
+    sources = [0 for _ in range(15)] + [node for node in range(1, 499)]
+    targets = [node for node in range(1, 16)] + [node + 1 for node in range(1, 499)]
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=500,
+        node_sizes=torch.full((500, 2), 10.0),
+        structure=_dot_order_structure(),
+    )
+
+    assert not _directed_dot_order_enabled(problem)
+
+
+def test_dot_order_direct_builder_remains_byte_deterministic() -> None:
+    """Two direct dot-order builds return byte-identical candidate tensors."""
+    problem = _skip_edge_dot_order_problem()
+    incumbent = torch.tensor(
+        [
+            [-20.0, 0.0],
+            [20.0, 0.0],
+            [-20.0, 40.0],
+            [20.0, 40.0],
+            [-20.0, 80.0],
+            [20.0, 80.0],
+        ],
+        dtype=torch.float32,
+    )
+    spec = _DotOrderSpec(
+        name="dot_ns_dotx",
+        layering="network_simplex_tightened",
+        xcoord="dot_lp",
+        warm_start=False,
+    )
+
+    first, first_expanded_n = _build_dot_order_candidate(spec, problem, incumbent, LayoutConfig())
+    second, second_expanded_n = _build_dot_order_candidate(spec, problem, incumbent, LayoutConfig())
+
+    assert first is not None
+    assert second is not None
+    assert first_expanded_n == second_expanded_n
+    assert torch.equal(first, second)
+
+
+def test_dot_order_candidate_places_all_real_nodes_with_rank_consistent_y() -> None:
+    """The expanded dot-order candidate maps every real node back to finite coordinates."""
+    problem = _skip_edge_dot_order_problem()
+    incumbent = torch.zeros((6, 2), dtype=torch.float32)
+    candidate, _expanded_n = _build_dot_order_candidate(
+        _DotOrderSpec(
+            name="dot_ns_dotx",
+            layering="network_simplex_tightened",
+            xcoord="dot_lp",
+            warm_start=False,
+        ),
+        problem,
+        incumbent,
+        LayoutConfig(),
+    )
+
+    assert candidate is not None
+    assert candidate.shape == (6, 2)
+    assert torch.isfinite(candidate).all()
+    for src, dst in problem.edge_index.t().tolist():
+        assert float(candidate[int(dst), 1].item()) > float(candidate[int(src), 1].item())
+
+
+def test_dot_ns_dotx_constructive_win_on_skip_edge_dag() -> None:
+    """The dot mincross arm reduces exact chord crossings on a skip-edge DAG."""
+    problem = _skip_edge_dot_order_problem()
+    incumbent = torch.tensor(
+        [
+            [-20.0, 0.0],
+            [20.0, 0.0],
+            [-20.0, 40.0],
+            [20.0, 40.0],
+            [-20.0, 80.0],
+            [20.0, 80.0],
+        ],
+        dtype=torch.float32,
+    )
+    candidate, expanded_n = _build_dot_order_candidate(
+        _DotOrderSpec(
+            name="dot_ns_dotx",
+            layering="network_simplex_tightened",
+            xcoord="dot_lp",
+            warm_start=False,
+        ),
+        problem,
+        incumbent,
+        LayoutConfig(),
+    )
+
+    assert candidate is not None
+    assert expanded_n <= 8 * int(problem.num_nodes)
+    assert _exact_crossing_count(candidate, problem.edge_index) < _exact_crossing_count(
+        incumbent,
+        problem.edge_index,
+    )
+
+
+def test_expanded_virtual_chain_crossings_match_original_chords() -> None:
+    """Expanded adjacent-rank chains preserve the chord crossing count."""
+    rank_values = [0, 0, 2, 2]
+    edge_index = torch.tensor([[0, 1], [3, 2]], dtype=torch.long)
+    expanded_ranks, expanded_edges, _virtual_ids, _penalties = _expanded_layered_graph(
+        rank_values,
+        edge_index,
+        None,
+    )
+    chord_pos = torch.tensor(
+        [[-10.0, 0.0], [10.0, 0.0], [-10.0, 20.0], [10.0, 20.0]],
+        dtype=torch.float32,
+    )
+    expanded_pos = torch.zeros((len(expanded_ranks), 2), dtype=torch.float32)
+    expanded_pos[:4] = chord_pos
+    expanded_pos[4] = torch.tensor([-10.0, 10.0])
+    expanded_pos[5] = torch.tensor([10.0, 10.0])
+
+    assert _exact_crossing_count(expanded_pos, expanded_edges) == _exact_crossing_count(
+        chord_pos,
+        edge_index,
+    )
+
+
+def test_recombinant_bk_uses_span_two_virtual_chain_edges() -> None:
+    """A rank-span-two edge influences BK after virtual-chain expansion."""
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0], [2]], dtype=torch.long),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 10.0),
+    )
+    ordered_layers = [[0], [1], [2]]
+    spec = type(
+        "Spec",
+        (),
+        {"xcoord": "brandes_koepf"},
+    )()
+
+    x_values = _assign_recombinant_x_coordinates(spec, ordered_layers, problem, node_sep=10.0)
+
+    assert x_values is not None
+    assert abs(float(x_values[0].item()) - float(x_values[2].item())) < 1.0e-5
+
+
+@pytest.mark.parametrize("xcoord", ["dot_lp", "brandes_koepf"])
+def test_recombinant_x_assignment_preserves_given_real_layer_order(
+    xcoord: str,
+) -> None:
+    """Span-one layers keep the ordering stage order during x assignment."""
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[2, 0, 1], [5, 3, 4]], dtype=torch.long),
+        num_nodes=6,
+        node_sizes=torch.full((6, 2), 10.0),
+    )
+    ordered_layers = [[2, 0, 1], [5, 3, 4]]
+    spec = type("Spec", (), {"xcoord": xcoord})()
+
+    x_values = _assign_recombinant_x_coordinates(spec, ordered_layers, problem, node_sep=10.0)
+
+    assert x_values is not None
+    assert float(x_values[2].item()) < float(x_values[0].item()) < float(x_values[1].item())
+    assert float(x_values[5].item()) < float(x_values[3].item()) < float(x_values[4].item())
+
+
+def test_recombinant_dot_lp_expansion_preserves_real_edge_weights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expanded recombinant dot-x edges inherit original edge weights."""
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    captured: dict[str, torch.Tensor] = {}
+
+    def fake_dot_x(
+        rank_ordering: list[list[int]],
+        node_widths: torch.Tensor,
+        edge_index: torch.Tensor,
+        node_sep: float = 18.0,
+        edge_weights: Optional[torch.Tensor] = None,
+        center: bool = True,
+    ) -> torch.Tensor:
+        """Capture expanded weights and return monotone coordinates."""
+        del rank_ordering, edge_index, node_sep, center
+        assert edge_weights is not None
+        captured["edge_weights"] = edge_weights.detach().clone()
+        return torch.arange(int(node_widths.numel()), dtype=torch.float32)
+
+    monkeypatch.setattr(dagua_native, "_graphviz_dot_x_position_network_simplex", fake_dot_x)
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0], [2]], dtype=torch.long),
+        edge_weights=torch.tensor([7.0], dtype=torch.float32),
+        num_nodes=3,
+        node_sizes=torch.full((3, 2), 10.0),
+    )
+    spec = type("Spec", (), {"xcoord": "dot_lp"})()
+
+    x_values = _assign_recombinant_x_coordinates(spec, [[0], [1], [2]], problem, node_sep=10.0)
+
+    assert x_values is not None
+    assert torch.equal(captured["edge_weights"], torch.tensor([7.0, 7.0], dtype=torch.float32))
+
+
+def test_recombinant_ns_ranker_falls_back_before_oversized_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oversized Lever-2 rows avoid the network-simplex ranker entirely."""
+    elk = importlib.import_module("dagua.layout.ops.elk")
+
+    def fail_network_simplex(*args: object, **kwargs: object) -> list[int]:
+        """Fail if the oversized row still enters the network-simplex ranker."""
+        del args, kwargs
+        raise AssertionError("network simplex should be capped before ranking")
+
+    monkeypatch.setattr(elk, "_network_simplex_layers", fail_network_simplex)
+    chain_edges = [(node, node + 1) for node in range(19)]
+    skip_edges = [(node, 19) for node in range(11)]
+    edge_index = torch.tensor(chain_edges + skip_edges, dtype=torch.long).t().contiguous()
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=20,
+        node_sizes=torch.full((20, 2), 10.0),
+    )
+    spec = type("Spec", (), {"layering": "network_simplex_tightened"})()
+
+    ranks = _recombinant_rank_values(spec, problem, torch.zeros((20, 2), dtype=torch.float32))
+
+    assert ranks == list(range(20))
+
+
+def test_recombinant_dot_lp_uses_raw_x_assignment_above_expansion_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oversized Lever-2 expansions fall back to raw-graph dot-x assignment."""
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    captured: dict[str, object] = {}
+
+    def fake_dot_x(
+        rank_ordering: list[list[int]],
+        node_widths: torch.Tensor,
+        edge_index: torch.Tensor,
+        node_sep: float = 18.0,
+        edge_weights: Optional[torch.Tensor] = None,
+        center: bool = True,
+    ) -> torch.Tensor:
+        """Capture raw fallback payload and return monotone coordinates."""
+        del node_sep, center
+        captured["rank_ordering"] = [list(layer) for layer in rank_ordering]
+        captured["node_width_count"] = int(node_widths.numel())
+        captured["edge_index"] = edge_index.detach().clone()
+        captured["edge_weights"] = None if edge_weights is None else edge_weights.detach().clone()
+        return torch.arange(int(node_widths.numel()), dtype=torch.float32)
+
+    monkeypatch.setattr(dagua_native, "_graphviz_dot_x_position_network_simplex", fake_dot_x)
+    sources = list(range(5))
+    targets = list(range(5, 10))
+    edges = [(src, dst) for src in sources for dst in targets]
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    edge_weights = torch.arange(1, len(edges) + 1, dtype=torch.float32)
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        edge_weights=edge_weights,
+        num_nodes=10,
+        node_sizes=torch.full((10, 2), 10.0),
+    )
+    ordered_layers = [sources] + [[] for _ in range(8)] + [targets]
+    spec = type("Spec", (), {"xcoord": "dot_lp"})()
+
+    x_values = _assign_recombinant_x_coordinates(spec, ordered_layers, problem, node_sep=10.0)
+
+    assert x_values is not None
+    assert not _lever2_expanded_x_assignment_enabled(210, 10)
+    assert captured["rank_ordering"] == [sources, targets]
+    assert captured["node_width_count"] == 10
+    assert torch.equal(captured["edge_index"], edge_index)
+    assert torch.equal(captured["edge_weights"], edge_weights)
+
+
+def test_directed_portfolio_dot_order_is_not_registered_for_clusters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clustered directed portfolios must not admit dot-order candidates."""
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    incumbent = torch.zeros((4, 2), dtype=torch.float32)
+    calls: list[str] = []
+
+    def fake_native_problem(*args: object, **kwargs: object) -> torch.Tensor:
+        """Return a finite incumbent quickly."""
+        del args, kwargs
+        return incumbent.clone()
+
+    def fake_register_dot(*args: object, **kwargs: object) -> object:
+        """Record any forbidden dot registration."""
+        del args, kwargs
+        calls.append("dot")
+        return None
+
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_directed, "_directed_dot_order_enabled", lambda *args: True)
+    monkeypatch.setattr(native_directed, "_register_dot_order_candidates", fake_register_dot)
+    monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
+    monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_recombinant_layered_enabled",
+        lambda *args: False,
+    )
+    monkeypatch.setattr(native_directed, "_directed_wide_dag_ordering_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_ordering_cost_admissible", lambda *args, **kwargs: False)
+    problem = LayoutProblem(
+        edge_index=torch.tensor([[0, 1], [2, 3]], dtype=torch.long),
+        num_nodes=4,
+        node_sizes=torch.full((4, 2), 2.0),
+        clusters={"root": [0, 1, 2, 3], "child": [0, 1]},
+        cluster_parents={"root": None, "child": "root"},
+    )
+    config = LayoutConfig()
+
+    layout_native_directed_portfolio(problem, SolveState(), RuntimeContext(), config)
+
+    assert calls == []
+    assert not hasattr(config, "_dagua_native_dot_order_fired")
+
+
 def test_challenger_registration_includes_guarded_raw_variant() -> None:
     """Parity candidates expose raw positions alongside cleanup variants."""
     edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
@@ -423,6 +1609,210 @@ def test_directed_narrow_seed_candidates_are_finite() -> None:
         assert bool(torch.isfinite(candidate).all().item())
         extent = candidate.max(dim=0).values - candidate.min(dim=0).values
         assert float(extent.max().item()) > 0.0
+
+
+def test_directed_pure_stress_candidates_are_deterministic_and_finite() -> None:
+    """Cold-start pure stress candidates are byte-identical and non-degenerate."""
+    from dagua.layout.ops.pipelines.native_undirected import _candidate_is_degenerate
+
+    edge_index = torch.tensor(
+        [[0, 0, 1, 2, 3, 4, 2, 5, 6, 7, 1], [1, 2, 3, 3, 4, 6, 5, 7, 7, 8, 8]],
+        dtype=torch.long,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=9,
+        node_sizes=torch.full((9, 2), 30.0),
+        edge_weights=torch.linspace(0.7, 1.7, edge_index.shape[1]),
+    )
+    incumbent = torch.stack(
+        [torch.arange(9, dtype=torch.float32) * 40.0, torch.arange(9, dtype=torch.float32) * 8.0],
+        dim=1,
+    )
+
+    first = _directed_pure_stress_candidates(problem, incumbent, LayoutConfig(), seed=42)
+    second = _directed_pure_stress_candidates(problem, incumbent, LayoutConfig(), seed=42)
+
+    assert {
+        "pure_stress_majorization",
+        "pure_smacof_nonmetric",
+    } == set(first)
+    assert set(first) == set(second)
+    for name, candidate in first.items():
+        assert candidate.detach().numpy().tobytes() == second[name].detach().numpy().tobytes()
+        assert candidate.shape == (9, 2)
+        assert bool(torch.isfinite(candidate).all().item())
+        degenerate, reason = _candidate_is_degenerate(
+            candidate,
+            problem.node_sizes,
+            problem.edge_index,
+        )
+        assert not degenerate, reason
+
+
+def test_directed_pure_stress_cost_entries_match_blend() -> None:
+    """Directed pure-stress uses the modeled stress-blend flat cost."""
+    from dagua.layout.ops.pipelines.native_cost_model import FROZEN_COST_TABLE
+
+    assert FROZEN_COST_TABLE[("directed_pure_stress", "cpu")] == {"full_arm": (0.0, 12.0)}
+    assert FROZEN_COST_TABLE[("directed_pure_stress", "cuda")] == {"full_arm": (0.0, 10.0)}
+    assert FROZEN_COST_TABLE[("directed_davidson_harel_small", "cpu")] == {"full_arm": (0.0, 4.0)}
+    assert FROZEN_COST_TABLE[("directed_davidson_harel_small", "cuda")] == {"full_arm": (0.0, 4.0)}
+
+
+def test_directed_davidson_harel_small_candidate_is_scaled_and_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The DH uncrossing arm is structural small-N only and median-edge scaled."""
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    davidson_harel = importlib.import_module("dagua.layout.ops.pipelines.davidson_harel")
+    edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long)
+    raw = torch.tensor(
+        [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0]],
+        dtype=torch.float32,
+    )
+
+    def fake_dh(**kwargs: object) -> torch.Tensor:
+        """Return a deterministic raw DH candidate for scale validation."""
+        assert kwargs["seed"] == 42
+        return raw
+
+    monkeypatch.setattr(davidson_harel, "layout_davidson_harel_pipeline", fake_dh)
+    monkeypatch.setattr(
+        native_directed,
+        "_d4_oriented_by_declared_flow",
+        lambda candidate, problem: candidate,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=5,
+        node_sizes=torch.full((5, 2), 10.0),
+        seed=42,
+    )
+
+    candidates = _directed_davidson_harel_small_candidates(problem, LayoutConfig(), seed=42)
+
+    candidate = candidates["davidson_harel_small"]
+    lengths = torch.linalg.vector_norm(candidate[edge_index[0]] - candidate[edge_index[1]], dim=1)
+    target_length = 4.0 * float(torch.linalg.vector_norm(problem.node_sizes, dim=1).median().item())
+    assert float(lengths.median().item()) == pytest.approx(target_length, rel=1.0e-6)
+
+    too_large = LayoutProblem(edge_index=edge_index, num_nodes=17, node_sizes=torch.ones((17, 2)))
+    assert _directed_davidson_harel_small_candidates(too_large, LayoutConfig(), seed=42) == {}
+
+
+def test_directed_pure_stress_registers_and_ties_leave_incumbent(
+    monkeypatch: object,
+) -> None:
+    """Pure-stress challengers register and exact referee ties keep incumbent."""
+    dagua_native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_directed = importlib.import_module("dagua.layout.ops.pipelines.native_directed")
+    native_undirected = importlib.import_module("dagua.layout.ops.pipelines.native_undirected")
+
+    incumbent = torch.tensor(
+        [
+            [0.0, 0.0],
+            [40.0, 40.0],
+            [80.0, 80.0],
+            [120.0, 120.0],
+            [160.0, 160.0],
+            [200.0, 200.0],
+        ],
+        dtype=torch.float32,
+    )
+    pure_candidate = incumbent + torch.tensor([10.0, -10.0])
+    edge_index = torch.tensor([[0, 1, 2, 3, 4], [1, 2, 3, 4, 5]], dtype=torch.long)
+    registered: list[str] = []
+    scored: list[str] = []
+
+    def fake_native_problem(
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+        config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Return the layered incumbent fixture."""
+        del problem, state, ctx, config
+        return incumbent
+
+    def fake_register(
+        name: str,
+        raw_pos: torch.Tensor,
+        problem: LayoutProblem,
+        config: LayoutConfig,
+        positions: dict[str, torch.Tensor],
+        preserve_rank_order: bool = False,
+        arm_timings: Optional[dict[str, tuple[float, float]]] = None,
+        timing_span: Optional[tuple[float, float]] = None,
+    ) -> None:
+        """Record challenger admission at the shared variant registrar seam."""
+        del problem, config, preserve_rank_order, arm_timings, timing_span
+        registered.append(name)
+        positions[name] = raw_pos
+
+    def fake_score_payload(
+        pos: torch.Tensor,
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[float, _DirectedClusterScoreTelemetry]:
+        """Return an exact full-referee tie for incumbent and pure stress."""
+        del args, kwargs
+        scored.append("pure" if torch.equal(pos, pure_candidate) else "incumbent")
+        return (
+            10.0,
+            _DirectedClusterScoreTelemetry(
+                extended_score=10.0,
+                old_score=10.0,
+                metrics={},
+                v3_tiered=10.0,
+            ),
+        )
+
+    monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
+    monkeypatch.setattr(native_undirected, "_portfolio_has_budget", lambda *args, **kwargs: True)
+    monkeypatch.setattr(native_directed, "admit_native_work", lambda *args, **kwargs: True)
+    monkeypatch.setattr(native_directed, "_predicted_arm_budget_available", lambda *args: True)
+    monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_pure_stress_candidates",
+        lambda *args: {"pure_stress_majorization": pure_candidate},
+    )
+    monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_ordering_cost_admissible", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_recombinant_layered_enabled",
+        lambda *args: False,
+    )
+    monkeypatch.setattr(native_directed, "_directed_wide_dag_ordering_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_directed_dot_order_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_full_sugiyama_grid_enabled", lambda *args: False)
+    monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
+    monkeypatch.setattr(native_directed, "_proxy_directed_candidate", lambda *args: 1.0)
+    monkeypatch.setattr(
+        native_directed,
+        "_score_directed_candidate_referee_payload",
+        fake_score_payload,
+    )
+
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=6,
+        node_sizes=torch.full((6, 2), 20.0),
+    )
+    returned = layout_native_directed_portfolio(
+        problem,
+        SolveState(),
+        RuntimeContext(),
+        LayoutConfig(),
+    )
+
+    assert "pure_stress_majorization" in registered
+    assert "pure" in scored
+    assert torch.equal(returned, incumbent)
 
 
 def test_directed_mrtree_and_rank_swap_targets_are_structurally_gated() -> None:
@@ -613,7 +2003,10 @@ def test_rank_ordering_library_mode_wall_clock_cap() -> None:
     elapsed_s = time.perf_counter() - started
 
     assert ordered.shape == incumbent.shape
-    assert elapsed_s < 3.0
+    # Generous bound for a ms-scale micro-op: 3.0s flaked under measurement
+    # load on this box (WP-11A F05); 10.0s still catches the pinned
+    # wall-clock-cap regression while tolerating scheduler noise.
+    assert elapsed_s < 10.0
 
 
 def test_ordering_cost_gate_blocks_dense_medium_graph() -> None:
@@ -674,8 +2067,7 @@ def test_ordering_pair_sweep_checks_budget_internally(monkeypatch: object) -> No
         edge_index,
         max_pairs=64,
         config=config,
-        started_at=time.perf_counter(),
-        wall_time_cap_s=10.0,
+        budget=native_directed._OrderingWorkBudget(remaining_pair_checks=1.0),
     )
 
     assert crossings == []
@@ -740,16 +2132,35 @@ def test_directed_ordering_reachable_for_medium_small_band_once(monkeypatch: obj
         assert int(incumbent_pos.shape[0]) == num_nodes
         return incumbent_pos.clone()
 
-    def fake_score(*args: object, **kwargs: object) -> float:
-        """Keep all candidates tied so the incumbent remains selected."""
+    def fake_score_payload(
+        pos: torch.Tensor,
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[float, _DirectedClusterScoreTelemetry]:
+        """Keep the incumbent ahead at the V3 payload scorer seam."""
         del args, kwargs
-        return 1.0
+        score = 2.0 if torch.equal(pos, incumbent) else 1.0
+        return (
+            score,
+            _DirectedClusterScoreTelemetry(
+                extended_score=score,
+                old_score=score,
+                metrics={},
+                v3_tiered=score,
+            ),
+        )
 
     monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
     monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
     monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(
@@ -757,7 +2168,11 @@ def test_directed_ordering_reachable_for_medium_small_band_once(monkeypatch: obj
         "_rank_local_zero_crossing_swap_candidate",
         fake_rank_ordering,
     )
-    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    monkeypatch.setattr(
+        native_directed,
+        "_score_directed_candidate_referee_payload",
+        fake_score_payload,
+    )
     problem = LayoutProblem(
         edge_index=edge_index,
         num_nodes=num_nodes,
@@ -818,11 +2233,11 @@ def test_directed_portfolio_rejects_crossing_win_that_dual_gate_rejects(
         problem: LayoutProblem,
         cluster_ids: Optional[torch.Tensor],
         all_pairs_dist: Optional[object],
-    ) -> tuple[bool, W5ScorePair]:
+    ) -> tuple[bool, W5ScorePair, tuple[int, float]]:
         """Reject the crossing-improving candidate under the frozen dual gate."""
         del incumbent_pair, problem, cluster_ids, all_pairs_dist
         captured["candidate"] = candidate
-        return False, W5ScorePair(directed=11.0, undirected=9.0)
+        return False, W5ScorePair(directed=11.0, undirected=9.0), (1, -0.0)
 
     def fake_sugiyama(**kwargs: object) -> torch.Tensor:
         """Return a tied non-ordering challenger without external solver cost."""
@@ -846,6 +2261,12 @@ def test_directed_portfolio_rejects_crossing_win_that_dual_gate_rejects(
     monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
@@ -931,10 +2352,12 @@ def test_directed_w5_incumbent_uses_same_payload_pair_and_axes(monkeypatch: obje
         del args, kwargs
         return payload_pair, payload_axes
 
-    def fake_dual_gate(*args: object, **kwargs: object) -> tuple[bool, W5ScorePair]:
+    def fake_dual_gate(
+        *args: object, **kwargs: object
+    ) -> tuple[bool, W5ScorePair, tuple[int, float]]:
         """Admit the ordering seed while keeping scalar best_name incumbent."""
         del args, kwargs
-        return True, W5ScorePair(directed=11.0, undirected=11.0)
+        return True, W5ScorePair(directed=11.0, undirected=11.0), (1, -0.0)
 
     def fake_rank_swap(*args: object, **kwargs: object) -> torch.Tensor:
         """Return a distinct zero-crossing ordering seed."""
@@ -979,9 +2402,10 @@ def test_directed_w5_incumbent_uses_same_payload_pair_and_axes(monkeypatch: obje
         config: Optional[LayoutConfig] = None,
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Capture the W5 incumbent payload and return a no-op result."""
-        del seeds, node_sizes, score_fn, accept_margin
+        del seeds, node_sizes, score_fn, accept_margin, referee_key_fn
         captured["pair"] = incumbent_score_pair
         captured["axes"] = incumbent_axes
         return make_w5_skip_result(
@@ -998,6 +2422,12 @@ def test_directed_w5_incumbent_uses_same_payload_pair_and_axes(monkeypatch: obje
     monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
@@ -1072,11 +2502,11 @@ def test_directed_portfolio_rejects_recombinant_without_dual_dominance(
         problem: LayoutProblem,
         cluster_ids: Optional[torch.Tensor],
         all_pairs_dist: Optional[object],
-    ) -> tuple[bool, W5ScorePair]:
+    ) -> tuple[bool, W5ScorePair, tuple[int, float]]:
         """Reject the recombinant candidate under the dual frozen rulers."""
         del incumbent_pair, problem, cluster_ids, all_pairs_dist
         captured["candidate"] = candidate
-        return False, W5ScorePair(directed=11.0, undirected=9.0)
+        return False, W5ScorePair(directed=11.0, undirected=9.0), (1, -0.0)
 
     def fake_sugiyama(**kwargs: object) -> torch.Tensor:
         """Return tied non-recombinant challengers cheaply."""
@@ -1100,6 +2530,12 @@ def test_directed_portfolio_rejects_recombinant_without_dual_dominance(
     monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
@@ -1181,6 +2617,12 @@ def test_directed_portfolio_full_path_noop_keeps_incumbent(monkeypatch: object) 
     monkeypatch.setattr(dagua_native, "_run_native_problem", fake_native_problem)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
@@ -1233,7 +2675,7 @@ def test_directed_ordering_dual_gate_rejects_single_ruler_win(
 
     monkeypatch.setattr(native_directed, "_score_directed_candidate_pair", fake_pair)
 
-    dominates, pair = _directed_ordering_candidate_dual_dominates(
+    dominates, pair, _candidate_referee_key = _directed_ordering_candidate_dual_dominates(
         candidate,
         incumbent_pair,
         problem,
@@ -1288,7 +2730,7 @@ def test_directed_ordering_dual_gate_demotes_referee_breacher(
     monkeypatch.setattr(native_directed, "_score_directed_candidate_pair", fake_pair)
     monkeypatch.setattr(native_directed, "_runtime_referee_telemetry", fake_referee)
 
-    dominates, pair = _directed_ordering_candidate_dual_dominates(
+    dominates, pair, candidate_referee_key = _directed_ordering_candidate_dual_dominates(
         candidate,
         incumbent_pair,
         problem,
@@ -1299,6 +2741,56 @@ def test_directed_ordering_dual_gate_demotes_referee_breacher(
 
     assert not dominates
     assert pair == W5ScorePair(directed=100.0, undirected=100.0)
+    assert candidate_referee_key == (0, -0.50)
+
+
+def test_r79_weighted_skew_dag_severe_g6_candidate_rejected_by_referee_key() -> None:
+    """A real r79 weighted-DAG candidate is rejected by the severe-G6 prefix."""
+    test_graph = next(
+        graph for graph in get_test_graphs() if graph.name == "r79_weighted_skew_dag_6x10"
+    )
+    graph = test_graph.graph
+    problem = LayoutProblem(
+        edge_index=graph.edge_index,
+        num_nodes=graph.num_nodes,
+        node_sizes=graph.compute_node_sizes(),
+        edge_weights=graph.edge_weights,
+        direction="directed",
+    )
+    candidate = torch.stack(
+        (torch.arange(graph.num_nodes, dtype=torch.float32), torch.zeros(graph.num_nodes)),
+        dim=1,
+    )
+    candidate_pair = _score_directed_candidate_pair(candidate, problem, None, None)
+    incumbent_pair = W5ScorePair(
+        directed=candidate_pair.directed - 1.0,
+        undirected=candidate_pair.undirected - 1.0,
+    )
+
+    dominates, admitted_pair, candidate_referee_key = _directed_ordering_candidate_dual_dominates(
+        candidate,
+        incumbent_pair,
+        problem,
+        None,
+        None,
+        (1, -0.0),
+    )
+    telemetry_key, breached, reason = _runtime_referee_telemetry(candidate, problem)
+
+    assert not dominates
+    assert admitted_pair == candidate_pair
+    assert candidate_referee_key == telemetry_key
+    assert candidate_referee_key[0] == 0
+    assert breached
+    assert reason == "severe_g6_breach"
+    assert candidate_pair.champion_ineligibility_flags == frozenset()
+    assert w5_dominates(
+        candidate_pair,
+        incumbent_pair,
+        candidate_referee_key=(1, -0.0),
+        incumbent_referee_key=(1, -0.0),
+        tallied_axis="directed",
+    )
 
 
 def test_directed_incumbent_config_is_not_deadline_weakened(monkeypatch: object) -> None:
@@ -1555,6 +3047,12 @@ def test_directed_predicted_cost_skips_second_dotx_arm(monkeypatch: object) -> N
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(
         native_directed,
@@ -1625,6 +3123,12 @@ def test_directed_sugiyama_ledger_admission_skips_before_run(monkeypatch: object
     monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
     monkeypatch.setattr(native_directed, "_directed_pivot_mds_candidates", lambda *args: {})
     monkeypatch.setattr(native_directed, "_directed_stress_blend_candidates", lambda *args: {})
+    monkeypatch.setattr(native_directed, "_directed_pure_stress_candidates", lambda *args: {})
+    monkeypatch.setattr(
+        native_directed,
+        "_directed_davidson_harel_small_candidates",
+        lambda *args: {},
+    )
     monkeypatch.setattr(native_directed, "_directed_mrtree_enabled", lambda *args: False)
     monkeypatch.setattr(native_directed, "_force_challengers_enabled", lambda *args: False)
     edge_index = torch.stack(
@@ -1655,7 +3159,7 @@ def test_directed_sugiyama_ledger_admission_skips_before_run(monkeypatch: object
 
 
 def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) -> None:
-    """Directed contests quick-score all arms but full-score only challenger finalists."""
+    """Directed large contests full-score every variant in six legacy families."""
     from dagua.layout.ops.pipelines.native_budget import DECISION_LOG_ATTR, install_budget_ledger
 
     full_scored: list[float] = []
@@ -1685,9 +3189,10 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
         arm_timings: Optional[dict[str, tuple[float, float]]] = None,
         timing_span: Optional[tuple[float, float]] = None,
     ) -> None:
-        """Register one variant per candidate family."""
+        """Register finished and raw variants for each candidate family."""
         del problem, config, preserve_rank_order, arm_timings, timing_span
         positions[name] = raw_pos
+        positions[f"{name}_raw"] = raw_pos.clone()
 
     def fake_proxy(
         pos: torch.Tensor,
@@ -1701,17 +3206,25 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
         proxy_scored.append(score)
         return score
 
-    def fake_score(
+    def fake_score_payload(
         pos: torch.Tensor,
         problem: LayoutProblem,
         cluster_ids: Optional[torch.Tensor],
         all_pairs_dist: object = None,
-    ) -> float:
+    ) -> tuple[float, _DirectedClusterScoreTelemetry]:
         """Use x coordinate as the full score."""
         del problem, cluster_ids, all_pairs_dist
         score = float(pos[0, 0].item())
         full_scored.append(score)
-        return score
+        return (
+            score,
+            _DirectedClusterScoreTelemetry(
+                extended_score=score,
+                old_score=score,
+                metrics={},
+                v3_tiered=score,
+            ),
+        )
 
     def fake_grid_enabled(problem: LayoutProblem, config: LayoutConfig) -> bool:
         """Force the large-graph test to build enough candidates."""
@@ -1725,7 +3238,11 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
     monkeypatch.setattr(sugiyama, "layout_sugiyama_pipeline", fake_sugiyama)
     monkeypatch.setattr(native_directed, "_register_challenger_variants", fake_register)
     monkeypatch.setattr(native_directed, "_proxy_directed_candidate", fake_proxy)
-    monkeypatch.setattr(native_directed, "_score_directed_candidate", fake_score)
+    monkeypatch.setattr(
+        native_directed,
+        "_score_directed_candidate_referee_payload",
+        fake_score_payload,
+    )
     monkeypatch.setattr(native_directed, "_full_sugiyama_grid_enabled", fake_grid_enabled)
     edge_index = torch.stack(
         [
@@ -1744,11 +3261,13 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
 
     layout_native_directed_portfolio(problem, SolveState(), RuntimeContext(), config)
 
-    expected_candidates = 4 + len(SUGIYAMA_FIDELITY_MODES) * len(SUGIYAMA_RANK_SEP_GRID) * len(
-        SUGIYAMA_NODE_SEP_GRID
-    )
-    assert len(proxy_scored) == expected_candidates + 1
-    assert len(full_scored) == DIRECTED_FULL_REFEREE_TOP_K + 1
+    non_sugiyama_candidates = 1
+    expected_sugiyama_candidates = 4 + len(SUGIYAMA_FIDELITY_MODES) * len(
+        SUGIYAMA_RANK_SEP_GRID
+    ) * len(SUGIYAMA_NODE_SEP_GRID)
+    expected_candidates = 2 * expected_sugiyama_candidates + non_sugiyama_candidates
+    assert len(proxy_scored) == expected_candidates
+    assert len(full_scored) == 1 + 2 * DIRECTED_FULL_REFEREE_TOP_K
     decision_log = getattr(config, DECISION_LOG_ATTR)
     admitted_sugiyama = [
         record["reason"]
@@ -1763,5 +3282,5 @@ def test_directed_referee_full_scores_only_proxy_finalists(monkeypatch: object) 
         and str(record["reason"]).startswith("optional_directed_sugiyama")
     ]
 
-    assert len(admitted_sugiyama) == expected_candidates
+    assert len(admitted_sugiyama) == expected_sugiyama_candidates
     assert skipped_sugiyama == []

@@ -21,6 +21,27 @@ class SklearnSmacofNonmetric(CompetitorBase):
     name = "sklearn_smacof_nonmetric"
     max_nodes = 2_000
     variant_param_names = frozenset({"eps", "max_iter", "normalized_stress"})
+    # Geodesic distance matrix construction is dagua-owned graph_utils code.
+    source_delegate_modules = ("dagua.layout.ops.graph_utils",)
+
+    def available(self) -> bool:
+        """Report whether scikit-learn is importable.
+
+        The base-class default of unconditional ``True`` previously let a
+        missing scikit-learn surface as an ImportError from ``layout()``
+        instead of a clean recorded skip.
+
+        Returns
+        -------
+        bool
+            ``True`` when ``sklearn.manifold`` imports successfully.
+        """
+        try:
+            from sklearn.manifold import smacof  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
 
     def layout(
         self,
@@ -46,15 +67,20 @@ class SklearnSmacofNonmetric(CompetitorBase):
         """
         del timeout
 
-        from sklearn.manifold import smacof
-
         start = time.perf_counter()
         try:
+            # Import inside the try block so a missing scikit-learn becomes a
+            # recorded error row instead of an ImportError into the caller.
+            from sklearn.manifold import smacof
+
             distances = shortest_path_distances(
                 edge_index=graph.edge_index,
                 num_nodes=graph.num_nodes,
                 edge_weights=graph.edge_weights,
             )
+            # return_n_iter=True is required for the 3-tuple unpack: modern
+            # scikit-learn returns (positions, stress) by default, which made
+            # every row fail with "not enough values to unpack".
             positions, _stress, _n_iter = smacof(
                 distances,
                 metric=False,
@@ -65,6 +91,7 @@ class SklearnSmacofNonmetric(CompetitorBase):
                 eps=1.0e-6,
                 random_state=42 if seed is None else seed,
                 normalized_stress=False,
+                return_n_iter=True,
             )
             elapsed = time.perf_counter() - start
             return CompetitorResult(

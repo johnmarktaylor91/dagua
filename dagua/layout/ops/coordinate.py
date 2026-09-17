@@ -14,6 +14,9 @@ from dagua.layout.graph_classify import (
 )
 from dagua.layout.graph_classify import classify_graph
 from dagua.layout.ops.base import Op
+from dagua.layout.ops.cluster_geometry import (
+    break_cluster_parent_cycles as _break_cluster_parent_cycles,
+)
 from dagua.layout.ops.graph_utils import (
     build_directed_adjacency as _build_directed_adjacency,
 )
@@ -451,7 +454,13 @@ def _place_compaction_block(
     shift: List[float],
     x: List[Optional[float]],
 ) -> None:
-    """Recursively place one aligned block during horizontal compaction.
+    """Place one aligned block during horizontal compaction.
+
+    Uses an explicit stack (iterative twin of the same function in
+    ``sugiyama.py``) instead of recursing into unplaced left-neighbor blocks:
+    the recursion depth equalled the unplaced left-block chain length, which
+    grows with rank width and overflowed Python's recursion limit on wide
+    ranks (~>=1000 nodes in one rank).
 
     Parameters
     ----------
@@ -481,31 +490,19 @@ def _place_compaction_block(
     if x[block_root] is not None:
         return
 
-    x[block_root] = 0.0
-    current = block_root
-    while True:
-        layer_nodes = layers[rank_of[current]]
-        position = pos_of[current]
-        if position > 0:
-            left_neighbor = layer_nodes[position - 1]
-            left_root = root[left_neighbor]
-            _place_compaction_block(
-                block_root=left_root,
-                layers=layers,
-                root=root,
-                align=align,
-                rank_of=rank_of,
-                pos_of=pos_of,
-                node_sizes=node_sizes,
-                node_sep=node_sep,
-                sink=sink,
-                shift=shift,
-                x=x,
-            )
-            if sink[block_root] == block_root:
-                sink[block_root] = sink[left_root]
+    stack: List[Tuple[int, int, Optional[int], Optional[int]]] = [
+        (block_root, block_root, None, None)
+    ]
+    while stack:
+        active_root, current, left_neighbor, left_root = stack.pop()
+        if x[active_root] is None:
+            x[active_root] = 0.0
 
-            block_x = 0.0 if x[block_root] is None else x[block_root]
+        if left_neighbor is not None and left_root is not None:
+            if sink[active_root] == active_root:
+                sink[active_root] = sink[left_root]
+
+            block_x = 0.0 if x[active_root] is None else x[active_root]
             left_x = 0.0 if x[left_root] is None else x[left_root]
             minimum_gap = _minimum_separation(
                 left_node=left_neighbor,
@@ -513,17 +510,32 @@ def _place_compaction_block(
                 node_sizes=node_sizes,
                 node_sep=node_sep,
             )
-            if sink[block_root] != sink[left_root]:
+            if sink[active_root] != sink[left_root]:
                 shift[sink[left_root]] = min(
                     shift[sink[left_root]],
                     block_x - left_x - minimum_gap,
                 )
             else:
-                x[block_root] = max(block_x, left_x + minimum_gap)
+                x[active_root] = max(block_x, left_x + minimum_gap)
+
+            next_current = align[current]
+            if next_current != active_root:
+                stack.append((active_root, next_current, None, None))
+            continue
+
+        layer_nodes = layers[rank_of[current]]
+        position = pos_of[current]
+        if position > 0:
+            next_left_neighbor = layer_nodes[position - 1]
+            next_left_root = root[next_left_neighbor]
+            stack.append((active_root, current, next_left_neighbor, next_left_root))
+            if x[next_left_root] is None:
+                stack.append((next_left_root, next_left_root, None, None))
+            continue
 
         current = align[current]
-        if current == block_root:
-            break
+        if current != active_root:
+            stack.append((active_root, current, None, None))
 
 
 def _minimum_separation(
@@ -764,29 +776,26 @@ def _cluster_depths(
         )
         for name in cluster_names
     }
+    # User metadata may contain parent cycles; without this guard the parent
+    # walk below never bottoms out (WP05-F02).
+    parents = _break_cluster_parent_cycles(parents)
     depths: Dict[str, int] = {}
 
-    def depth(name: str) -> int:
-        """Return one cluster depth with memoization.
-
-        Parameters
-        ----------
-        name : str
-            Cluster name.
-
-        Returns
-        -------
-        int
-            Nesting depth.
-        """
-        if name in depths:
-            return depths[name]
-        parent = parents[name]
-        depths[name] = 0 if parent is None else depth(parent) + 1
-        return depths[name]
-
+    # Iterative chain walk (drywell B2-F01): the memoize-after-recurse closure
+    # this replaces descended one frame per nesting level and crashed at ~998
+    # levels of valid linear nesting. Walk up to the nearest memoized ancestor
+    # (or a root), then assign depths ancestor-first -- the exact memoization
+    # insertion order the recursion produced.
     for cluster_name in cluster_names:
-        depth(cluster_name)
+        chain: List[str] = []
+        current: Optional[str] = cluster_name
+        while current is not None and current not in depths:
+            chain.append(current)
+            current = parents[current]
+        next_depth = 0 if current is None else depths[current] + 1
+        for name in reversed(chain):
+            depths[name] = next_depth
+            next_depth += 1
     return depths
 
 
@@ -3001,29 +3010,36 @@ class BucheimWalkerTree(Op):
             return state
 
         # Walker-style tree layout still uses recursion internally, so raise
-        # the limit defensively for large forests before descending.
+        # the limit defensively for large forests before descending. Restore
+        # the previous limit afterwards: a leaked process-wide limit would
+        # mask recursion bugs in later ops and make their failures dependent
+        # on op execution order (WP05-F08).
+        previous_recursion_limit = sys.getrecursionlimit()
         sys.setrecursionlimit(
             max(
-                sys.getrecursionlimit(),
+                previous_recursion_limit,
                 problem.num_nodes * self.config.recursion_limit_multiplier,
             )
         )
-        roots, children, depths = _bfs_forest(
-            edge_index=edge_index_cpu,
-            num_nodes=problem.num_nodes,
-        )
-
-        preliminary_x = [0.0] * problem.num_nodes
-        next_component_offset = 0.0
-        for root in roots:
-            next_component_offset = _assign_preliminary_x(
-                root_idx=root,
-                children=children,
-                depths=depths,
-                preliminary_x=preliminary_x,
-                component_offset=next_component_offset,
-                component_gap=self.config.component_gap,
+        try:
+            roots, children, depths = _bfs_forest(
+                edge_index=edge_index_cpu,
+                num_nodes=problem.num_nodes,
             )
+
+            preliminary_x = [0.0] * problem.num_nodes
+            next_component_offset = 0.0
+            for root in roots:
+                next_component_offset = _assign_preliminary_x(
+                    root_idx=root,
+                    children=children,
+                    depths=depths,
+                    preliminary_x=preliminary_x,
+                    component_offset=next_component_offset,
+                    component_gap=self.config.component_gap,
+                )
+        finally:
+            sys.setrecursionlimit(previous_recursion_limit)
 
         positions = torch.zeros((problem.num_nodes, _POSITION_OUTPUT_DIM), dtype=torch.float32)
         for node_idx in range(problem.num_nodes):
@@ -3128,71 +3144,82 @@ class ReingoldTilfordTree(Op):
             center_output = True if self.config.center_output is None else self.config.center_output
             output_scale = 1.0 if self.config.output_scale is None else self.config.output_scale
 
+        # Reingold-Tilford descent is recursive; raise the limit defensively
+        # and restore it afterwards so the raised value cannot leak into the
+        # rest of the process (WP05-F08).
+        previous_recursion_limit = sys.getrecursionlimit()
         sys.setrecursionlimit(
             max(
-                sys.getrecursionlimit(),
+                previous_recursion_limit,
                 problem.num_nodes * self.config.recursion_limit_multiplier,
             )
         )
-        explicit_roots = _validate_rt_roots(roots=self.config.roots, num_nodes=problem.num_nodes)
-        root_depths = _validate_rt_rootlevels(
-            rootlevels=self.config.rootlevel,
-            roots=explicit_roots,
-        )
-        if explicit_roots is not None:
-            automatic_candidates = _igraph_fidelity_root_candidates(
-                edge_index=edge_index_cpu,
-                num_nodes=problem.num_nodes,
-                traversal_mode=self.config.traversal_mode,
+        try:
+            explicit_roots = _validate_rt_roots(
+                roots=self.config.roots, num_nodes=problem.num_nodes
             )
-            root_candidates = explicit_roots + [
-                candidate for candidate in automatic_candidates if candidate not in explicit_roots
-            ]
-        elif fidelity_mode == "igraph":
-            root_candidates = _igraph_fidelity_root_candidates(
-                edge_index=edge_index_cpu,
-                num_nodes=problem.num_nodes,
-                traversal_mode=self.config.traversal_mode,
+            root_depths = _validate_rt_rootlevels(
+                rootlevels=self.config.rootlevel,
+                roots=explicit_roots,
             )
-        else:
-            root_candidates = None
-        roots, children, depths = _bfs_forest(
-            edge_index=edge_index_cpu,
-            num_nodes=problem.num_nodes,
-            traversal_mode=self.config.traversal_mode if fidelity_mode == "igraph" else "all",
-            root_candidates=root_candidates,
-            root_depths=root_depths,
-        )
-
-        preliminary_x = [0.0] * problem.num_nodes
-        if fidelity_mode == "igraph" and len(roots) > 1 and not root_depths:
-            artificial_root = problem.num_nodes
-            augmented_children = [list(child_nodes) for child_nodes in children]
-            augmented_children.append(list(roots))
-            augmented_depths = [depth + 1 for depth in depths]
-            augmented_depths.append(0)
-            augmented_x = [0.0] * (problem.num_nodes + 1)
-            _assign_preliminary_x(
-                root_idx=artificial_root,
-                children=augmented_children,
-                depths=augmented_depths,
-                preliminary_x=augmented_x,
-                component_offset=0.0,
-                component_gap=0.0,
-            )
-            preliminary_x = augmented_x[: problem.num_nodes]
-            depths = augmented_depths[: problem.num_nodes]
-        else:
-            next_component_offset = 0.0
-            for root in roots:
-                next_component_offset = _assign_preliminary_x(
-                    root_idx=root,
-                    children=children,
-                    depths=depths,
-                    preliminary_x=preliminary_x,
-                    component_offset=next_component_offset,
-                    component_gap=component_gap,
+            if explicit_roots is not None:
+                automatic_candidates = _igraph_fidelity_root_candidates(
+                    edge_index=edge_index_cpu,
+                    num_nodes=problem.num_nodes,
+                    traversal_mode=self.config.traversal_mode,
                 )
+                root_candidates = explicit_roots + [
+                    candidate
+                    for candidate in automatic_candidates
+                    if candidate not in explicit_roots
+                ]
+            elif fidelity_mode == "igraph":
+                root_candidates = _igraph_fidelity_root_candidates(
+                    edge_index=edge_index_cpu,
+                    num_nodes=problem.num_nodes,
+                    traversal_mode=self.config.traversal_mode,
+                )
+            else:
+                root_candidates = None
+            roots, children, depths = _bfs_forest(
+                edge_index=edge_index_cpu,
+                num_nodes=problem.num_nodes,
+                traversal_mode=self.config.traversal_mode if fidelity_mode == "igraph" else "all",
+                root_candidates=root_candidates,
+                root_depths=root_depths,
+            )
+
+            preliminary_x = [0.0] * problem.num_nodes
+            if fidelity_mode == "igraph" and len(roots) > 1 and not root_depths:
+                artificial_root = problem.num_nodes
+                augmented_children = [list(child_nodes) for child_nodes in children]
+                augmented_children.append(list(roots))
+                augmented_depths = [depth + 1 for depth in depths]
+                augmented_depths.append(0)
+                augmented_x = [0.0] * (problem.num_nodes + 1)
+                _assign_preliminary_x(
+                    root_idx=artificial_root,
+                    children=augmented_children,
+                    depths=augmented_depths,
+                    preliminary_x=augmented_x,
+                    component_offset=0.0,
+                    component_gap=0.0,
+                )
+                preliminary_x = augmented_x[: problem.num_nodes]
+                depths = augmented_depths[: problem.num_nodes]
+            else:
+                next_component_offset = 0.0
+                for root in roots:
+                    next_component_offset = _assign_preliminary_x(
+                        root_idx=root,
+                        children=children,
+                        depths=depths,
+                        preliminary_x=preliminary_x,
+                        component_offset=next_component_offset,
+                        component_gap=component_gap,
+                    )
+        finally:
+            sys.setrecursionlimit(previous_recursion_limit)
 
         positions = torch.zeros((problem.num_nodes, _POSITION_OUTPUT_DIM), dtype=torch.float32)
         for node_idx in range(problem.num_nodes):

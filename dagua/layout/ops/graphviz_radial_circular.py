@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+import sys
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 import torch
 
@@ -17,6 +18,8 @@ from dagua.layout.ops.taxonomy import OpCategory, register_op
 _DEFAULT_RANKSEP_POINTS = 72.0
 _DEFAULT_NODESEP_POINTS = 18.0
 _TWO_PI = 2.0 * math.pi
+_CIRCO_CROSSING_REDUCTION_MAX_WORK = 2_000_000
+_CIRCO_CROSSING_REDUCTION_MAX_BLOCK_NODES = 128
 
 
 def _graphviz_round_points(value: float) -> int:
@@ -567,24 +570,34 @@ def _subtree_leaf_counts(children: Sequence[Sequence[int]], root: int) -> List[i
     """
     counts = [0] * len(children)
 
-    def visit(node: int) -> int:
-        """Recursively count subtree leaves.
+    def visit(node: int) -> None:
+        """Iteratively count subtree leaves below one node.
+
+        Iterative post-order twin of the recursive leaf count (children
+        summed in child order); depth-safe on chain-shaped trees.
 
         Parameters
         ----------
         node : int
-            Node to visit.
+            Subtree root to (re)count.
 
         Returns
         -------
-        int
-            Leaf count for ``node``.
+        None
+            ``counts`` is updated for the whole subtree.
         """
-        if not children[node]:
-            counts[node] = 1
-            return 1
-        counts[node] = sum(visit(child) for child in children[node])
-        return counts[node]
+        stack: List[Tuple[int, bool]] = [(node, False)]
+        while stack:
+            current, expanded = stack.pop()
+            if expanded:
+                counts[current] = sum(counts[child] for child in children[current])
+                continue
+            if not children[current]:
+                counts[current] = 1
+                continue
+            stack.append((current, True))
+            for child in reversed(children[current]):
+                stack.append((child, False))
 
     visit(root)
     for node in range(len(children)):
@@ -627,12 +640,12 @@ def twopi_positions(
     angles = [0.0] * num_nodes
 
     def assign(node: int, start_angle: float, width: float) -> None:
-        """Assign angular wedges recursively.
+        """Assign angular wedges over one subtree.
 
         Parameters
         ----------
         node : int
-            Node receiving the wedge.
+            Subtree root receiving the wedge.
         start_angle : float
             Start angle in radians.
         width : float
@@ -643,15 +656,26 @@ def twopi_positions(
         None
             The function mutates ``angles``.
         """
-        angles[node] = start_angle + width / 2.0
-        if not children[node]:
-            return
-        cursor = start_angle
-        total = float(sum(leaf_counts[child] for child in children[node]))
-        for child in children[node]:
-            child_width = width * float(leaf_counts[child]) / total if total > 0.0 else 0.0
-            assign(child, cursor, child_width)
-            cursor += child_width
+        # Iterative pre-order twin of the recursive wedge assignment: the
+        # per-parent cursor accumulation runs in the same sibling order, so
+        # every angle sees an identical float-operation sequence; depth-safe
+        # on chain-shaped trees.
+        stack: List[Tuple[int, float, float]] = [(node, start_angle, width)]
+        while stack:
+            current, current_start, current_width = stack.pop()
+            angles[current] = current_start + current_width / 2.0
+            if not children[current]:
+                continue
+            cursor = current_start
+            total = float(sum(leaf_counts[child] for child in children[current]))
+            pending: List[Tuple[int, float, float]] = []
+            for child in children[current]:
+                child_width = (
+                    current_width * float(leaf_counts[child]) / total if total > 0.0 else 0.0
+                )
+                pending.append((child, cursor, child_width))
+                cursor += child_width
+            stack.extend(reversed(pending))
 
     assign(root_index, 0.0, _TWO_PI)
     for node in range(num_nodes):
@@ -737,21 +761,30 @@ def biconnected_components(edge_index: torch.Tensor, num_nodes: int) -> List[Lis
                 edge_stack.append(edge)
                 low[node] = min(low[node], discovery[neighbor])
 
-    for node in range(num_nodes):
-        if discovery[node] >= 0:
-            continue
-        if not adjacency[node]:
-            components.append([node])
-            discovery[node] = time
-            low[node] = time
-            time += 1
-            continue
-        visit(node, -1)
-        if edge_stack:
-            members = set()
-            while edge_stack:
-                members.update(edge_stack.pop())
-            components.append(sorted(members))
+    # The Tarjan visit recurses to DFS depth (~N on path-like graphs). Raise
+    # the recursion limit for the traversal and restore it afterward (scc.py
+    # Tarjan convention); an iterative rewrite would risk reordering the
+    # edge-stack pops that define component membership order.
+    previous_recursion_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(previous_recursion_limit, 2 * num_nodes + 100))
+    try:
+        for node in range(num_nodes):
+            if discovery[node] >= 0:
+                continue
+            if not adjacency[node]:
+                components.append([node])
+                discovery[node] = time
+                low[node] = time
+                time += 1
+                continue
+            visit(node, -1)
+            if edge_stack:
+                members = set()
+                while edge_stack:
+                    members.update(edge_stack.pop())
+                components.append(sorted(members))
+    finally:
+        sys.setrecursionlimit(previous_recursion_limit)
     return components
 
 
@@ -924,7 +957,16 @@ def _graphviz_owned_block_tree(
             elif parent[node] != neighbor:
                 low[node] = min(low[node], value[neighbor])
 
-    visit(root_node, True)
+    # The block-tree DFS recurses to graph-DFS depth (~N on grids/paths).
+    # Raise the recursion limit for the traversal and restore it afterward
+    # (scc.py Tarjan convention); an iterative rewrite would risk reordering
+    # the edge-stack pops that define Graphviz block ownership order.
+    previous_recursion_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(previous_recursion_limit, 2 * len(component_set) + 100))
+    try:
+        visit(root_node, True)
+    finally:
+        sys.setrecursionlimit(previous_recursion_limit)
     if owner[root_node] is None:
         root_block = make_block()
         add_node(root_block, root_node)
@@ -1176,32 +1218,32 @@ def _circo_spanning_tree(
     tree: Dict[int, List[int]] = {node: [] for node in nodes}
     parent: Dict[int, Optional[int]] = {node: None for node in nodes}
 
-    def dfs(node: int) -> None:
-        """Depth-first search that records traversed skeleton edges.
-
-        Parameters
-        ----------
-        node : int
-            Current skeleton node.
-
-        Returns
-        -------
-        None
-            ``tree`` and ``parent`` are updated in place.
-        """
-        visited.add(node)
-        for neighbor in skeleton[node]:
-            if neighbor in visited:
-                continue
-            tree[node].append(neighbor)
-            tree[neighbor].append(node)
-            parent[neighbor] = node
-            dfs(neighbor)
-
-    for node in nodes:
-        if node not in visited:
-            parent[node] = None
-            dfs(node)
+    # Iterative twin of Graphviz's recursive skeleton DFS (suspended-iterator
+    # stack): tree-adjacency append order and parent assignments are
+    # identical, and grid-shaped blocks no longer exhaust the recursion
+    # limit.
+    frames: List[Tuple[int, Iterator[int]]] = []
+    for start in nodes:
+        if start in visited:
+            continue
+        parent[start] = None
+        visited.add(start)
+        frames.append((start, iter(skeleton[start])))
+        while frames:
+            node, neighbors = frames[-1]
+            descended = False
+            for neighbor in neighbors:
+                if neighbor in visited:
+                    continue
+                tree[node].append(neighbor)
+                tree[neighbor].append(node)
+                parent[neighbor] = node
+                visited.add(neighbor)
+                frames.append((neighbor, iter(skeleton[neighbor])))
+                descended = True
+                break
+            if not descended:
+                frames.pop()
     return tree, parent
 
 
@@ -1252,28 +1294,32 @@ def _longest_tree_path(
         None
             Longest leaf data is updated in place.
         """
-        ancestor_parent = parent[ancestor]
-        if ancestor_parent is None:
-            return
-        distance += 1
-        if dist_one[ancestor_parent] == 0:
-            leaf_one[ancestor_parent] = node
-            dist_one[ancestor_parent] = distance
-        elif distance > dist_one[ancestor_parent]:
-            if leaf_one[ancestor_parent] != change:
-                if not dist_two[ancestor_parent] or leaf_two[ancestor_parent] != change:
-                    change = leaf_one[ancestor_parent]
-                    leaf_two[ancestor_parent] = leaf_one[ancestor_parent]
-                    dist_two[ancestor_parent] = dist_one[ancestor_parent]
-            leaf_one[ancestor_parent] = node
-            dist_one[ancestor_parent] = distance
-        elif distance > dist_two[ancestor_parent]:
-            leaf_two[ancestor_parent] = node
-            dist_two[ancestor_parent] = distance
-            return
-        else:
-            return
-        measure_distance(node, ancestor_parent, distance, change)
+        # Iterative twin of Graphviz's tail-recursive ancestor climb: the
+        # state updates per step are identical, and deep spanning trees no
+        # longer exhaust the recursion limit.
+        while True:
+            ancestor_parent = parent[ancestor]
+            if ancestor_parent is None:
+                return
+            distance += 1
+            if dist_one[ancestor_parent] == 0:
+                leaf_one[ancestor_parent] = node
+                dist_one[ancestor_parent] = distance
+            elif distance > dist_one[ancestor_parent]:
+                if leaf_one[ancestor_parent] != change:
+                    if not dist_two[ancestor_parent] or leaf_two[ancestor_parent] != change:
+                        change = leaf_one[ancestor_parent]
+                        leaf_two[ancestor_parent] = leaf_one[ancestor_parent]
+                        dist_two[ancestor_parent] = dist_one[ancestor_parent]
+                leaf_one[ancestor_parent] = node
+                dist_one[ancestor_parent] = distance
+            elif distance > dist_two[ancestor_parent]:
+                leaf_two[ancestor_parent] = node
+                dist_two[ancestor_parent] = distance
+                return
+            else:
+                return
+            ancestor = ancestor_parent
 
     for node in nodes:
         if len(tree[node]) == 1:
@@ -1501,6 +1547,16 @@ def _circo_reduce_edge_crossings(
     list[int]
         Best circular node order found by the Graphviz blockpath sweep.
     """
+    work_estimate = len(directed.nodes) * max(1, len(directed.edge_endpoints)) ** 2
+    if (
+        len(directed.nodes) > _CIRCO_CROSSING_REDUCTION_MAX_BLOCK_NODES
+        or work_estimate > _CIRCO_CROSSING_REDUCTION_MAX_WORK
+    ):
+        # The Graphviz reduce pass is cubic-ish in dense blocks because each
+        # insertion trial recomputes the full circular crossing sweep. Large
+        # blocks keep the deterministic blockpath order rather than burning the
+        # native portfolio budget on a cosmetic local search.
+        return ordered
     crossings = _circo_count_all_crossings(ordered, directed)
     if crossings == 0:
         return ordered
@@ -1631,26 +1687,23 @@ def _cycle_block_order(edge_index: torch.Tensor, block: Sequence[int]) -> Option
     ordered: List[int] = []
     visited: Set[int] = set()
 
-    def visit(node: int) -> None:
-        """Visit cycle nodes in input-neighbor order.
-
-        Parameters
-        ----------
-        node : int
-            Current cycle node.
-
-        Returns
-        -------
-        None
-            The function mutates ``ordered`` and ``visited``.
-        """
-        visited.add(node)
-        ordered.append(node)
-        for neighbor in adjacency[node]:
+    # Iterative twin of the recursive input-neighbor-order walk (suspended-
+    # iterator stack): visitation order is identical, and rings larger than
+    # the recursion limit no longer crash.
+    visited.add(start)
+    ordered.append(start)
+    frames: List[Iterator[int]] = [iter(adjacency[start])]
+    while frames:
+        descended = False
+        for neighbor in frames[-1]:
             if neighbor not in visited:
-                visit(neighbor)
-
-    visit(start)
+                visited.add(neighbor)
+                ordered.append(neighbor)
+                frames.append(iter(adjacency[neighbor]))
+                descended = True
+                break
+        if not descended:
+            frames.pop()
     if len(ordered) != len(block):
         return None
     return ordered
@@ -1705,9 +1758,15 @@ def _subtree_nodes(block: _CircoBlock) -> List[int]:
     list[int]
         Nodes owned by ``block`` and all descendants.
     """
-    nodes = list(block.nodes)
-    for child in block.children:
-        nodes.extend(_subtree_nodes(child))
+    # Iterative pre-order twin of the recursive collection: the emitted node
+    # order is identical, and deep block chains no longer exhaust the
+    # recursion limit.
+    nodes: List[int] = []
+    stack: List[_CircoBlock] = [block]
+    while stack:
+        current = stack.pop()
+        nodes.extend(current.nodes)
+        stack.extend(reversed(current.children))
     return nodes
 
 
@@ -2079,6 +2138,11 @@ def _layout_circo_block_tree(
 ) -> None:
     """Lay out one block tree using Graphviz circpos formulas.
 
+    Iterative post-order twin of the recursive block-tree walk (enter/exit
+    stack): blocks are finalized deepest-first with siblings in child order,
+    exactly as the recursion did, and deep block chains no longer exhaust
+    the recursion limit.
+
     Parameters
     ----------
     block : _CircoBlock
@@ -2100,10 +2164,48 @@ def _layout_circo_block_tree(
     None
         ``points`` and block radius metadata are updated in place.
     """
-    child_count = 0
-    for child in block.children:
-        _layout_circo_block_tree(child, adjacency, edge_index, nodesep, points, node_extents)
-        child_count += 1
+    work: List[Tuple[_CircoBlock, bool]] = [(block, False)]
+    while work:
+        current, expanded = work.pop()
+        if not expanded:
+            work.append((current, True))
+            for child in reversed(current.children):
+                work.append((child, False))
+            continue
+        _finalize_circo_block(current, adjacency, edge_index, nodesep, points, node_extents)
+
+
+def _finalize_circo_block(
+    block: _CircoBlock,
+    adjacency: Sequence[Sequence[int]],
+    edge_index: torch.Tensor,
+    nodesep: float,
+    points: Dict[int, Tuple[float, float]],
+    node_extents: Optional[Sequence[float]] = None,
+) -> None:
+    """Finalize one block after all of its children are laid out.
+
+    Parameters
+    ----------
+    block : _CircoBlock
+        Block whose children have already been finalized.
+    adjacency : sequence[sequence[int]]
+        Strict undirected adjacency.
+    edge_index : torch.Tensor
+        Original graph connectivity tensor with shape ``[2, E]``.
+    nodesep : float
+        Minimum separation scale.
+    points : dict[int, tuple[float, float]]
+        Mutable local point map.
+    node_extents : sequence[float], optional
+        Per-node maximum dimensions in points.
+
+    Returns
+    -------
+    None
+        ``points`` and block radius metadata are updated in place.
+    """
+    child_count = len(block.children)
 
     block.ordered = _circo_block_order(adjacency, edge_index, block)
     count = len(block.ordered)

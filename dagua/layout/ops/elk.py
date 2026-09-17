@@ -9,7 +9,19 @@ the layered spacing options exposed by the adapter.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, Dict, Hashable, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import (
+    ClassVar,
+    Dict,
+    Hashable,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import torch
 
@@ -304,6 +316,10 @@ def _node_sizes(problem: LayoutProblem) -> torch.Tensor:
         return sizes
     sizes = problem.node_sizes.detach().to(device="cpu", dtype=torch.float64)
     if sizes.shape != (problem.num_nodes, 2):
+        if problem.num_nodes == 0 and sizes.numel() == 0:
+            # Degenerate empty graphs may carry a 0-element size tensor of any
+            # shape (e.g. ``[0]`` from size computation on zero nodes).
+            return sizes.reshape(0, 2)
         raise ValueError("node_sizes must have shape [N, 2].")
     return sizes
 
@@ -381,31 +397,32 @@ def _break_cycles_depth_first(
     visited: Set[int] = set()
     stack: Set[int] = set()
 
-    def visit(node: int) -> None:
-        """Visit one node in model-order DFS.
-
-        Parameters
-        ----------
-        node : int
-            Node to visit.
-
-        Returns
-        -------
-        None
-            ``reversed_indices`` is mutated in place.
-        """
-        visited.add(node)
-        stack.add(node)
-        for edge_index, target in outgoing[node]:
-            if target in stack:
-                reversed_indices.add(edge_index)
-            elif target not in visited:
-                visit(target)
-        stack.remove(node)
-
-    for node in range(num_nodes):
-        if node not in visited:
-            visit(node)
+    # Iterative twin of ELK's recursive model-order DFS (suspended-iterator
+    # stack, matching the dagre acycler conversion): traversal order and the
+    # on-stack back-edge test are identical, and deep chains no longer
+    # exhaust the recursion limit.
+    frames: List[Tuple[int, Iterator[Tuple[int, int]]]] = []
+    for start in range(num_nodes):
+        if start in visited:
+            continue
+        visited.add(start)
+        stack.add(start)
+        frames.append((start, iter(outgoing[start])))
+        while frames:
+            node, edge_iter = frames[-1]
+            descended = False
+            for edge_index, target in edge_iter:
+                if target in stack:
+                    reversed_indices.add(edge_index)
+                elif target not in visited:
+                    visited.add(target)
+                    stack.add(target)
+                    frames.append((target, iter(outgoing[target])))
+                    descended = True
+                    break
+            if not descended:
+                stack.remove(node)
+                frames.pop()
     return [
         (target, source) if index in reversed_indices else (source, target)
         for index, (source, target) in enumerate(edges)
@@ -619,11 +636,20 @@ def _component_network_simplex_layers(
         Original node id to zero-based component-local layer.
     """
     local_by_node = {node: index for index, node in enumerate(component)}
-    rank_edges = [
-        (local_by_node[source], local_by_node[target], 1, 1)
-        for source, target in edges
-        if source in local_by_node and target in local_by_node
-    ]
+    # Collapse parallel edges before the network simplex, mirroring the
+    # reference contract: dagre.js networkSimplex() runs on simplify(g)
+    # (weights summed, minlen maxed over each multi-edge bundle), so the
+    # simplex machinery never sees parallel edges -- feeding them here (they
+    # arise when cycle-breaking reverses one arm of an antiparallel pair)
+    # violates the leave/enter exchange invariant and dies in enterEdge.
+    # ELK's own network simplex keeps parallel edges as separate unit-weight
+    # constraints, which is arithmetically identical to this weight sum.
+    collapsed: Dict[Tuple[int, int], int] = {}
+    for source, target in edges:
+        if source in local_by_node and target in local_by_node:
+            pair = (local_by_node[source], local_by_node[target])
+            collapsed[pair] = collapsed.get(pair, 0) + 1
+    rank_edges = [(source, target, 1, weight) for (source, target), weight in collapsed.items()]
     if not rank_edges:
         return {node: 0 for node in component}
     ranks = _dagre_network_simplex_ranks(list(range(len(component))), rank_edges)
@@ -1366,99 +1392,6 @@ def _layer_x_coordinates(
             coordinates[node] = cursor
             cursor += float(sizes[node, 0]) + node_spacing
     return coordinates
-
-
-def _normalize_long_edges_for_bk(
-    layers: Sequence[Sequence[int]],
-    predecessors: Mapping[int, Sequence[int]],
-    successors: Mapping[int, Sequence[int]],
-    sizes: torch.Tensor,
-) -> Tuple[
-    List[List[NodeId]],
-    Dict[NodeId, List[NodeId]],
-    Dict[NodeId, List[NodeId]],
-    Dict[NodeId, float],
-    Set[NodeId],
-]:
-    """Split long edges into dummy chains for Brandes-Koepf placement.
-
-    Parameters
-    ----------
-    layers : sequence[sequence[int]]
-        Ordered real-node layers.
-    predecessors : mapping[int, sequence[int]]
-        Real-node predecessor lists.
-    successors : mapping[int, sequence[int]]
-        Real-node successor lists.
-    sizes : torch.Tensor
-        Real node sizes with shape ``[N, 2]``.
-
-    Returns
-    -------
-    tuple
-        Normalized layers, predecessor map, successor map, width map, and the
-        set of dummy node ids introduced for long edge segments.
-    """
-    layer_by_node = {
-        node: layer_index for layer_index, layer in enumerate(layers) for node in layer
-    }
-    normalized_layers: List[List[NodeId]] = [list(layer) for layer in layers]
-    normalized_predecessors: Dict[NodeId, List[NodeId]] = {
-        node: [] for layer in normalized_layers for node in layer
-    }
-    normalized_successors: Dict[NodeId, List[NodeId]] = {
-        node: [] for layer in normalized_layers for node in layer
-    }
-    widths: Dict[NodeId, float] = {
-        node: float(sizes[node, 0]) for layer in layers for node in layer
-    }
-    dummy_nodes: Set[NodeId] = set()
-
-    def add_segment(source: NodeId, target: NodeId) -> None:
-        """Add one normalized edge segment.
-
-        Parameters
-        ----------
-        source : Hashable
-            Segment source node id.
-        target : Hashable
-            Segment target node id.
-
-        Returns
-        -------
-        None
-            Normalized predecessor and successor maps are updated in place.
-        """
-        normalized_successors.setdefault(source, []).append(target)
-        normalized_predecessors.setdefault(target, []).append(source)
-
-    edge_index = 0
-    for source in sorted(successors):
-        for target in successors[source]:
-            source_layer = layer_by_node[source]
-            target_layer = layer_by_node[target]
-            span = target_layer - source_layer
-            if abs(span) <= 1:
-                add_segment(source, target)
-                continue
-            step = 1 if span > 0 else -1
-            previous: NodeId = source
-            for layer_index in range(source_layer + step, target_layer, step):
-                dummy: NodeId = ("elk_dummy", edge_index, layer_index)
-                dummy_nodes.add(dummy)
-                widths[dummy] = 0.0
-                insertion_layer = normalized_layers[layer_index]
-                insertion_layer.append(dummy)
-                add_segment(previous, dummy)
-                previous = dummy
-            add_segment(previous, target)
-            edge_index += 1
-
-    for node in list(normalized_predecessors):
-        normalized_predecessors[node] = list(dict.fromkeys(normalized_predecessors[node]))
-    for node in list(normalized_successors):
-        normalized_successors[node] = list(dict.fromkeys(normalized_successors[node]))
-    return normalized_layers, normalized_predecessors, normalized_successors, widths, dummy_nodes
 
 
 def _normalize_long_edges_for_elk_bk(

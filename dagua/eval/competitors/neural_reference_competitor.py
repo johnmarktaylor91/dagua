@@ -101,14 +101,19 @@ def _deterministic_torch(seed: int) -> Iterator[None]:
 
 
 def _reference_device() -> torch.device:
-    """Return the preferred deterministic inference device.
+    """Return the pinned deterministic inference device.
+
+    Pinned to CPU: cuda-when-available produced machine-dependent field rows
+    (CUDA vs CPU inference differ in low-order bits even under deterministic
+    algorithms), so the same benchmark row diverged across hosts. CPU matches
+    the coregd reference policy.
 
     Returns
     -------
     torch.device
-        CUDA when available, otherwise CPU.
+        Always CPU.
     """
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device("cpu")
 
 
 class _NeuralReferenceCompetitor(CompetitorBase):
@@ -116,6 +121,12 @@ class _NeuralReferenceCompetitor(CompetitorBase):
 
     spec: NeuralReferenceSpec
     supports_clusters = False
+    # External model checkpoints, but the model INPUT runs the FULL dagua
+    # native-stress pipeline (prepare_smartgd_data -> smartgd.py:1530
+    # layout_native_stress_pipeline, with its converge/stress/graph_utils
+    # closure): tree-key instead of chasing per-file delegates
+    # (dry-well R3-B3-Fable F4). Inherited by SmartGD and DeepGD.
+    executes_dagua_source = True
 
     def __init__(self) -> None:
         """Initialize registration metadata from the class spec."""

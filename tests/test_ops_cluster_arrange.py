@@ -139,3 +139,82 @@ def test_cluster_grid_arrange_preserves_depth_order() -> None:
     centroids_y = {name: out.pos[indices, 1].mean().item() for name, indices in clusters.items()}
     assert centroids_y["stage_0"] < centroids_y["stage_2"]
     assert centroids_y["stage_1"] < centroids_y["stage_3"]
+
+
+# --- WP05-F02: cluster parent-cycle guards (shared hierarchy helpers) ---
+
+
+def test_break_cluster_parent_cycles_re_roots_cycle_members() -> None:
+    """Cycle members become roots; clusters pointing INTO a cycle keep parents."""
+    from dagua.layout.ops.cluster_geometry import break_cluster_parent_cycles
+
+    fixed = break_cluster_parent_cycles({"A": "B", "B": "A", "C": "A", "D": None})
+    assert fixed == {"A": None, "B": None, "C": "A", "D": None}
+
+    assert break_cluster_parent_cycles({"A": "A"}) == {"A": None}
+
+    acyclic = {"A": None, "B": "A", "C": "B"}
+    assert break_cluster_parent_cycles(acyclic) == acyclic
+
+
+def test_cluster_tree_from_flat_membership_tolerates_parent_cycles() -> None:
+    """WP05-F02 regression: cyclic cluster metadata must not recurse forever."""
+    from dagua.layout.ops.cluster_geometry import ClusterTree
+
+    tree = ClusterTree.from_flat_membership(
+        {"A": [0, 1], "B": [2]},
+        {"A": "B", "B": "A"},
+    )
+    assert tree.roots == ("A", "B")
+    assert tree.descendants_per_cluster["A"] == frozenset({0, 1})
+    assert tree.descendants_per_cluster["B"] == frozenset({2})
+
+    self_parent_tree = ClusterTree.from_flat_membership({"A": [0]}, {"A": "A"})
+    assert self_parent_tree.roots == ("A",)
+
+
+def test_normalize_graphviz_cluster_parents_breaks_cycles() -> None:
+    """WP05-F02 regression: the graphviz rank path normalizes cycles to roots."""
+    from dagua.layout.ops.sugiyama import _normalize_graphviz_cluster_parents
+
+    parents = _normalize_graphviz_cluster_parents(["A", "B", "C"], {"A": "B", "B": "A", "C": "B"})
+    assert parents == {"A": None, "B": None, "C": "B"}
+
+    acyclic = _normalize_graphviz_cluster_parents(["A", "B"], {"B": "A"})
+    assert acyclic == {"A": None, "B": "A"}
+
+
+def test_cluster_tree_survives_deep_linear_nesting_both_name_orders() -> None:
+    """B2-F01 regression: ~1500-deep valid linear nesting must not RecursionError.
+
+    The pre-fix memoize-after-recurse expansion crashed at ~997 levels when the
+    ROOT sorted first (parents expanded before children), while the identical
+    hierarchy with the root sorting last survived -- so both name orderings are
+    pinned here, at Python's default recursion limit.
+    """
+    import sys
+
+    from dagua.layout.ops.cluster_geometry import ClusterTree
+
+    depth = 1500
+
+    def build(names: list[str]) -> tuple[dict, dict]:
+        clusters = {name: [index] for index, name in enumerate(names)}
+        parent_of = {names[index]: names[index - 1] for index in range(1, depth)}
+        return clusters, parent_of
+
+    root_first = [f"c{index:06d}" for index in range(depth)]
+    root_last = [f"c{depth - 1 - index:06d}" for index in range(depth)]
+
+    previous_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        for names in (root_first, root_last):
+            clusters, parent_of = build(names)
+            tree = ClusterTree.from_flat_membership(clusters, parent_of)
+            assert tree.roots == (names[0],)
+            assert tree.descendants_per_cluster[names[0]] == frozenset(range(depth))
+            assert tree.descendants_per_cluster[names[-1]] == frozenset({depth - 1})
+            assert tree.leaves_per_cluster[names[0]] == frozenset({0})
+    finally:
+        sys.setrecursionlimit(previous_limit)

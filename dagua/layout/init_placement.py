@@ -77,9 +77,14 @@ def init_positions(
     # world, dense random) and downstream Force2DInitIfFlat handles it via
     # 2D random init.
     if num_nodes > 2:
+        from collections import Counter
+
         layer_seq = layers if isinstance(layers, list) else layers.tolist()
-        n_layers = len(set(layer_seq))
-        max_layer_count = max(layer_seq.count(v) for v in set(layer_seq))
+        layer_histogram = Counter(layer_seq)
+        n_layers = len(layer_histogram)
+        # Single-pass histogram: the previous per-value .count() probe was
+        # O(unique_layers x N) -- quadratic on chain-like layerings.
+        max_layer_count = max(layer_histogram.values())
         heavy_skew = max_layer_count / float(num_nodes) > 0.5
         if n_layers <= 1 or heavy_skew:
             from dagua.layout.cycle import make_acyclic_robust

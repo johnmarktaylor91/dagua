@@ -139,11 +139,19 @@ def register_op(cls: Type["Op"]) -> Type["Op"]:
     Raises
     ------
     ValueError
-        If an op with the same name is already registered.
+        If the class is missing a proper ``name`` attribute, or if an op
+        with the same name is already registered.
     """
     name = getattr(cls, "name", None)
     if name is None or name == "unnamed_op":
-        return cls
+        # A silent skip here would make the op invisibly absent from the
+        # registry (the only silent-drop vector in discovery); fail loudly.
+        raise ValueError(
+            f"@register_op requires a class-level 'name' attribute: "
+            f"{cls.__module__}.{cls.__qualname__} has "
+            f"{'no name set' if name is None else repr(name)}. "
+            f"Define a unique 'name' ClassVar before registering."
+        )
     if name in _OP_REGISTRY:
         existing = _OP_REGISTRY[name]
         if existing is not cls:

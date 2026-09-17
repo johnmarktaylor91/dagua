@@ -232,7 +232,9 @@ def _layout_cluster_aware_pipeline(graph: Any, config: LayoutConfig) -> Optional
         clusters=graph.clusters,
         cluster_parents=graph.cluster_parents,
         edge_weights=getattr(graph, "edge_weights", None),
-        seed=config.seed or 42,
+        # ``is None`` check: a legitimate seed of 0 is falsy and must not be
+        # silently replaced by the default.
+        seed=42 if config.seed is None else config.seed,
     )
     driver = ClusterAwareDriver(
         inner_pipeline=inner_pipeline.ops,
@@ -1121,6 +1123,10 @@ def _effective_constraint_config(config: LayoutConfig, graph: Any) -> LayoutConf
             setattr(resolved, "_dagua_effective_constraints", True)
             return resolved
         resolved = _resolve_flex_ids(config, graph)
+        if resolved is config:
+            # _resolve_flex_ids returns the caller's object when there is no
+            # flex; copy before tagging so caller-owned state is never mutated.
+            resolved = copy.copy(config)
         setattr(resolved, "_dagua_effective_constraints", True)
         return resolved
 
@@ -1240,6 +1246,42 @@ def _apply_label_satellite_constraints(
                 float(current[1].item()) if target_y is None else float(target_y),
             )
     setattr(graph, "_r9_label_positions", label_positions)
+
+
+def _finite_preserving_cast(pos: torch.Tensor, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    """Cast positions to ``dtype`` only when the cast keeps them finite.
+
+    Deep block-chain layouts (e.g. circo on articulation chains) can
+    legitimately produce finite float64 coordinates beyond float32 range;
+    casting those would replace finite values with infinities. When that
+    would happen, keep the wider tensor and disclose it with a one-line
+    warning. For every tensor whose cast stays finite -- and for tensors
+    that are already non-finite -- the behavior is the plain cast.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    dtype : torch.dtype, default=torch.float32
+        Requested output dtype.
+
+    Returns
+    -------
+    torch.Tensor
+        Cast tensor, or the original tensor when casting would destroy
+        finite coordinates.
+    """
+    cast = pos.to(dtype=dtype)
+    if bool(torch.isfinite(cast).all()) or not bool(torch.isfinite(pos).all()):
+        return cast
+    import warnings
+
+    warnings.warn(
+        f"layout positions exceed {dtype} range; returning {pos.dtype} to keep them finite.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return pos
 
 
 def _apply_constrained_polish(
@@ -1420,6 +1462,194 @@ def _project_hard_constraints_from_flex_data(pos: torch.Tensor, flex_data: dict[
         )
 
 
+def _edge_count_for_scale_gate(graph: Any) -> int:
+    """Return the directed edge count without touching layout-prep state.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object exposing ``edge_index``.
+
+    Returns
+    -------
+    int
+        Number of directed edge entries.
+    """
+    edge_index = getattr(graph, "edge_index", None)
+    if edge_index is None or edge_index.numel() == 0:
+        return 0
+    return int(edge_index.shape[1])
+
+
+def _record_scale_route_metadata(graph: Any, metadata: dict[str, object]) -> None:
+    """Attach scale-route metadata to graph-like results.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object that can accept dynamic attributes.
+    metadata : dict[str, object]
+        Route decision and sketch summary.
+
+    Returns
+    -------
+    None
+        Metadata is stored best-effort for callers and tests.
+    """
+    try:
+        setattr(graph, "_dagua_scale_route_decision", metadata)
+    except Exception:
+        return
+
+
+def _ensure_scale_node_sizes(graph: Any, config: LayoutConfig) -> None:
+    """Ensure above-gate layouts have node boxes without expensive text fitting.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object exposing ``node_sizes`` and ``num_nodes``.
+    config : LayoutConfig
+        Layout configuration used to derive conservative default scale boxes.
+
+    Returns
+    -------
+    None
+        Existing valid node sizes are preserved; missing sizes get uniform
+        boxes so scale strategies do not run per-label matplotlib measurement
+        on 100K+ synthetic/default-labeled graphs.
+    """
+    node_sizes = getattr(graph, "node_sizes", None)
+    if (
+        node_sizes is not None
+        and node_sizes.ndim == 2
+        and node_sizes.shape[0] == int(graph.num_nodes)
+        and node_sizes.shape[1] == 2
+    ):
+        return
+    materialize_threshold = int(
+        config.algorithm_params.get("scale_node_size_materialize_threshold", 50_000_000)
+    )
+    if int(graph.num_nodes) >= materialize_threshold:
+        return
+    default_size = max(1.0, float(getattr(config, "node_sep", 70.0)) * 0.20)
+    graph.node_sizes = torch.full((int(graph.num_nodes), 2), default_size, dtype=torch.float32)
+
+
+def _layout_scale_default(
+    graph: Any,
+    config: LayoutConfig,
+    *,
+    trace: Any = None,
+) -> Optional[torch.Tensor]:
+    """Dispatch an above-gate default layout through the scale router.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object exposing the Dagua layout interface.
+    config : LayoutConfig
+        Default-path config that has already been remapped to
+        ``algorithm="dagua_native"``.
+    trace : Any, optional
+        Optional trace sink forwarded to the temporary legacy scale fallback.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Completed scale layout when the router selects a scale strategy.
+        ``None`` means the explicit override selected ``NATIVE`` and the caller
+        should continue into the existing native pipeline.
+    """
+    from dagua.layout.scale.budget import BudgetGuard
+    from dagua.layout.scale.router import (
+        ScaleStrategy,
+        declared_topology_from_config,
+        depth_cap_from_config,
+        route,
+    )
+    from dagua.layout.scale.sketch import (
+        TopologySketch,
+        estimate_bounded_topology_peak_bytes,
+        estimate_declared_topology_peak_bytes,
+        estimate_topology_peak_bytes,
+    )
+
+    n = int(graph.num_nodes)
+    e = _edge_count_for_scale_gate(graph)
+    guard = BudgetGuard(device="cpu")
+    declared = declared_topology_from_config(config)
+    if declared is not None:
+        sketch_mode = "declared"
+        guard.check("scale_sketch_declared", estimate_declared_topology_peak_bytes(n, e))
+        sketch = TopologySketch.from_declared_topology(
+            graph.edge_index,
+            n,
+            declared.topology,
+            declared_num_edges=e,
+            depth_cap=depth_cap_from_config(config),
+            depth=declared.depth,
+            depth_cap_tripped=declared.depth_cap_tripped,
+        )
+    else:
+        sketch_peak = estimate_topology_peak_bytes(n, e)
+        sketch_mode = "exact"
+        try:
+            guard.check("scale_sketch", sketch_peak)
+        except MemoryError:
+            sketch_mode = "bounded"
+            guard.check("scale_sketch_bounded", estimate_bounded_topology_peak_bytes(n, e))
+            sketch = TopologySketch.from_edge_index_bounded(
+                graph.edge_index,
+                n,
+                depth_cap=depth_cap_from_config(config),
+            )
+        else:
+            sketch = TopologySketch.from_edge_index(
+                graph.edge_index,
+                n,
+                depth_cap=depth_cap_from_config(config),
+            )
+    decision = route(sketch, config)
+    metadata = {
+        "decision": decision.to_dict(),
+        "sketch": sketch.to_dict(),
+        "sketch_mode": sketch_mode,
+    }
+    _record_scale_route_metadata(graph, metadata)
+    if config.verbose:
+        print(
+            f"[dagua] Scale route: {decision.strategy.value} ({', '.join(decision.reason_codes)})",
+            flush=True,
+        )
+    if decision.strategy == ScaleStrategy.NATIVE:
+        return None
+
+    guard.check("scale_dispatch", sketch.peak_bytes)
+    _ensure_scale_node_sizes(graph, config)
+    graph._prepare_for_layout()
+    try:
+        scale_config = copy.copy(config)
+        if decision.strategy == ScaleStrategy.FIELD:
+            from dagua.layout.scale.strategies.field import layout_field
+
+            pos = layout_field(graph, scale_config, sketch, trace=trace)
+            field_metadata = dict(metadata)
+            field_metadata["field"] = getattr(scale_config, "_dagua_field_telemetry", {})
+            _record_scale_route_metadata(graph, field_metadata)
+        else:
+            from dagua.layout.scale.strategies.layers import layout_layers
+
+            pos = layout_layers(graph, scale_config, sketch, trace=trace)
+            layers_metadata = dict(metadata)
+            layers_metadata["layers"] = getattr(scale_config, "_dagua_layers_telemetry", {})
+            _record_scale_route_metadata(graph, layers_metadata)
+        graph.cache_layout(pos)
+        return pos.to(dtype=torch.float32)
+    finally:
+        graph._restore_after_layout()
+
+
 def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None) -> torch.Tensor:
     """Compute layout positions for all nodes.
 
@@ -1457,7 +1687,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
 
         warnings.warn(
             "dagua.layout: trace-enabled runs still use the legacy engine "
-            "Set "
+            "because the pipeline path does not record traces yet. Set "
             'algorithm="_legacy" to silence this warning, or pass trace=None '
             "to use the new default pipeline.",
             DeprecationWarning,
@@ -1468,6 +1698,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
 
         warnings.warn(
             "dagua.layout: relax_steps>0 still uses the legacy engine because "
+            "the pipeline path has no relaxation stage yet. "
             'Set algorithm="_legacy" '
             "to silence, or set relax_steps=0 to use the new default.",
             DeprecationWarning,
@@ -1495,6 +1726,25 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         graph_direction = getattr(graph, "direction", None)
         if config.direction == "TB" and graph_direction in {"TB", "BT", "LR", "RL"}:
             config.direction = graph_direction
+
+    if remapped_from_default:
+        # The scale gate is a DEFAULT-PATH contract only: an explicit
+        # ``LayoutConfig(algorithm="dagua_native")`` call bypasses sketch/route
+        # entirely at any N and enters the native pipeline directly. Note also
+        # that ``_layout_scale_default`` calls ``graph._prepare_for_layout()``
+        # before the scale strategies read ``graph.edge_index``, so they see
+        # acyclic-ized edges, while the native path below dispatches on the
+        # raw (possibly cyclic) edges. Both are intentional.
+        from dagua.layout.scale.router import should_enter_scale_gate
+
+        if should_enter_scale_gate(
+            int(graph.num_nodes),
+            _edge_count_for_scale_gate(graph),
+            config,
+        ):
+            scale_pos = _layout_scale_default(graph, config, trace=trace)
+            if scale_pos is not None:
+                return scale_pos
 
     if config.algorithm is not None:
         import inspect
@@ -1535,11 +1785,37 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
         }
         if graph.edge_weights is not None:
             kwargs["edge_weights"] = graph.edge_weights
+        # Reject algorithm_params that would silently replace the graph
+        # topology or the config object itself. (``seed``, ``node_sizes`` and
+        # ``edge_weights`` remain effective overrides for compatibility.)
+        reserved_collisions = {"edge_index", "num_nodes", "config"} & set(config.algorithm_params)
+        if reserved_collisions:
+            raise ValueError(
+                "dagua.layout: algorithm_params may not override reserved dispatch "
+                f"kwargs {sorted(reserved_collisions)}; these are derived from the "
+                "graph and LayoutConfig."
+            )
         kwargs.update(config.algorithm_params)
+        if "fidelity_dtype" in config.algorithm_params:
+            warnings.warn(
+                "dagua.layout: algorithm_params['fidelity_dtype'] is ignored; "
+                "set LayoutConfig(fidelity_dtype=...) instead.",
+                UserWarning,
+                stacklevel=2,
+            )
         kwargs["fidelity_dtype"] = config.fidelity_dtype
         # Forward steps if the pipeline accepts it
         sig = inspect.signature(pipeline_fn)
-        if "steps" in sig.parameters:
+        if "steps" in sig.parameters and not (
+            str(config.algorithm).lower() == "cise" and config.steps <= 0
+        ):
+            if "steps" in config.algorithm_params:
+                warnings.warn(
+                    "dagua.layout: algorithm_params['steps'] is ignored; "
+                    "set LayoutConfig(steps=...) instead.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             kwargs["steps"] = config.steps
 
         # Classify once here, where the real DaguaGraph is in scope, so an
@@ -1561,6 +1837,10 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 graph.edge_index,
                 graph.num_nodes,
                 graph=graph,
+                # Respect the caller's device: an explicit device="cpu" run
+                # must not launch CUDA work for classification layering.
+                # Output is device-independent (integer longest-path layers).
+                device=config.device,
             )
 
         # Forward user-facing state into the pipeline regardless of how the
@@ -1597,6 +1877,16 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             ]
 
         accepted = set(sig.parameters.keys())
+        # Surface user params the pipeline signature does not accept: the
+        # filter below silently drops them (misspelled params used to vanish).
+        dropped_user_params = set(config.algorithm_params) - accepted
+        if dropped_user_params:
+            warnings.warn(
+                f"dagua.layout: algorithm_params {sorted(dropped_user_params)} are "
+                f"not accepted by algorithm {config.algorithm!r} and were ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
         kwargs = {k: v for k, v in kwargs.items() if k in accepted}
 
         if remapped_from_default:
@@ -1610,7 +1900,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                         getattr(config, "flex", None),
                         getattr(config, "direction", "TB"),
                     )
-                pos = pos.to(dtype=torch.float32)
+                pos = _finite_preserving_cast(pos)
                 _update_graph_constraint_report(graph, pos, config)
                 graph.cache_layout(pos)
                 return pos
@@ -1628,7 +1918,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                         getattr(config, "direction", "TB"),
                     )
                 _update_graph_constraint_report(graph, pos, config)
-                return (pos.to(dtype=torch.float32), *rest)
+                return (_finite_preserving_cast(pos), *rest)
             return result
         pos = _apply_constrained_polish(result, graph, config)
         if _config_or_graph_has_constraints(config, graph):
@@ -1638,7 +1928,7 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
                 getattr(config, "direction", "TB"),
             )
         _update_graph_constraint_report(graph, pos, config)
-        return pos.to(dtype=torch.float32)
+        return _finite_preserving_cast(pos)
 
     # Ensure node sizes are computed
     graph.compute_node_sizes()
@@ -1703,7 +1993,9 @@ def layout(graph: Any, config: Optional[LayoutConfig] = None, trace: Any = None)
             # graphs keep the exact prior path (None -> _layout_inner
             # classifies internally, identical inputs).
             if getattr(graph, "is_semantically_directed", None) is not None:
-                legacy_graph_structure = classify_graph(edge_index, n, graph=graph)
+                legacy_graph_structure = classify_graph(
+                    edge_index, n, graph=graph, device=config.device
+                )
 
             pos = _layout_inner(
                 edge_index,
@@ -4679,13 +4971,18 @@ def _resolve_flex_ids(config: LayoutConfig, graph) -> LayoutConfig:
 
 
 def _resolve_config_flex(config: LayoutConfig, graph) -> LayoutConfig:
-    """Create a config copy with flex node IDs resolved to indices."""
+    """Create a config copy with flex node IDs resolved to indices.
+
+    Never mutates the caller's config or flex objects: both are copied before
+    the graph back-reference is attached.
+    """
     import copy as _c
 
     resolved_flex = _resolve_graph_flex(config.flex, graph)
     if resolved_flex is config.flex:
-        setattr(config.flex, "_constraint_context_graph", graph)
-        return config
+        # Belt-and-braces: _resolve_graph_flex copies before tagging, so this
+        # branch should not fire; copy anyway so caller state is never touched.
+        resolved_flex = _c.copy(config.flex)
     new_config = _c.copy(config)
     new_config.flex = resolved_flex
     setattr(new_config.flex, "_constraint_context_graph", graph)
@@ -4847,8 +5144,14 @@ def _resolve_graph_flex(flex, graph):
         changed = changed or resolved is not constraint
 
     if not changed:
-        setattr(flex, "_constraint_context_graph", graph)
-        return flex
+        # Copy before attaching the graph back-reference: ``flex`` may be the
+        # caller's (or the graph's) own object, and tagging it in place both
+        # mutates caller-owned state and pins a graph reference onto it.
+        import copy as _c
+
+        resolved_flex = _c.copy(flex)
+        setattr(resolved_flex, "_constraint_context_graph", graph)
+        return resolved_flex
 
     resolved_flex = LayoutFlex(
         node_sep=flex.node_sep,

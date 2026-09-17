@@ -10,6 +10,7 @@ Sources: synthetic generators + TorchLens model traces.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import random
 from dataclasses import dataclass, field
@@ -1698,8 +1699,86 @@ def _r79_extension_graphs() -> List[TestGraph]:
     ]
 
 
+# Certified corpus shape pins (WP07-F02/F03 guards).
+#
+# Both real_* builders below branch on the presence of a NetworkX loader
+# (``hasattr(nx, ...)``), which makes the constructed graph ENVIRONMENT-KEYED:
+# a networkx upgrade that adds/removes the loader would silently swap the
+# topology under the SAME certified graph name. The certified 121-row tally
+# reconstructs these graphs by name, so a silent swap would score a different
+# graph as the same row. These pins record the exact shape of the certified
+# artifacts (as built in the canonical env: networkx 3.6.1) and make any
+# drift a LOUD RuntimeError at corpus-construction time instead of a silent
+# substitution. They must never be "updated to match" a drifted environment
+# without an explicit re-certification decision.
+_CERTIFIED_REAL_GRAPH_PINS: dict[str, Tuple[int, int, str]] = {
+    # name: (num_nodes, num_edges, sha256 of sorted total-degree sequence)
+    "real_lesmis_77": (
+        77,
+        254,
+        "53027542bebf150780181e5c33554add"  # pragma: allowlist secret
+        "761145c10b4f46ef9dc6d62045380717",  # pragma: allowlist secret
+    ),
+    "real_football_115": (
+        115,
+        653,
+        "e3d9aee366394f964e1d084afcc0cf94"  # pragma: allowlist secret
+        "f86329484ab724807efc6397afe4ef83",  # pragma: allowlist secret
+    ),
+}
+
+
+def _degree_sequence_hash(graph: DaguaGraph) -> str:
+    """SHA256 hex digest of the graph's sorted total-degree sequence.
+
+    Degrees are counted over ``edge_index`` endpoints (in+out combined, which
+    for the DAG-oriented undirected imports equals the undirected degree).
+    """
+    edge_index = graph.edge_index
+    degrees = torch.bincount(edge_index.reshape(-1), minlength=graph.num_nodes)
+    payload = ",".join(str(int(d)) for d in sorted(degrees.tolist()))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _assert_certified_real_graph_shape(name: str, graph: DaguaGraph) -> None:
+    """Fail loudly if an environment change altered a certified real graph.
+
+    Raises
+    ------
+    RuntimeError
+        If the constructed graph's node count, edge count, or degree-sequence
+        hash deviates from the pinned certified shape.
+    """
+    expected_nodes, expected_edges, expected_degree_hash = _CERTIFIED_REAL_GRAPH_PINS[name]
+    actual_nodes = graph.num_nodes
+    actual_edges = graph.num_edges
+    actual_degree_hash = _degree_sequence_hash(graph)
+    if (
+        actual_nodes != expected_nodes
+        or actual_edges != expected_edges
+        or actual_degree_hash != expected_degree_hash
+    ):
+        raise RuntimeError(
+            f"Certified benchmark graph '{name}' no longer matches its pinned shape: "
+            f"expected (nodes={expected_nodes}, edges={expected_edges}, "
+            f"degree_hash={expected_degree_hash}), got (nodes={actual_nodes}, "
+            f"edges={actual_edges}, degree_hash={actual_degree_hash}). "
+            "This almost certainly means a networkx version change flipped the "
+            "hasattr() loader branch (or changed the loader/generator output), "
+            "silently substituting a different topology under the certified name. "
+            "Do NOT update the pin; restore the canonical environment "
+            "(networkx==3.6.1) or make an explicit re-certification decision."
+        )
+
+
 def make_real_lesmis_graph() -> TestGraph:
     """Build the Les Miserables co-occurrence benchmark graph.
+
+    In the canonical environment (networkx 3.6.1) the primary branch is live:
+    the certified ``real_lesmis_77`` artifact is the genuine 77-node
+    ``les_miserables_graph``. The florentine-families fallback would silently
+    substitute a 15-node graph under the same certified name, so the pinned
+    shape check below turns that into a loud failure.
 
     Returns
     -------
@@ -1718,6 +1797,7 @@ def make_real_lesmis_graph() -> TestGraph:
             "Florentine families graph used as a fallback social benchmark, oriented into a DAG"
         )
     graph = _graph_from_undirected_networkx(nx_graph)
+    _assert_certified_real_graph_shape("real_lesmis_77", graph)
     return TestGraph(
         name=name,
         graph=graph,
@@ -1730,6 +1810,15 @@ def make_real_lesmis_graph() -> TestGraph:
 
 def make_real_football_graph(seed: int = 42) -> TestGraph:
     """Build the football benchmark graph or its synthetic community fallback.
+
+    NOTE (certified-artifact framing): networkx 3.x has no ``football_graph``
+    loader, so in the canonical environment the SBM fallback branch is the
+    one that executes -- the certified ``real_football_115`` artifact IS the
+    seeded synthetic SBM (12 uneven communities, seed=42), not a real-world
+    dataset, despite the "real-world" tag kept for suite-grouping continuity.
+    If a future networkx (or a dataset shim) ever ADDS ``football_graph``,
+    the primary branch would silently swap the topology under the certified
+    name; the pinned shape check below turns that into a loud failure.
 
     Parameters
     ----------
@@ -1759,6 +1848,7 @@ def make_real_football_graph(seed: int = 42) -> TestGraph:
         source = "synthetic-fallback"
         description = "Football-style synthetic SBM fallback with 12 uneven communities"
 
+    _assert_certified_real_graph_shape("real_football_115", graph)
     return TestGraph(
         name="real_football_115",
         graph=graph,

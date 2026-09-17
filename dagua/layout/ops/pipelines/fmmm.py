@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -4481,6 +4481,11 @@ def _fdp_recursion_components(derived: _FdpDerivedGraph) -> Tuple[Tuple[int, ...
     def dfs(node_index: int, out: List[int]) -> None:
         """Append a connected component using Graphviz-style DFS.
 
+        Iterative twin of the recursive ``findCComp`` walk (suspended-
+        iterator stack): the component append order is identical, and
+        ~1000+-node direct-child components no longer exhaust the recursion
+        limit.
+
         Parameters
         ----------
         node_index : int
@@ -4495,9 +4500,18 @@ def _fdp_recursion_components(derived: _FdpDerivedGraph) -> Tuple[Tuple[int, ...
         """
         marked[node_index] = True
         out.append(node_index)
-        for other in adjacency[node_index]:
-            if not marked[other]:
-                dfs(other, out)
+        frames: List[Iterator[int]] = [iter(adjacency[node_index])]
+        while frames:
+            descended = False
+            for other in frames[-1]:
+                if not marked[other]:
+                    marked[other] = True
+                    out.append(other)
+                    frames.append(iter(adjacency[other]))
+                    descended = True
+                    break
+            if not descended:
+                frames.pop()
 
     if derived.port_indices:
         merged_ports: List[int] = []
@@ -5573,138 +5587,171 @@ def _fdp_recursion_layout_level(
     _FdpLevelLayout
         Recursive level layout with original-node positions.
     """
-    derived = _fdp_recursion_derive_graph(edge_index, num_nodes, tree, cluster_name, ports)
-    if not derived.nodes:
-        return _FdpLevelLayout(positions={}, width=0.0, height=0.0, cluster_boxes={})
 
-    components = _fdp_recursion_components(derived)
-    child_layouts: Dict[str, _FdpLevelLayout] = {}
-    component_positions: List[Dict[int, torch.Tensor]] = []
-    component_boxes: List[Tuple[float, float, float, float]] = []
-    component_node_geometries: List[List[Tuple[float, float, float, float]]] = []
+    def run(
+        current_cluster: Optional[str],
+        current_ports: Sequence[_FdpRecursionPort],
+    ) -> Any:
+        """Lay out one level, yielding child-cluster requests to the trampoline.
 
-    for component in components:
-        local_tensor, xpms = _fdp_recursion_tlayout_component(
-            derived=derived,
-            component=component,
-            seed=seed,
-            max_iters=steps,
+        The body is the verbatim recursive level driver with the self-call
+        replaced by ``yield``, so per-component work, port expansion, child
+        layout, and box accumulation run in exactly the recursion's order
+        while nesting depth lives on a heap stack.
+
+        Parameters
+        ----------
+        current_cluster : str | None
+            Cluster laid out at this level, or ``None`` for the root.
+        current_ports : Sequence[_FdpRecursionPort]
+            Parent-generated boundary ports.
+
+        Yields
+        ------
+        tuple[str, tuple]
+            Child cluster name and ports whose finished layout is sent back.
+        """
+        derived = _fdp_recursion_derive_graph(
+            edge_index, num_nodes, tree, current_cluster, current_ports
         )
-        local_positions = {
-            derived_index: local_tensor[local_index]
-            for local_index, derived_index in enumerate(component)
-        }
-        for derived_index in component:
-            node = derived.nodes[derived_index]
-            if node.kind != "cluster":
-                continue
-            child_ports = _fdp_recursion_expand_cluster_ports(
+        if not derived.nodes:
+            return _FdpLevelLayout(positions={}, width=0.0, height=0.0, cluster_boxes={})
+
+        components = _fdp_recursion_components(derived)
+        child_layouts: Dict[str, _FdpLevelLayout] = {}
+        component_positions: List[Dict[int, torch.Tensor]] = []
+        component_boxes: List[Tuple[float, float, float, float]] = []
+        component_node_geometries: List[List[Tuple[float, float, float, float]]] = []
+
+        for component in components:
+            local_tensor, xpms = _fdp_recursion_tlayout_component(
                 derived=derived,
-                derived_positions=local_positions,
-                cluster_index=derived_index,
-                edge_index=edge_index,
-            )
-            child_layouts[str(node.key)] = _fdp_recursion_layout_level(
-                edge_index=edge_index,
-                num_nodes=num_nodes,
-                node_sizes=node_sizes,
-                tree=tree,
-                cluster_name=str(node.key),
-                steps=steps,
+                component=component,
                 seed=seed,
-                ports=child_ports,
+                max_iters=steps,
             )
-
-        local_positions = _fdp_recursion_xlayout_component(
-            derived=derived,
-            component=component,
-            local_positions=local_positions,
-            node_sizes=node_sizes,
-            child_layouts=child_layouts,
-            xpms=xpms,
-        )
-        active_component = [
-            int(index) for index in component if derived.nodes[int(index)].kind != "port"
-        ]
-        sizes = _fdp_recursion_component_sizes(
-            derived,
-            active_component,
-            node_sizes,
-            child_layouts,
-        )
-        if sizes.numel() == 0 or not active_component:
-            component_boxes.append((0.0, 0.0, 0.0, 0.0))
-            component_node_geometries.append([])
-        else:
-            half_sizes = sizes / 2.0
-            active_tensor = torch.stack([local_positions[index] for index in active_component])
-            lower = active_tensor - half_sizes
-            upper = active_tensor + half_sizes
-            component_boxes.append(
-                (
-                    float(lower[:, 0].min().item()),
-                    float(lower[:, 1].min().item()),
-                    float(upper[:, 0].max().item()),
-                    float(upper[:, 1].max().item()),
+            local_positions = {
+                derived_index: local_tensor[local_index]
+                for local_index, derived_index in enumerate(component)
+            }
+            for derived_index in component:
+                node = derived.nodes[derived_index]
+                if node.kind != "cluster":
+                    continue
+                child_ports = _fdp_recursion_expand_cluster_ports(
+                    derived=derived,
+                    derived_positions=local_positions,
+                    cluster_index=derived_index,
+                    edge_index=edge_index,
                 )
+                child_layouts[str(node.key)] = yield (str(node.key), child_ports)
+
+            local_positions = _fdp_recursion_xlayout_component(
+                derived=derived,
+                component=component,
+                local_positions=local_positions,
+                node_sizes=node_sizes,
+                child_layouts=child_layouts,
+                xpms=xpms,
             )
-            component_node_geometries.append(
-                [
+            active_component = [
+                int(index) for index in component if derived.nodes[int(index)].kind != "port"
+            ]
+            sizes = _fdp_recursion_component_sizes(
+                derived,
+                active_component,
+                node_sizes,
+                child_layouts,
+            )
+            if sizes.numel() == 0 or not active_component:
+                component_boxes.append((0.0, 0.0, 0.0, 0.0))
+                component_node_geometries.append([])
+            else:
+                half_sizes = sizes / 2.0
+                active_tensor = torch.stack([local_positions[index] for index in active_component])
+                lower = active_tensor - half_sizes
+                upper = active_tensor + half_sizes
+                component_boxes.append(
                     (
-                        float(active_tensor[local_index, 0].item()),
-                        float(active_tensor[local_index, 1].item()),
-                        float(sizes[local_index, 0].item()),
-                        float(sizes[local_index, 1].item()),
+                        float(lower[:, 0].min().item()),
+                        float(lower[:, 1].min().item()),
+                        float(upper[:, 0].max().item()),
+                        float(upper[:, 1].max().item()),
                     )
-                    for local_index, _derived_index in enumerate(active_component)
-                ]
-            )
-        component_positions.append(local_positions)
-
-    offsets = _fdp_recursion_component_offsets(
-        component_boxes,
-        component_node_geometries=component_node_geometries,
-    )
-    final_positions: Dict[int, torch.Tensor] = {}
-    cluster_boxes: Dict[str, Tuple[float, float, float, float]] = {}
-    for component, local_positions, offset in zip(components, component_positions, offsets):
-        for derived_index in component:
-            node = derived.nodes[derived_index]
-            if node.kind == "port":
-                continue
-            position = local_positions[derived_index] + offset
-            if node.kind == "leaf":
-                final_positions[int(node.key)] = position
-                continue
-            child = child_layouts[str(node.key)]
-            child_offset = position - torch.tensor(
-                [child.width / 2.0, child.height / 2.0],
-                dtype=torch.float64,
-            )
-            x_shift = float(child_offset[0].item())
-            y_shift = float(child_offset[1].item())
-            cluster_boxes[str(node.key)] = (
-                x_shift,
-                y_shift,
-                x_shift + child.width,
-                y_shift + child.height,
-            )
-            for child_name, child_box in child.cluster_boxes.items():
-                cluster_boxes[child_name] = (
-                    child_box[0] + x_shift,
-                    child_box[1] + y_shift,
-                    child_box[2] + x_shift,
-                    child_box[3] + y_shift,
                 )
-            for node_index, child_position in child.positions.items():
-                final_positions[int(node_index)] = child_position + child_offset
+                component_node_geometries.append(
+                    [
+                        (
+                            float(active_tensor[local_index, 0].item()),
+                            float(active_tensor[local_index, 1].item()),
+                            float(sizes[local_index, 0].item()),
+                            float(sizes[local_index, 1].item()),
+                        )
+                        for local_index, _derived_index in enumerate(active_component)
+                    ]
+                )
+            component_positions.append(local_positions)
 
-    return _fdp_recursion_shift_to_origin(
-        positions=final_positions,
-        node_sizes=node_sizes,
-        cluster_boxes=cluster_boxes,
-        is_root=cluster_name is None,
-    )
+        offsets = _fdp_recursion_component_offsets(
+            component_boxes,
+            component_node_geometries=component_node_geometries,
+        )
+        final_positions: Dict[int, torch.Tensor] = {}
+        cluster_boxes: Dict[str, Tuple[float, float, float, float]] = {}
+        for component, local_positions, offset in zip(components, component_positions, offsets):
+            for derived_index in component:
+                node = derived.nodes[derived_index]
+                if node.kind == "port":
+                    continue
+                position = local_positions[derived_index] + offset
+                if node.kind == "leaf":
+                    final_positions[int(node.key)] = position
+                    continue
+                child = child_layouts[str(node.key)]
+                child_offset = position - torch.tensor(
+                    [child.width / 2.0, child.height / 2.0],
+                    dtype=torch.float64,
+                )
+                x_shift = float(child_offset[0].item())
+                y_shift = float(child_offset[1].item())
+                cluster_boxes[str(node.key)] = (
+                    x_shift,
+                    y_shift,
+                    x_shift + child.width,
+                    y_shift + child.height,
+                )
+                for child_name, child_box in child.cluster_boxes.items():
+                    cluster_boxes[child_name] = (
+                        child_box[0] + x_shift,
+                        child_box[1] + y_shift,
+                        child_box[2] + x_shift,
+                        child_box[3] + y_shift,
+                    )
+                for node_index, child_position in child.positions.items():
+                    final_positions[int(node_index)] = child_position + child_offset
+
+        return _fdp_recursion_shift_to_origin(
+            positions=final_positions,
+            node_sizes=node_sizes,
+            cluster_boxes=cluster_boxes,
+            is_root=current_cluster is None,
+        )
+
+    stack = [run(cluster_name, ports)]
+    sent: Optional[_FdpLevelLayout] = None
+    while stack:
+        try:
+            request = stack[-1].send(sent)
+        except StopIteration as stop:
+            stack.pop()
+            sent = stop.value
+            continue
+        child_cluster, child_ports = request
+        stack.append(run(child_cluster, child_ports))
+        sent = None
+    if sent is None:  # pragma: no cover - the root generator always returns
+        raise RuntimeError("fdp recursion produced no level layout.")
+    return sent
 
 
 def graphviz_fdp_fidelity(
@@ -6992,6 +7039,55 @@ def _graphviz_fdp_prism_scale_lists(
         y_positions[node_index] *= scale
 
 
+def _graphviz_fdp_prism_sanitize_position_lists(
+    x_positions: List[float],
+    y_positions: List[float],
+) -> None:
+    """Sanitize PRISM coordinates before proximity calculations.
+
+    Parameters
+    ----------
+    x_positions : list[float]
+        Mutable X coordinates in Graphviz internal inches.
+    y_positions : list[float]
+        Mutable Y coordinates in Graphviz internal inches.
+
+    Returns
+    -------
+    None
+        Updates coordinate lists in place.
+    """
+    import numpy as np
+
+    num_nodes = len(x_positions)
+    if num_nodes <= 1:
+        return
+    points = np.column_stack(
+        [
+            np.asarray(x_positions, dtype=float),
+            np.asarray(y_positions, dtype=float),
+        ]
+    )
+    if not np.isfinite(points).all():
+        points = np.nan_to_num(points, nan=0.0, posinf=0.0, neginf=0.0)
+    centered = points - points.mean(axis=0, keepdims=True)
+    degenerate = (
+        np.unique(points, axis=0).shape[0] < num_nodes
+        or np.linalg.matrix_rank(centered, tol=1.0e-12) < 2
+    )
+    if degenerate:
+        span = float(np.ptp(points, axis=0).max())
+        jitter_scale = max(span, 1.0) * 1.0e-9
+        angles = np.arange(num_nodes, dtype=float) * 2.399963229728653
+        radii = np.sqrt(np.arange(num_nodes, dtype=float) + 1.0)
+        points = points.copy()
+        points[:, 0] += np.cos(angles) * radii * jitter_scale
+        points[:, 1] += np.sin(angles) * radii * jitter_scale
+    for node_index in range(num_nodes):
+        x_positions[node_index] = float(points[node_index, 0])
+        y_positions[node_index] = float(points[node_index, 1])
+
+
 def _graphviz_fdp_prism_delaunay_edges(
     x_positions: Sequence[float],
     y_positions: Sequence[float],
@@ -7029,7 +7125,20 @@ def _graphviz_fdp_prism_delaunay_edges(
         ]
     )
     if not np.isfinite(points).all():
-        return set()
+        points = np.nan_to_num(points, nan=0.0, posinf=0.0, neginf=0.0)
+    centered = points - points.mean(axis=0, keepdims=True)
+    degenerate = (
+        np.unique(points, axis=0).shape[0] < num_nodes
+        or np.linalg.matrix_rank(centered, tol=1.0e-12) < 2
+    )
+    if degenerate:
+        span = float(np.ptp(points, axis=0).max())
+        jitter_scale = max(span, 1.0) * 1.0e-9
+        angles = np.arange(num_nodes, dtype=float) * 2.399963229728653
+        radii = np.sqrt(np.arange(num_nodes, dtype=float) + 1.0)
+        points = points.copy()
+        points[:, 0] += np.cos(angles) * radii * jitter_scale
+        points[:, 1] += np.sin(angles) * radii * jitter_scale
 
     from scipy.spatial import Delaunay, QhullError
 
@@ -7549,6 +7658,7 @@ def _graphviz_fdp_prism_overlap(
     cpu_positions = positions.detach().to(device="cpu", dtype=torch.float64)
     x_positions = [float(cpu_positions[node_index, 0].item()) for node_index in range(num_nodes)]
     y_positions = [float(cpu_positions[node_index, 1].item()) for node_index in range(num_nodes)]
+    _graphviz_fdp_prism_sanitize_position_lists(x_positions, y_positions)
     half_widths, half_heights = _graphviz_fdp_prism_half_size_lists_in_inches(
         node_sizes,
         num_nodes,

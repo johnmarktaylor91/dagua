@@ -151,8 +151,15 @@ def test_pairwise_procrustes_degenerate_collinear_mirror_and_float32() -> None:
     )
 
 
+@pytest.mark.slow
 def test_pairwise_procrustes_performance_contract() -> None:
-    """The Gram path handles a 200-by-200 matrix of N=2000 layouts quickly."""
+    """The Gram path handles a 200-by-200 matrix of N=2000 layouts quickly.
+
+    The wall-clock bound IS the value here (it pins the O(N) Gram path
+    against a quadratic per-pair fallback), so the test keeps its 10s cap
+    but lives in the slow tier where load-sensitive timing is tolerated
+    (WP-11A F05).
+    """
     rng = _rng(2)
     layouts = _clouds(rng, 200, 2000)
     start = time.perf_counter()

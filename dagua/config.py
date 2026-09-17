@@ -220,6 +220,10 @@ class LayoutConfig:
     # Median and transpose run only on acyclic graphs and can be disabled
     # quickly if a narrow DAG family regresses.
     use_native_median_transpose: bool = True
+    # Universal keep-lower-crossing selector for native layered ordering.
+    # Computes a Dagre-style in-house ordering candidate and keeps it only
+    # when its realized crossing count beats the incumbent native order.
+    use_lower_crossing_order: bool = True
     native_median_passes: int = 4
     native_transpose_passes: int = 8
     # X-only Brandes-Koepf compaction after native ordering.
@@ -399,6 +403,12 @@ class LayoutConfig:
     # dagua.layout.aesthetics.resolve_aesthetic_profile.
     prioritize: Optional[str] = None
     aesthetic_weights: Optional[Dict[str, float]] = None
+    # Phase-2 Wave-2: build the directed fan-compaction challenger only for
+    # clean fan-bundle DAGs, then accept it through a drawing-property guard.
+    use_fan_compaction_arm: bool = True
+    # Phase-2 Wave-3: bounded connected nested DAGs may try a warm-started
+    # Stress-SGD relaxation arm, admitted only by raw drawing-property Pareto.
+    use_nested_stress_arm: bool = True
 
     def __post_init__(self) -> None:
         """Normalize public quality/time fields after dataclass construction.

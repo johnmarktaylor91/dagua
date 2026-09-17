@@ -2,9 +2,24 @@
 
 from __future__ import annotations
 
+import multiprocessing as mp
+from typing import Any
+
 import pytest
 
 from scripts import native_determinism_gate as gate
+
+
+def _put_large_payload(queue: Any) -> None:
+    """Child target: publish a payload far larger than the pipe buffer.
+
+    Parameters
+    ----------
+    queue : Any
+        Multiprocessing queue shared with the parent.
+    """
+    telemetry = [{"event": "unit", "blob": "x" * 1024} for _ in range(1024)]
+    queue.put(("ok", telemetry))
 
 
 def _gate_run(
@@ -178,6 +193,63 @@ def test_stable_fallback_rejects_high_score_branch() -> None:
     assert failures == [
         "stable fallback requested but at least one run reached the high-score floor 80.0000"
     ]
+
+
+def test_collect_child_payload_drains_large_payload_before_join() -> None:
+    """A >64KB child payload must not convert success into a false timeout.
+
+    The child's queue feeder thread blocks at exit while the payload exceeds
+    the pipe buffer; joining before draining deadlocks until the watchdog
+    fires. The drain-first helper must return the payload well within the
+    timeout budget.
+    """
+    context = mp.get_context("fork")
+    queue: Any = context.Queue(maxsize=1)
+    process = context.Process(target=_put_large_payload, args=(queue,))
+    process.start()
+    try:
+        status, payload = gate._collect_child_payload(
+            process, queue, run_timeout_s=60.0, label="unit idle[0]"
+        )
+    finally:
+        process.join(timeout=10.0)
+        if process.is_alive():  # pragma: no cover -- cleanup path
+            process.terminate()
+
+    assert status == "ok"
+    assert len(payload) == 1024
+
+
+def test_collect_child_payload_reports_silent_child_exit() -> None:
+    """A child that exits without publishing raises a labeled RuntimeError."""
+    context = mp.get_context("fork")
+    queue: Any = context.Queue(maxsize=1)
+    process = context.Process(target=lambda: None)
+    process.start()
+    process.join(timeout=10.0)
+
+    with pytest.raises(RuntimeError, match="unit idle\\[0\\] child exited"):
+        gate._collect_child_payload(process, queue, run_timeout_s=5.0, label="unit idle[0]")
+
+
+def test_gate_main_reports_child_error_as_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A child crash lands in the FAIL summary instead of a traceback."""
+    monkeypatch.setattr(gate, "_graph_map", lambda: {"unit": object()})
+
+    def _boom(*args: object, **kwargs: object) -> list[gate.GateRun]:
+        raise RuntimeError("unit idle[0] child exited with code 1")
+
+    monkeypatch.setattr(gate, "_run_mode", _boom)
+
+    exit_code = gate.main(["unit"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "FAIL native determinism gate" in captured.out
+    assert "unit: unit idle[0] child exited with code 1" in captured.out
 
 
 def test_parity_replay_row_reports_expected_diff_structure(

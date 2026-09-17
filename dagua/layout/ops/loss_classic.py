@@ -442,6 +442,10 @@ def _tsnet_high_dimensional_affinities(
     distance_matrix: torch.Tensor, perplexity: float
 ) -> torch.Tensor:
     """Build the symmetric t-SNE input affinity matrix."""
+    if distance_matrix.shape[0] == 0:
+        # Empty graphs have no rows to stack; return an empty affinity matrix
+        # so the KL loss degrades to a zero-term sum instead of crashing.
+        return torch.zeros((0, 0), dtype=torch.float32, device=distance_matrix.device)
     rows = [
         _tsnet_row_probabilities(distance_matrix[node], perplexity)
         for node in range(distance_matrix.shape[0])
@@ -484,6 +488,7 @@ def _umap_fit_ab(min_dist: float, spread: float) -> tuple[float, float]:
     yv = np.where(xv < min_dist, 1.0, np.exp(-(xv - min_dist) / spread))
 
     def _curve_function(x: np.ndarray, a: float, b: float) -> np.ndarray:
+        """Evaluate the UMAP low-dimensional similarity curve."""
         return 1.0 / (1.0 + (a * np.power(x, 2.0 * b)))
 
     try:
@@ -910,6 +915,7 @@ class _sgd2_CyclicSampler:
     __slots__ = ("_total", "_device", "_perm", "_offset")
 
     def __init__(self, total: int, device: torch.device) -> None:
+        """Create a shuffled index pool over ``total`` items on ``device``."""
         self._total = total
         self._device = device
         self._perm = torch.randperm(total, device=device)

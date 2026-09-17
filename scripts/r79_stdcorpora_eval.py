@@ -13,22 +13,41 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import torch
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import torch  # noqa: E402
 
-from dagua.eval.competitors import get_competitor
-from dagua.eval.competitors.base import CompetitorBase, CompetitorResult
-from dagua.graph import DaguaGraph
-from dagua.metrics import composite_auto, evaluate
+from dagua.eval.competitors import get_competitor  # noqa: E402
+from dagua.eval.competitors.base import CompetitorBase, CompetitorResult  # noqa: E402
+from dagua.graph import DaguaGraph  # noqa: E402
+from dagua.metrics import composite_auto, evaluate  # noqa: E402
+
+# Loader extraction (GLADOS_RUNNER_SPEC.md section 3): bodies moved verbatim to
+# scripts/stdcorpora_loaders.py; every name is re-imported here so this module's
+# public surface (pinned by tests/test_stdcorpora_eval.py) is unchanged. The
+# F401 suppressions are load-bearing: these names ARE the re-export contract.
+from scripts.stdcorpora_loaders import (  # noqa: E402
+    MAX_NODES,
+    LoadedGraph,
+    _load_mtx_coordinate_fallback,  # noqa: F401  (re-export)
+    _load_mtx_with_scipy,  # noqa: F401  (re-export)
+    _numeric_lines,  # noqa: F401  (re-export)
+    build_graph,  # noqa: F401  (re-export)
+    infer_corpus,  # noqa: F401  (re-export)
+    infer_directed,  # noqa: F401  (re-export)
+    load_corpus,
+    load_gml_file,  # noqa: F401  (re-export)
+    load_graph_file,  # noqa: F401  (re-export)
+    load_graphml_file,  # noqa: F401  (re-export)
+    load_mtx_file,  # noqa: F401  (re-export)
+)
 
 OUTPUT_DIR = Path("eval_output/stdcorpora")
 CORPUS_DIR = Path("eval_output/stdcorpora")
 SEED = 42
 TIMEOUT_SECONDS = 120.0
-MAX_NODES = 2000
 TIE_BAND = 0.5
 REPORT_METRICS = (
     "sampled_stress",
@@ -60,17 +79,6 @@ ENGINE_NAMES = [
     "igraph_sugiyama",
 ]
 EXTERNAL_ENGINE_NAMES = [name for name in ENGINE_NAMES if name != "dagua"]
-
-
-@dataclass(frozen=True)
-class LoadedGraph:
-    """Loaded corpus graph with normalized integer edges."""
-
-    name: str
-    corpus: str
-    graph: DaguaGraph
-    source_path: Path
-    directed: bool
 
 
 def parse_args() -> argparse.Namespace:
@@ -217,354 +225,6 @@ def release_native_heap() -> None:
         ctypes.CDLL("libc.so.6").malloc_trim(0)
     except (AttributeError, OSError):
         pass
-
-
-def infer_corpus(path: Path) -> str:
-    """Infer a reporting corpus name from a source path.
-
-    Parameters
-    ----------
-    path : Path
-        Source graph path.
-
-    Returns
-    -------
-    str
-        ``rome``, ``north``, ``suitesparse``, or ``misc``.
-    """
-    lowered = "/".join(part.lower() for part in path.parts)
-    if "rome" in lowered:
-        return "rome"
-    if "north" in lowered or "att" in lowered or "at&t" in lowered:
-        return "north"
-    if "suitesparse" in lowered or "matrix" in lowered or path.suffix.lower() == ".mtx":
-        return "suitesparse"
-    return "misc"
-
-
-def infer_directed(path: Path, format_directed: Optional[bool] = None) -> bool:
-    """Infer whether a corpus graph should be scored as directed.
-
-    Parameters
-    ----------
-    path : Path
-        Source graph path.
-    format_directed : bool | None, default=None
-        Direction reported by the file format, when available.
-
-    Returns
-    -------
-    bool
-        ``True`` only for explicit directed metadata or North DAG names.
-    """
-    if format_directed is not None:
-        return bool(format_directed)
-    lowered = "/".join(part.lower() for part in path.parts)
-    return ("north" in lowered or "dag" in lowered) and "undirected" not in lowered
-
-
-def build_graph(
-    name: str,
-    corpus: str,
-    node_count: int,
-    edges: Iterable[Tuple[int, int]],
-    directed: bool,
-    source_path: Path,
-) -> LoadedGraph:
-    """Build a ``DaguaGraph`` from normalized integer topology.
-
-    Parameters
-    ----------
-    name : str
-        Stable graph name.
-    corpus : str
-        Reporting corpus name.
-    node_count : int
-        Number of nodes.
-    edges : Iterable[Tuple[int, int]]
-        Integer edges using zero-based node IDs.
-    directed : bool
-        Whether the graph has semantic direction for scoring.
-    source_path : Path
-        Input file path.
-
-    Returns
-    -------
-    LoadedGraph
-        Loaded graph metadata and ``DaguaGraph`` instance.
-    """
-    graph = DaguaGraph()
-    for node_id in range(node_count):
-        graph.add_node(node_id, label=str(node_id))
-    seen: Set[Tuple[int, int]] = set()
-    for source, target in edges:
-        if (
-            source == target
-            or source < 0
-            or target < 0
-            or source >= node_count
-            or target >= node_count
-        ):
-            continue
-        key = (source, target) if directed else tuple(sorted((source, target)))
-        if key in seen:
-            continue
-        seen.add(key)
-        graph.add_edge(source, target)
-    graph.is_semantically_directed = directed
-    graph.compute_node_sizes()
-    return LoadedGraph(
-        name=name,
-        corpus=corpus,
-        graph=graph,
-        source_path=source_path,
-        directed=directed,
-    )
-
-
-def _numeric_lines(path: Path) -> List[List[int]]:
-    """Read whitespace-separated integer rows from a text graph file.
-
-    Parameters
-    ----------
-    path : Path
-        Input ``.graph`` path.
-
-    Returns
-    -------
-    List[List[int]]
-        Parsed integer rows with comments and blank lines removed.
-    """
-    rows: List[List[int]] = []
-    with path.open("r", encoding="utf-8", errors="ignore") as handle:
-        for line in handle:
-            body = line.split("#", 1)[0].split("%", 1)[0].strip()
-            if not body:
-                continue
-            try:
-                rows.append([int(float(token)) for token in body.split()])
-            except ValueError:
-                continue
-    return rows
-
-
-def load_graph_file(path: Path) -> LoadedGraph:
-    """Load a Rome/North ``.graph`` text file.
-
-    Parameters
-    ----------
-    path : Path
-        Source file path.
-
-    Returns
-    -------
-    LoadedGraph
-        Loaded graph with zero-based node IDs.
-
-    Raises
-    ------
-    ValueError
-        If no usable topology can be parsed.
-    """
-    rows = _numeric_lines(path)
-    if not rows:
-        raise ValueError(f"{path} has no numeric graph rows")
-
-    directed = infer_directed(path)
-    corpus = infer_corpus(path)
-    name = f"{corpus}/{path.stem}"
-    header = rows[0]
-    edges: List[Tuple[int, int]] = []
-
-    if len(header) == 1 and len(rows) >= header[0] + 1:
-        node_count = header[0]
-        for index, neighbors in enumerate(rows[1 : node_count + 1]):
-            for neighbor in neighbors:
-                edges.append((index, neighbor - 1))
-        return build_graph(name, corpus, node_count, edges, directed, path)
-
-    if len(header) >= 2 and len(rows) >= header[0] + 1:
-        node_count = header[0]
-        for index, neighbors in enumerate(rows[1 : node_count + 1]):
-            for neighbor in neighbors:
-                if neighbor != 0:
-                    edges.append((index, neighbor - 1))
-        return build_graph(name, corpus, node_count, edges, directed, path)
-
-    edge_rows = [row for row in rows if len(row) >= 2]
-    if not edge_rows:
-        raise ValueError(f"{path} has no edge rows")
-    min_id = min(min(row[0], row[1]) for row in edge_rows)
-    offset = 1 if min_id == 1 else 0
-    max_id = max(max(row[0], row[1]) for row in edge_rows)
-    node_count = max_id - offset + 1
-    edges = [(row[0] - offset, row[1] - offset) for row in edge_rows]
-    return build_graph(name, corpus, node_count, edges, directed, path)
-
-
-def load_gml_file(path: Path) -> LoadedGraph:
-    """Load a GML file through NetworkX.
-
-    Parameters
-    ----------
-    path : Path
-        Source GML file path.
-
-    Returns
-    -------
-    LoadedGraph
-        Loaded graph with zero-based node IDs.
-    """
-    try:
-        import networkx as nx
-    except ImportError as exc:
-        raise RuntimeError("networkx is required to read GML files") from exc
-
-    nx_graph = nx.read_gml(path, label=None)
-    nodes = list(nx_graph.nodes())
-    node_to_index = {node: index for index, node in enumerate(nodes)}
-    edges = [(node_to_index[source], node_to_index[target]) for source, target in nx_graph.edges()]
-    directed = infer_directed(path, nx_graph.is_directed())
-    corpus = infer_corpus(path)
-    return build_graph(f"{corpus}/{path.stem}", corpus, len(nodes), edges, directed, path)
-
-
-def load_graphml_file(path: Path) -> LoadedGraph:
-    """Load a GraphML (XML) file through NetworkX.
-
-    Parameters
-    ----------
-    path : Path
-        Source GraphML file path.
-
-    Returns
-    -------
-    LoadedGraph
-        Loaded graph with zero-based node IDs.
-    """
-    try:
-        import networkx as nx
-    except ImportError as exc:
-        raise RuntimeError("networkx is required to read GraphML files") from exc
-
-    nx_graph = nx.read_graphml(path)
-    nodes = list(nx_graph.nodes())
-    node_to_index = {node: index for index, node in enumerate(nodes)}
-    edges = [(node_to_index[source], node_to_index[target]) for source, target in nx_graph.edges()]
-    corpus = infer_corpus(path)
-    directed = infer_directed(path, nx_graph.is_directed() if "north" not in corpus else None)
-    return build_graph(f"{corpus}/{path.stem}", corpus, len(nodes), edges, directed, path)
-
-
-def _load_mtx_with_scipy(path: Path) -> Tuple[int, List[Tuple[int, int]]]:
-    """Load Matrix Market topology with SciPy.
-
-    Parameters
-    ----------
-    path : Path
-        Source Matrix Market file.
-
-    Returns
-    -------
-    Tuple[int, List[Tuple[int, int]]]
-        Matrix order and zero-based nonzero-coordinate edges.
-    """
-    try:
-        from scipy.io import mmread
-    except ImportError as exc:
-        raise RuntimeError("scipy is required for this Matrix Market file") from exc
-
-    matrix = mmread(path)
-    coo = matrix.tocoo() if hasattr(matrix, "tocoo") else matrix
-    row = list(coo.row)
-    col = list(coo.col)
-    node_count = int(max(coo.shape))
-    return node_count, [(int(source), int(target)) for source, target in zip(row, col)]
-
-
-def _load_mtx_coordinate_fallback(path: Path) -> Tuple[int, List[Tuple[int, int]]]:
-    """Load a simple coordinate Matrix Market file without SciPy.
-
-    Parameters
-    ----------
-    path : Path
-        Source Matrix Market file.
-
-    Returns
-    -------
-    Tuple[int, List[Tuple[int, int]]]
-        Matrix order and zero-based nonzero-coordinate edges.
-    """
-    size_row: Optional[List[int]] = None
-    entries: List[Tuple[int, int]] = []
-    with path.open("r", encoding="utf-8", errors="ignore") as handle:
-        for line in handle:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("%"):
-                continue
-            parts = stripped.split()
-            if size_row is None:
-                size_row = [int(parts[0]), int(parts[1])]
-                continue
-            if len(parts) >= 2:
-                entries.append((int(parts[0]) - 1, int(parts[1]) - 1))
-    if size_row is None:
-        raise ValueError(f"{path} has no Matrix Market size row")
-    return max(size_row), entries
-
-
-def load_mtx_file(path: Path) -> LoadedGraph:
-    """Load a SuiteSparse Matrix Market file as an undirected sparsity graph.
-
-    Parameters
-    ----------
-    path : Path
-        Source Matrix Market file.
-
-    Returns
-    -------
-    LoadedGraph
-        Loaded graph with zero-based node IDs.
-    """
-    try:
-        node_count, entries = _load_mtx_with_scipy(path)
-    except RuntimeError:
-        node_count, entries = _load_mtx_coordinate_fallback(path)
-    edges = [(source, target) for source, target in entries if source != target]
-    corpus = infer_corpus(path)
-    return build_graph(f"{corpus}/{path.stem}", corpus, node_count, edges, False, path)
-
-
-def load_corpus(corpus_dir: Path, max_nodes: int) -> List[LoadedGraph]:
-    """Load all supported graph files under a corpus directory.
-
-    Parameters
-    ----------
-    corpus_dir : Path
-        Directory containing dropped-in corpus files.
-    max_nodes : int
-        Maximum node count accepted into the measurement run.
-
-    Returns
-    -------
-    List[LoadedGraph]
-        Loaded graphs, sorted by corpus/name.
-    """
-    loaders = {
-        ".graph": load_graph_file,
-        ".gml": load_gml_file,
-        ".graphml": load_graphml_file,
-        ".mtx": load_mtx_file,
-    }
-    graphs: List[LoadedGraph] = []
-    for path in sorted(corpus_dir.rglob("*")):
-        loader = loaders.get(path.suffix.lower())
-        if loader is None or not path.is_file():
-            continue
-        loaded = loader(path)
-        if loaded.graph.num_nodes <= max_nodes:
-            graphs.append(loaded)
-    return sorted(graphs, key=lambda item: (item.corpus, item.name))
 
 
 def load_existing_results(output_dir: Path) -> Dict[str, Any]:

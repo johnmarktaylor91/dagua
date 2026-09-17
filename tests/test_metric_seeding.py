@@ -281,6 +281,7 @@ print(json.dumps(count_overlaps_detailed(pos, node_sizes, seed={seed}), sort_key
     return json.loads(completed.stdout.strip())
 
 
+@pytest.mark.slow
 def test_overlaps_seeded_cross_process() -> None:
     """Verify the same seed reproduces across separate Python processes.
 

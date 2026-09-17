@@ -149,6 +149,13 @@ def test_bit_equivalent_render_matches_dot_png(tmp_path: Path) -> None:
         actual_arr = _resize_to_shape(actual_png, expected_arr.shape)
 
     score = float(ssim(expected_arr, actual_arr, channel_axis=2, data_range=255))
+    # Regression floor: measured SSIM 0.6315 on the certified toolchain
+    # (2026-08-05). The xfail below made this test unable to fail; the floor
+    # locks the achieved level so real rasterization/layout regressions fail
+    # while the 0.99 gate stays aspirational.
+    assert score >= 0.60, (
+        f"SSIM {score:.4f} regressed below the 0.60 floor (achieved level was 0.6315)"
+    )
     if score < 0.99:
         pytest.xfail(
             f"SSIM {score:.4f} is below the 0.99 bit-equivalence gate; "

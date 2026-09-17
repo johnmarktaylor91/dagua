@@ -138,6 +138,7 @@ class SGD2(CompetitorBase):
     name = "sgd2"
     max_nodes = 50_000
     variant_param_names = frozenset({"eps", "t_max"})
+    backend_version_key = "sgd2"
 
     def layout(
         self,
@@ -155,7 +156,7 @@ class SGD2(CompetitorBase):
             Unused adapter timeout in seconds. Included for interface
             compatibility with the benchmark harness.
         seed : int | None, default=None
-            Random seed forwarded to ``s_gd2`` when explicitly requested.
+            Random seed forwarded to ``s_gd2``. ``None`` falls back to ``42``.
 
         Returns
         -------
@@ -182,7 +183,7 @@ class SGD2(CompetitorBase):
             Unused adapter timeout in seconds. Included for interface
             compatibility with the benchmark harness.
         seed : int | None, default=None
-            Random seed forwarded to ``s_gd2`` when explicitly requested.
+            Random seed forwarded to ``s_gd2``. ``None`` falls back to ``42``.
 
         Returns
         -------
@@ -210,9 +211,12 @@ class SGD2(CompetitorBase):
                 elapsed = time.perf_counter() - start
                 return CompetitorResult(name=self.name, pos=pos, runtime_seconds=elapsed)
 
-            layout_kwargs: dict[str, Any] = {}
-            if seed is not None:
-                layout_kwargs["random_seed"] = seed
+            # Pin the seed=None fallback: unseeded s_gd2 runs are
+            # irreproducible, and every certified-pool sgd2 row carries an
+            # explicit seed, so this cannot alter any regenerated pool row.
+            # (sgd2_mds is left untouched: its pool rows were generated with
+            # seed=None.)
+            layout_kwargs: dict[str, Any] = {"random_seed": 42 if seed is None else seed}
             if variant_params is not None:
                 layout_kwargs.update(dict(variant_params))
             if edge_weights is not None:
@@ -254,6 +258,7 @@ class SGD2MDS(CompetitorBase):
 
     name = "sgd2_mds"
     max_nodes = 5_000
+    backend_version_key = "sgd2"
 
     def layout(
         self,

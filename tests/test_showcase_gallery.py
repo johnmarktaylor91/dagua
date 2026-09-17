@@ -1,11 +1,16 @@
+"""Smoke coverage for the showcase gallery builder."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+import pytest
+
 from dagua.showcase_gallery import build_showcase_gallery
 
 
+@pytest.mark.slow
 def test_showcase_gallery_rebuilds(tmp_path: Path):
     result = build_showcase_gallery(
         output_dir=str(tmp_path / "gallery"),

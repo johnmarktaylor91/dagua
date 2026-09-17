@@ -216,6 +216,18 @@ def make_acyclic_robust(
     -------
     tuple[torch.Tensor, torch.Tensor]
         ``(acyclic_edges, reversed_mask)`` aligned to the input edge order.
+
+    Notes
+    -----
+    The greedy-FAS fallback is belt-and-braces: for self-loop-free graphs a
+    single DFS back-edge reversal always yields a DAG (every non-back edge
+    descends in reverse-finish order, and a reversed back edge does too), so
+    ``_is_acyclic`` should always pass and ``_greedy_fas`` should be
+    unreachable. If the fallback EVER fired, its returned mask would be
+    relative to the DFS-MODIFIED edge orientations, not the original input
+    (an edge flipped by DFS but not by FAS would not be flagged), and the
+    O(V*(V+E)) pure-Python FAS would be slow at scale. Compose the DFS and
+    FAS masks (XOR) before trusting alignment if this path is ever made live.
     """
     num_edges = int(edge_index.shape[1])
     if edge_index.numel() == 0:
