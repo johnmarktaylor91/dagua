@@ -351,7 +351,11 @@ class FCoSEPrepareState(Op):
         )
         state.extras[_FCOSE_DEGREES_KEY] = _degree_from_edges(spring_edges, problem.num_nodes)
 
-        span = float((pos.max(dim=0).values - pos.min(dim=0).values).max().item())
+        if pos.shape[0] == 0:
+            # Degenerate empty graph: no positions to measure a span over.
+            span = 0.0
+        else:
+            span = float((pos.max(dim=0).values - pos.min(dim=0).values).max().item())
         temperature_base = max(span, float(self.config.ideal_edge_length), _MIN_DISTANCE)
         state.temperature = temperature_base * float(self.config.initial_energy)
         state.force_area = temperature_base * temperature_base

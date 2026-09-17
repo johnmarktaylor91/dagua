@@ -1333,3 +1333,49 @@ def test_zero_forces_produces_all_zero_buffer() -> None:
 
     assert result.forces is not None
     torch.testing.assert_close(result.forces, torch.zeros_like(pos))
+
+
+def test_gem_node_tick_is_noop_on_empty_graph() -> None:
+    """GEMNodeTick should not pop from an empty permutation when ``N == 0``."""
+
+    problem = _problem_from_edges([], num_nodes=0)
+    state = SolveState(
+        pos=torch.zeros((0, 2), dtype=torch.float32),
+        forces=torch.zeros((0, 2), dtype=torch.float32),
+    )
+
+    result = GEMNodeTick().apply(problem, state, _fresh_ctx())
+
+    assert result.pos is not None
+    assert result.pos.shape == (0, 2)
+    assert "gem_last_node_index" not in result.extras
+
+
+def test_barnes_hut_force_is_noop_on_empty_graph_without_quadtree() -> None:
+    """BarnesHutForce should accept BuildQuadTree's ``None`` tree for ``N == 0``."""
+
+    problem = _problem_from_edges([], num_nodes=0)
+    state = SolveState(
+        pos=torch.zeros((0, 2), dtype=torch.float32),
+        forces=torch.zeros((0, 2), dtype=torch.float32),
+    )
+    # BuildQuadTree deliberately stores ``None`` for empty inputs.
+    state.extras["quadtree"] = None
+
+    result = BarnesHutForce().apply(problem, state, _fresh_ctx())
+
+    assert result.forces is not None
+    assert result.forces.shape == (0, 2)
+
+
+def test_barnes_hut_force_still_requires_quadtree_for_nonempty_graphs() -> None:
+    """BarnesHutForce must keep its descriptive error when the tree is missing."""
+
+    problem = _problem_from_edges([(0, 1)], num_nodes=2)
+    state = SolveState(
+        pos=torch.zeros((2, 2), dtype=torch.float32),
+        forces=torch.zeros((2, 2), dtype=torch.float32),
+    )
+
+    with pytest.raises(ValueError, match="quadtree"):
+        BarnesHutForce().apply(problem, state, _fresh_ctx())

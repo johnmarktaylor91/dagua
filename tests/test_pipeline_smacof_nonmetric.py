@@ -179,3 +179,20 @@ def test_smacof_nonmetric_pipeline_has_no_runtime_sklearn_delegation() -> None:
     assert "from sklearn" not in source
     assert "IsotonicRegression" not in source
     assert "smacof(" not in source
+
+
+def test_smacof_nonmetric_single_node_returns_origin() -> None:
+    """A one-node graph has no dissimilarity pairs and must not divide by zero.
+
+    Returns
+    -------
+    None
+        Pins the ``num_nodes == 1`` early return of the public adapter.
+    """
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+
+    pos = layout_smacof_nonmetric_pipeline(edge_index, 1, seed=42)
+
+    assert pos.shape == (1, 2)
+    assert pos.dtype == torch.float64
+    assert torch.equal(pos, torch.zeros((1, 2), dtype=torch.float64))

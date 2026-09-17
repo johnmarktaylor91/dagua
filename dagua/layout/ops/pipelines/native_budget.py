@@ -73,24 +73,6 @@ class NativeBudgetLedger:
         )
 
 
-def install_process_budget(config: LayoutConfig, timeout_s: float) -> None:
-    """Attach deterministic process-time budget metadata to a layout config.
-
-    Parameters
-    ----------
-    config : LayoutConfig
-        Prepared benchmark layout configuration.
-    timeout_s : float
-        Total CPU seconds available for deterministic admission decisions.
-
-    Returns
-    -------
-    None
-        The function mutates ``config`` in place.
-    """
-    install_budget_ledger(config, timeout_s)
-
-
 def install_budget_ledger(
     config: LayoutConfig,
     timeout_s: float,
@@ -119,6 +101,20 @@ def install_budget_ledger(
     None
         The function mutates ``config`` in place and does not install legacy
         process-time metadata.
+
+    Notes
+    -----
+    **Fresh-ledger contract (WP02A-F02).** The installed ledger is
+    single-solve state: the native pipeline charges ``spent_dwu`` on this
+    shared mutable object (the pipeline's entry-point shallow copy of
+    ``config`` still aliases the same ledger). A multi-graph sweep MUST
+    construct a fresh config and call this installer again for every graph,
+    exactly as the certified benchmark seam does
+    (``dagua/eval/competitors/dagua_competitor.py``); reusing one
+    config+ledger pair across graphs makes later rows start with a depleted
+    budget and silently produces order-dependent, W5-starved output.
+    Regression coverage: ``tests/test_native_budget_ledger.py``
+    (``test_config_reuse_across_graphs_contaminates_ledger``).
     """
     total_dwu = max(0.001, float(timeout_s))
     capped_safety = min(DEFAULT_LEDGER_SAFETY, max(0.0, float(safety)))

@@ -260,3 +260,17 @@ def test_grip_rejects_invalid_parameters(kwargs: dict[str, float]) -> None:
     """
     with pytest.raises(ValueError):
         layout_grip_pipeline(_path_edge_index(2), 2, **kwargs)
+
+
+def test_grip_edgeless_graphs_do_not_crash() -> None:
+    """Edgeless inputs (isolated nodes, self-loop only) should lay out cleanly.
+
+    Returns
+    -------
+    None
+        Pins the ``max_degree == 0`` guard in ``_c_order_by_degree``.
+    """
+    for edges, num_nodes in [([], 1), ([], 3), ([(0, 0)], 1)]:
+        positions = layout_grip_pipeline(_edge_index_from_edges(edges), num_nodes, seed=42)
+        assert positions.shape == (num_nodes, 2)
+        assert torch.isfinite(positions).all()

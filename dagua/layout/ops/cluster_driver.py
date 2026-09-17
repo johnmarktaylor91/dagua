@@ -246,6 +246,16 @@ class ClusterAwareDriver(Op):
     ) -> ClusterPlacement:
         """Place one cluster level and return its local leaf geometry.
 
+        Descendant clusters are placed iteratively in depth-first post-order
+        (children before their parent, siblings in declared child order)
+        before this level's own placement runs -- the exact side-effect and
+        ``placements`` insertion order the former recursive descent produced.
+        The recursion placed one Python frame per nesting level and
+        RecursionError'd on valid ~1000-deep hierarchies in every name order
+        (drywell R2-B1 F-2): a total row crash on the engine cluster-aware
+        dispatch path and a silently lost cluster-SFDP challenger on the
+        native undirected path.
+
         Parameters
         ----------
         problem : LayoutProblem
@@ -268,16 +278,76 @@ class ClusterAwareDriver(Op):
         child_clusters = (
             tree.roots if cluster_name is None else tree.children_per_cluster[cluster_name]
         )
-        for child_name in child_clusters:
-            if child_name not in placements:
-                placements[child_name] = self._place_level(
+        post_order: list[str] = []
+        stack: list[tuple[str, bool]] = [
+            (child_name, False)
+            for child_name in reversed(child_clusters)
+            if child_name not in placements
+        ]
+        while stack:
+            name, children_done = stack.pop()
+            if children_done:
+                post_order.append(name)
+                continue
+            if name in placements:
+                continue
+            stack.append((name, True))
+            for grandchild_name in reversed(tree.children_per_cluster[name]):
+                if grandchild_name not in placements:
+                    stack.append((grandchild_name, False))
+        for name in post_order:
+            if name not in placements:
+                placements[name] = self._place_single_level(
                     problem=problem,
                     ctx=ctx,
                     tree=tree,
-                    cluster_name=child_name,
+                    cluster_name=name,
                     placements=placements,
                 )
+        return self._place_single_level(
+            problem=problem,
+            ctx=ctx,
+            tree=tree,
+            cluster_name=cluster_name,
+            placements=placements,
+        )
 
+    def _place_single_level(
+        self,
+        problem: LayoutProblem,
+        ctx: RuntimeContext,
+        tree: ClusterTree,
+        cluster_name: Optional[str],
+        placements: dict[str, ClusterPlacement],
+    ) -> ClusterPlacement:
+        """Place ONE cluster level whose child placements already exist.
+
+        This is the former recursive ``_place_level`` body minus the child
+        descent; every child of ``cluster_name`` must already be present in
+        ``placements``.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Full original layout problem.
+        ctx : RuntimeContext
+            Runtime context for inner pipeline calls.
+        tree : ClusterTree
+            Cluster hierarchy.
+        cluster_name : str or None
+            Cluster to place, or ``None`` for the root placement level.
+        placements : dict[str, ClusterPlacement]
+            Accumulated child cluster placements.
+
+        Returns
+        -------
+        ClusterPlacement
+            Local geometry for this level. For the root level, ``bbox`` is a
+            synthetic box around all placed items.
+        """
+        child_clusters = (
+            tree.roots if cluster_name is None else tree.children_per_cluster[cluster_name]
+        )
         items = self._build_items(problem, tree, cluster_name, child_clusters, placements)
         if not items:
             empty_box = ClusterPlacementBox(

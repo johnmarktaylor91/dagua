@@ -153,6 +153,7 @@ class CytoscapeFcose(CompetitorBase):
 
     name = "cytoscape_fcose"
     max_nodes = 10_000
+    backend_version_key = "cytoscape"
     variant_param_names = frozenset(
         {
             "idealEdgeLength",

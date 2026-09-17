@@ -639,3 +639,52 @@ def test_cyclic_sampler_reshuffles_when_epoch_is_exhausted(
 
     assert first_epoch.tolist() == [0, 1, 2, 3]
     assert second_epoch.tolist() == [3, 2, 1, 0]
+
+
+def test_checkpoint_sanitizes_grad_carrying_transients(tmp_path: Path) -> None:
+    """Checkpoint must survive non-leaf grad tensors in transient fields.
+
+    ``torch.save`` refuses to pickle non-leaf tensors that require grad.
+    A mid-loop state legitimately holds such transients (per-step context
+    caches are built FROM differentiable positions; extras can carry
+    grad-carrying scalars). The checkpoint payload must drop the per-step
+    context caches, detach non-leaf tensors, and leave the LIVE state
+    untouched.
+    """
+
+    problem = _make_problem()
+    leaf = torch.randn(3, 2, requires_grad=True)
+    non_leaf = leaf * 2.0
+    transient_energy = leaf.sum()
+    state = SolveState(
+        pos=leaf,
+        forces=non_leaf,
+        sampled_node_context=object(),
+        edge_batch_context=non_leaf,
+        extras={"marker": "keep-me", "transient_energy": transient_energy},
+    )
+    checkpoint_path = tmp_path / "sanitized.pt"
+
+    Checkpoint(CheckpointConfig(path=checkpoint_path)).apply(problem, state, RuntimeContext())
+
+    # The live state is never mutated by the snapshot.
+    assert state.edge_batch_context is non_leaf
+    assert state.sampled_node_context is not None
+    assert state.forces is non_leaf
+    assert state.extras["transient_energy"].requires_grad
+
+    restored = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert isinstance(restored, SolveState)
+    # Per-step context caches are dropped (their producer ops rebuild them).
+    assert restored.edge_batch_context is None
+    assert restored.sampled_node_context is None
+    # Non-leaf grad tensors are detached; values survive.
+    assert restored.forces is not None
+    assert restored.forces.requires_grad is False
+    torch.testing.assert_close(restored.forces, non_leaf.detach())
+    assert restored.extras["transient_energy"].requires_grad is False
+    # Leaf tensors and plain payloads pass through unchanged.
+    assert restored.pos is not None
+    assert restored.pos.requires_grad
+    torch.testing.assert_close(restored.pos.detach(), leaf.detach())
+    assert restored.extras["marker"] == "keep-me"

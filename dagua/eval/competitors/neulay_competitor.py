@@ -47,7 +47,18 @@ class NeuLayReference(CompetitorBase):
 
     name = "neulay"
     max_nodes = 20_000
+    backend_version_key = "pyg"
     variant_param_names = frozenset({"gcn_steps", "lr", "radius", "steps", "use_gcn"})
+    # Execution is delegated to the recovered wrapper; its source joins the
+    # cache-signature closure so wrapper fixes invalidate cached rows. The
+    # wrapper lives under dagua/eval/, which the dagua-tree hash EXCLUDES,
+    # so this declaration stays necessary alongside the flag below.
+    source_delegate_modules = ("dagua.eval.competitors.neulay_wrapper",)
+    # The wrapper defers to the actual NeuLay implementation at
+    # dagua/layout/_archive/classic/neulay.py (dagua-owned, historically
+    # edited for RNG matching): key on the whole dagua tree
+    # (dry-well R2-B3-Fable F2b).
+    executes_dagua_source = True
 
     def layout(
         self,

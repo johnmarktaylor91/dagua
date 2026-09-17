@@ -29,7 +29,7 @@ import torch
 
 from dagua.config import LayoutConfig
 from dagua.layout.graph_classify import GraphFamily, classify_graph
-from dagua.layout.layers import build_layer_index
+from dagua.layout.layers import LayerIndex, build_layer_index
 from dagua.utils import _EDGE_CHUNK, VRAMBudget, _vram_fits, longest_path_layering
 
 _STREAMING_THRESHOLD = 100_000_000
@@ -54,6 +54,10 @@ _STREAMING_GPU_SCATTER_TARGET_COUNT = 7
 _STREAMING_GPU_DEDUP_BYTES = 500_000_000
 _STREAMING_GPU_SAFETY_FRACTION = 0.70
 _STREAMING_ASSIGNMENT_VRAM_FRACTION = 0.60
+_MIN_FIRST_LEVEL_REDUCTION = 0.30
+_LAYERS_DEFAULT_ASPECT_TARGET = 24.0
+_LAYERS_MIN_ASPECT_TARGET = 2.0
+_LAYERS_MIN_AXIS_EXTENT = 1.0
 
 OptimizerType = Literal["adam", "sgd_nesterov", "sgd"]
 
@@ -174,6 +178,90 @@ def _compute_hub_thresholds(
 _match_scan = _build_match_scan()
 
 
+class LayerReductionStall(RuntimeError):
+    """Raised when LAYERS coarsening fails the first-level shrink contract.
+
+    Parameters
+    ----------
+    fine_nodes : int
+        Number of nodes before the stalled coarsening step.
+    coarse_nodes : int
+        Number of nodes after the stalled coarsening step.
+    min_reduction : float
+        Minimum required fractional node-count reduction.
+    """
+
+    def __init__(self, fine_nodes: int, coarse_nodes: int, min_reduction: float) -> None:
+        """Initialize the reduction-stall diagnostic.
+
+        Parameters
+        ----------
+        fine_nodes : int
+            Number of nodes before coarsening.
+        coarse_nodes : int
+            Number of nodes after coarsening.
+        min_reduction : float
+            Required fractional reduction before LAYERS remains viable.
+        """
+        self.fine_nodes = int(fine_nodes)
+        self.coarse_nodes = int(coarse_nodes)
+        self.min_reduction = float(min_reduction)
+        self.reduction = 1.0 - (float(coarse_nodes) / float(max(fine_nodes, 1)))
+        super().__init__(
+            "LAYERS first coarsening level reduced "
+            f"{self.fine_nodes:,} -> {self.coarse_nodes:,} nodes "
+            f"({self.reduction:.3f}); required >= {self.min_reduction:.3f}."
+        )
+
+
+def _resolve_multilevel_temp_root(config: LayoutConfig, graph: Any) -> Optional[Path]:
+    """Return the configured temp root for large LAYERS offload files.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Layout configuration whose ``algorithm_params`` may define
+        ``multilevel_checkpoint_root`` or ``checkpoint_root``.
+    graph : Any
+        Graph-like object that may carry a private ``_checkpoint_root`` set by
+        benchmark/checkpoint orchestration.
+
+    Returns
+    -------
+    pathlib.Path or None
+        Existing or created directory for temporary LAYERS files, or ``None``
+        to let :mod:`tempfile` use the platform default.
+    """
+    raw_root = (
+        config.algorithm_params.get("multilevel_checkpoint_root")
+        or config.algorithm_params.get("checkpoint_root")
+        or getattr(graph, "_checkpoint_root", None)
+    )
+    if raw_root in (None, ""):
+        return None
+    root = Path(str(raw_root)).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _make_multilevel_temp_dir(prefix: str, root: Optional[Path]) -> Path:
+    """Create a LAYERS temporary directory below an optional configured root.
+
+    Parameters
+    ----------
+    prefix : str
+        Prefix for the temporary directory name.
+    root : pathlib.Path or None
+        Optional checked/configured base directory.
+
+    Returns
+    -------
+    pathlib.Path
+        Newly-created temporary directory.
+    """
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
+
+
 def _offload_level_to_disk(level: CoarseLevel, level_idx: int, tmpdir: Path) -> Path:
     """Save a hierarchy level's large tensors to disk and free them from memory.
 
@@ -229,9 +317,9 @@ def _reload_level_from_disk(level: CoarseLevel, path: Path) -> None:
     # recompute (10-15 min at 100M+ nodes) during refinement.
     if "fine_layer_assignments" in data and level.fine_layer_assignments is None:
         level.fine_layer_assignments = data["fine_layer_assignments"]
-    # Don't delete checkpoint files -- they may be shared with the hierarchy
-    # checkpoint dir and needed for future resumes.
-    if not str(path).startswith("/mnt/"):
+    # Only delete files created in this process' temporary hierarchy dirs;
+    # restored durable checkpoints can share the same payload schema.
+    if path.parent.name.startswith("dagua_hierarchy_"):
         path.unlink(missing_ok=True)
     level.offload_path = None
 
@@ -1798,10 +1886,49 @@ def build_hierarchy(
     layer_assignments_callback: Optional[Callable[[torch.Tensor], None]] = None,
     level_callback: Optional[Callable[[List[CoarseLevel]], None]] = None,
     offload_to_disk: bool = True,
+    offload_root: Optional[Path] = None,
+    reroute_on_first_stall: bool = False,
 ) -> List[CoarseLevel]:
     """Build coarsening hierarchy until num_nodes <= min_nodes.
 
-    Returns list of CoarseLevels from finest to coarsest.
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of fine graph nodes.
+    node_sizes : torch.Tensor
+        Node size tensor with shape ``[N, 2]`` or broadcastable from ``[N]``.
+    min_nodes : int, default=2000
+        Target maximum coarsest node count.
+    max_levels : int, default=20
+        Maximum number of coarsening levels to build.
+    device : str, default="cpu"
+        Device used for per-level coarsening work.
+    progress : Callable[[str], None], optional
+        Optional progress sink.
+    cluster_ids : torch.Tensor, optional
+        Per-node cluster IDs used to avoid cross-cluster merges.
+    initial_layer_assignments : torch.Tensor, optional
+        Precomputed LAYERS ranks. When provided, hierarchy construction never
+        recomputes longest-path layers for the fine graph.
+    layer_assignments_callback : Callable[[torch.Tensor], None], optional
+        Callback receiving the computed fine-graph layers when they were not
+        supplied by the caller.
+    level_callback : Callable[[list[CoarseLevel]], None], optional
+        Callback after each level is appended.
+    offload_to_disk : bool, default=True
+        Whether giant hierarchy tensors may be offloaded to temporary files.
+    offload_root : pathlib.Path, optional
+        Configured root for temporary offload directories.
+    reroute_on_first_stall : bool, default=False
+        Raise :class:`LayerReductionStall` when the first coarsening level
+        shrinks by less than 30%, allowing the caller to reroute to FIELD.
+
+    Returns
+    -------
+    list[CoarseLevel]
+        Coarsening levels from finest to coarsest.
 
     For very large graphs, completed finer levels can have their large tensor
     payloads offloaded to temporary files during the build phase.
@@ -1814,13 +1941,7 @@ def build_hierarchy(
     layer_dtype = torch.int32 if current_n <= torch.iinfo(torch.int32).max else torch.long
     offload_dir: Optional[Path] = None
     if offload_to_disk and current_n > 10_000_000:
-        # Use locker for offload if available — /tmp can't hold 60GB+ of
-        # hierarchy data at billion-node scale.
-        _locker = Path("/mnt/locker/jt3295/dagua_bench_large")
-        if _locker.is_dir():
-            offload_dir = Path(tempfile.mkdtemp(prefix="dagua_hierarchy_", dir=_locker))
-        else:
-            offload_dir = Path(tempfile.mkdtemp(prefix="dagua_hierarchy_"))
+        offload_dir = _make_multilevel_temp_dir("dagua_hierarchy_", offload_root)
 
     # Compute layers once on the original graph — returns tensor for large N.
     # Allow a precomputed checkpoint for giant runs so retries can skip the
@@ -1911,7 +2032,14 @@ def build_hierarchy(
         # Edge count alone is not a reliable stopping signal for wide DAGs:
         # cross-layer edges can survive merging while node count still drops
         # enough for coarsening to remain beneficial.
-        if current_n > level.num_fine * 0.7:
+        reduction = 1.0 - (float(current_n) / float(max(level.num_fine, 1)))
+        if reroute_on_first_stall and level_idx == 0 and reduction < _MIN_FIRST_LEVEL_REDUCTION:
+            raise LayerReductionStall(
+                fine_nodes=level.num_fine,
+                coarse_nodes=current_n,
+                min_reduction=_MIN_FIRST_LEVEL_REDUCTION,
+            )
+        if reduction < _MIN_FIRST_LEVEL_REDUCTION:
             if progress is not None:
                 progress("Stopping hierarchy build: node reduction below threshold")
             break
@@ -1951,6 +2079,286 @@ def prolong_positions(
     fine_pos = fine_pos + jitter
 
     return fine_pos
+
+
+def _require_coarsest_layer_assignments(coarsest: CoarseLevel) -> torch.Tensor:
+    """Return propagated coarsest layers or fail before an expensive recompute.
+
+    Parameters
+    ----------
+    coarsest : CoarseLevel
+        Coarsest hierarchy level selected for the initial LAYERS solve.
+
+    Returns
+    -------
+    torch.Tensor
+        Coarsest layer assignments with shape ``[N_coarse]``.
+    """
+    if coarsest.coarse_layer_assignments is None:
+        raise RuntimeError(
+            "LAYERS coarsest solve requires propagated layer assignments; "
+            "refusing to recompute longest-path layers at the coarsest level."
+        )
+    return coarsest.coarse_layer_assignments
+
+
+def _record_layers_reroute_metadata(graph: Any, stall: LayerReductionStall) -> None:
+    """Record that runtime LAYERS coarsening rerouted to FIELD.
+
+    Parameters
+    ----------
+    graph : Any
+        Graph-like object that stores scale-route metadata.
+    stall : LayerReductionStall
+        First-level reduction diagnostic that triggered the reroute.
+
+    Returns
+    -------
+    None
+    """
+    existing = getattr(graph, "_dagua_scale_route_decision", {})
+    metadata = dict(existing) if isinstance(existing, dict) else {}
+    decision_payload = metadata.get("decision")
+    decision = dict(decision_payload) if isinstance(decision_payload, dict) else {}
+    decision["strategy"] = "FIELD"
+    decision["reason_codes"] = ["layers_reduction_stall", "acyclic_hostile_field_runtime"]
+    metadata["decision"] = decision
+    metadata["layers_reroute"] = {
+        "from_strategy": "LAYERS",
+        "to_strategy": "FIELD",
+        "reason": "first_level_reduction_stall",
+        "fine_nodes": stall.fine_nodes,
+        "coarse_nodes": stall.coarse_nodes,
+        "reduction": stall.reduction,
+        "min_reduction": stall.min_reduction,
+    }
+    setattr(graph, "_dagua_scale_route_decision", metadata)
+
+
+def _reroute_layers_to_field(
+    graph: Any,
+    config: LayoutConfig,
+    trace: Optional[Any],
+    stall: LayerReductionStall,
+) -> torch.Tensor:
+    """Run FIELD after runtime LAYERS coarsening proves hostile.
+
+    Parameters
+    ----------
+    graph : Any
+        Prepared graph-like object for the original fine graph.
+    config : LayoutConfig
+        Layout configuration forwarded to FIELD.
+    trace : Any, optional
+        Optional trace sink.
+    stall : LayerReductionStall
+        Reduction-stall diagnostic.
+
+    Returns
+    -------
+    torch.Tensor
+        FIELD layout positions with shape ``[N, 2]``.
+    """
+    from dagua.layout.scale.sketch import TopologySketch
+    from dagua.layout.scale.strategies.field import layout_field
+
+    metadata = getattr(graph, "_dagua_scale_route_decision", {})
+    sketch_payload = metadata.get("sketch") if isinstance(metadata, dict) else None
+    if isinstance(sketch_payload, dict):
+        sketch = TopologySketch.from_dict(sketch_payload)
+    else:
+        from dagua.layout.scale.router import depth_cap_from_config
+
+        sketch = TopologySketch.from_edge_index(
+            graph.edge_index,
+            int(graph.num_nodes),
+            depth_cap=depth_cap_from_config(config),
+        )
+    _record_layers_reroute_metadata(graph, stall)
+    return layout_field(graph, config, sketch, trace=trace)
+
+
+def _adaptive_layers_spacing(config: LayoutConfig, num_nodes: int) -> tuple[float, float]:
+    """Return LAYERS spacing after applying the engine's coarse size policy.
+
+    Parameters
+    ----------
+    config : LayoutConfig
+        Layout configuration.
+    num_nodes : int
+        Number of nodes in the final LAYERS graph.
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(node_sep, rank_sep)`` in layout units.
+    """
+    node_sep = float(config.node_sep)
+    rank_sep = float(config.rank_sep)
+    if not config.adaptive_spacing:
+        return node_sep, rank_sep
+    if num_nodes < 20:
+        scale = 1.3
+    elif num_nodes < 200:
+        scale = 1.0
+    elif num_nodes < 1000:
+        scale = 0.85
+    else:
+        scale = 0.7
+    return node_sep * scale, rank_sep * scale
+
+
+def _extent_with_sizes(pos: torch.Tensor, node_sizes: torch.Tensor) -> tuple[float, float]:
+    """Return width and height of a sized node-position bounding box.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        Node size tensor with shape ``[N, 2]``.
+
+    Returns
+    -------
+    tuple[float, float]
+        Positive ``(width, height)`` extents.
+    """
+    if pos.numel() == 0:
+        return _LAYERS_MIN_AXIS_EXTENT, _LAYERS_MIN_AXIS_EXTENT
+    half_sizes = node_sizes.to(dtype=pos.dtype) * 0.5
+    mins = (pos - half_sizes).amin(dim=0)
+    maxs = (pos + half_sizes).amax(dim=0)
+    extents = (maxs - mins).clamp_min(_LAYERS_MIN_AXIS_EXTENT)
+    return float(extents[0].item()), float(extents[1].item())
+
+
+def _spread_one_layer(
+    pos: torch.Tensor,
+    node_sizes: torch.Tensor,
+    nodes: torch.Tensor,
+    gap: float,
+) -> None:
+    """Spread one rank along x while preserving its current x order.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Mutable CPU position tensor with shape ``[N, 2]``.
+    node_sizes : torch.Tensor
+        CPU node size tensor with shape ``[N, 2]``.
+    nodes : torch.Tensor
+        Node IDs belonging to one layer in the stable layer-index order.
+    gap : float
+        Minimum horizontal gap between adjacent node boxes.
+
+    Returns
+    -------
+    None
+        ``pos`` is updated in place.
+    """
+    count = int(nodes.numel())
+    if count <= 1:
+        return
+    stable_widths = node_sizes[nodes, 0].to(dtype=pos.dtype).clamp_min(0.0)
+    stable_deltas = (stable_widths[:-1] + stable_widths[1:]) * 0.5 + float(gap)
+    required_span = float(stable_deltas.sum().item()) if stable_deltas.numel() else 0.0
+    current_x = pos[nodes, 0]
+    current_span = float((current_x.max() - current_x.min()).item())
+    if current_span >= required_span * 0.25:
+        # Existing x-order is meaningful once the rank has material spread.
+        # Collapsed ranks only carry jitter, so they fall back to stable order.
+        order = current_x.argsort(stable=True)
+        ordered_nodes = nodes[order]
+        widths = node_sizes[ordered_nodes, 0].to(dtype=pos.dtype).clamp_min(0.0)
+    else:
+        ordered_nodes = nodes
+        widths = stable_widths
+    deltas = (widths[:-1] + widths[1:]) * 0.5 + float(gap)
+    x_rel = torch.zeros((count,), dtype=pos.dtype)
+    x_rel[1:] = deltas.cumsum(dim=0)
+    x_rel -= (x_rel[0] + x_rel[-1]) * 0.5
+    pos[ordered_nodes, 0] = x_rel
+
+
+def _polish_layered_positions(
+    pos: torch.Tensor,
+    layer_assignments: torch.Tensor,
+    node_sizes: torch.Tensor,
+    config: LayoutConfig,
+    layer_index: Optional[LayerIndex] = None,
+) -> torch.Tensor:
+    """Resolve LAYERS within-rank overlap and bound final aspect.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Final unrotated LAYERS positions with shape ``[N, 2]``.
+    layer_assignments : torch.Tensor
+        Fine-graph layer assignments with shape ``[N]``.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]`` or broadcastable from ``[N]``.
+    config : LayoutConfig
+        Layout configuration, including optional ``algorithm_params`` keys
+        ``layers_within_rank_gap`` and ``layers_aspect_target``.
+    layer_index : LayerIndex, optional
+        Prebuilt layer index for ``layer_assignments``.
+
+    Returns
+    -------
+    torch.Tensor
+        Polished positions with shape ``[N, 2]`` on the original device.
+    """
+    if pos.numel() == 0 or layer_assignments.numel() == 0:
+        return pos
+    original_device = pos.device
+    work = pos.detach().to(device="cpu", dtype=torch.float64).clone()
+    sizes = _ensure_node_sizes_2d(node_sizes.detach().to(device="cpu"), work.shape[0]).to(
+        dtype=torch.float64
+    )
+    layers = layer_assignments.detach().to(device="cpu")
+    if layer_index is None or layer_index.node_to_layer.shape[0] != work.shape[0]:
+        layer_index = build_layer_index(layers, device="cpu", enable_cuda_sort=False)
+
+    node_sep, rank_sep = _adaptive_layers_spacing(config, int(work.shape[0]))
+    gap = float(config.algorithm_params.get("layers_within_rank_gap", max(1.0, node_sep * 0.20)))
+    aspect_target = max(
+        _LAYERS_MIN_ASPECT_TARGET,
+        float(config.algorithm_params.get("layers_aspect_target", _LAYERS_DEFAULT_ASPECT_TARGET)),
+    )
+    for layer_id in range(layer_index.num_layers):
+        _spread_one_layer(work, sizes, layer_index.nodes_in_layer(layer_id), gap)
+
+    min_layer = int(layers.min().item())
+    max_layer = int(layers.max().item())
+    rank_span = max(0, max_layer - min_layer)
+    max_node_height = float(sizes[:, 1].max().item()) if sizes.numel() else _LAYERS_MIN_AXIS_EXTENT
+    min_rank_gap = max(
+        _LAYERS_MIN_AXIS_EXTENT,
+        float(config.algorithm_params.get("layers_min_rank_gap", 1.0)),
+    )
+    rank_gap = max(float(rank_sep), min_rank_gap)
+    width, height = _extent_with_sizes(work, sizes)
+    if rank_span > 0 and height > aspect_target * width:
+        max_gap = (aspect_target * width - max_node_height) / float(rank_span)
+        rank_gap = max(min_rank_gap, min(rank_gap, max_gap))
+    height = max_node_height + float(rank_span) * rank_gap
+    if rank_span > 0 and width > aspect_target * height:
+        min_gap = (width / aspect_target - max_node_height) / float(rank_span)
+        rank_gap = max(rank_gap, min_gap, min_rank_gap)
+        height = max_node_height + float(rank_span) * rank_gap
+
+    layer_values = layers.to(dtype=work.dtype)
+    layer_center = (float(min_layer) + float(max_layer)) * 0.5
+    work[:, 1] = (layer_values - layer_center) * rank_gap
+    width, height = _extent_with_sizes(work, sizes)
+    if rank_span > 0 and height > aspect_target * width:
+        required_width = height / aspect_target
+        offset_span = max(0.0, required_width - width)
+        if offset_span > 0.0:
+            normalized = (layer_values - float(min_layer)) / float(rank_span)
+            work[:, 0] += (normalized - 0.5) * offset_span
+
+    return work.to(device=original_device, dtype=pos.dtype)
 
 
 def multilevel_layout(
@@ -2000,6 +2408,7 @@ def multilevel_layout(
     progress_file_path = _resolve_progress_file_path(config) if n > 1_000_000 else None
     _t0 = _time.perf_counter()
     precomputed_layers = getattr(graph, "_precomputed_layer_assignments", None)
+    offload_root = _resolve_multilevel_temp_root(config, graph)
 
     if config.seed is not None:
         torch.manual_seed(config.seed)
@@ -2053,6 +2462,13 @@ def multilevel_layout(
             coarsest = levels[-1]
             _vlog(f"Phase 1/3: Restored hierarchy ({n:,} nodes)... {len(levels)} levels")
 
+            # Imported unconditionally: both cleanup blocks below use these,
+            # and the second block runs even when the checkpoint-offload block
+            # is skipped (importing only there raised NameError at n>10M with
+            # offload_to_disk=False).
+            import ctypes as _ctypes_restore
+            import gc as _gc_restore
+
             # Free earlier restored levels FIRST — they're not needed for
             # continued coarsening and hold 40-60GB at billion-node scale.
             _hier_dir = getattr(graph, "_hierarchy_checkpoint_dir", None)
@@ -2063,12 +2479,9 @@ def multilevel_layout(
                         lvl.edge_index = None
                         lvl.node_sizes = None
                         lvl.offload_path = ckpt_path
-                import gc as _gc_restore
 
                 _gc_restore.collect()
                 try:
-                    import ctypes as _ctypes_restore
-
                     _ctypes_restore.CDLL("libc.so.6").malloc_trim(0)
                 except OSError:
                     pass
@@ -2092,13 +2505,7 @@ def multilevel_layout(
             # coarsening needs 20-30GB of working arrays and the original
             # graph (28GB at 1B) isn't needed until final refinement.
             if config.offload_to_disk and n > 10_000_000:
-                import tempfile as _tmpfile_early
-
-                _locker_dir_early = Path("/mnt/locker/jt3295/dagua_bench_large")
-                _orig_dir_early = _tmpfile_early.mkdtemp(
-                    prefix="dagua_orig_graph_",
-                    dir=_locker_dir_early if _locker_dir_early.is_dir() else None,
-                )
+                _orig_dir_early = _make_multilevel_temp_dir("dagua_orig_graph_", offload_root)
                 _original_graph_path = Path(_orig_dir_early) / "original_graph.pt"
                 torch.save({"edge_index": cpu_ei, "node_sizes": cpu_ns}, _original_graph_path)
                 # Delete BOTH local vars AND the graph object's references —
@@ -2128,21 +2535,37 @@ def multilevel_layout(
                 )
                 assert coarsest.edge_index is not None
                 assert coarsest.node_sizes is not None
-                extra_levels = build_hierarchy(
-                    coarsest.edge_index,
-                    coarsest.num_nodes,
-                    coarsest.node_sizes,
-                    min_nodes=min_nodes,
-                    device="cpu",
-                    progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
-                    initial_layer_assignments=coarsest.coarse_layer_assignments,
-                    offload_to_disk=config.offload_to_disk,
-                )
+                try:
+                    extra_levels = build_hierarchy(
+                        coarsest.edge_index,
+                        coarsest.num_nodes,
+                        coarsest.node_sizes,
+                        min_nodes=min_nodes,
+                        device="cpu",
+                        progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
+                        initial_layer_assignments=coarsest.coarse_layer_assignments,
+                        offload_to_disk=config.offload_to_disk,
+                        offload_root=offload_root,
+                        reroute_on_first_stall=True,
+                    )
+                except LayerReductionStall as stall:
+                    _vlog(f"LAYERS hierarchy stalled; rerouting to FIELD ({stall})")
+                    if _original_graph_path is not None and _original_graph_path.exists():
+                        _orig_data = torch.load(_original_graph_path, map_location="cpu")
+                        cpu_ei = _orig_data["edge_index"]
+                        cpu_ns = _orig_data["node_sizes"]
+                        graph._edge_index_tensor = cpu_ei
+                        graph.node_sizes = cpu_ns
+                        del _orig_data
+                    return _reroute_layers_to_field(graph, config, trace, stall)
                 if extra_levels:
                     levels.extend(extra_levels)
                     n_ext = len(extra_levels)
-                    coarsest = levels[-1].num_nodes
-                    _vlog(f"  Extended hierarchy by {n_ext} levels -> {coarsest:,} coarsest nodes")
+                    coarsest_nodes = levels[-1].num_nodes
+                    _vlog(
+                        f"  Extended hierarchy by {n_ext} levels -> "
+                        f"{coarsest_nodes:,} coarsest nodes"
+                    )
         else:
             _t_hier = _time.perf_counter()
             # Capture references then free the graph object's copies.
@@ -2168,19 +2591,29 @@ def multilevel_layout(
                     _ct_pre_hier.CDLL("libc.so.6").malloc_trim(0)
                 except OSError:
                     pass
-            levels = build_hierarchy(
-                cpu_ei,
-                n,
-                cpu_ns,
-                min_nodes=min_nodes,
-                device="cpu",
-                progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
-                cluster_ids=_hier_cluster_ids,
-                initial_layer_assignments=_hier_initial_la,
-                layer_assignments_callback=_hier_la_callback,
-                level_callback=_hier_level_callback,
-                offload_to_disk=config.offload_to_disk,
-            )
+            try:
+                levels = build_hierarchy(
+                    cpu_ei,
+                    n,
+                    cpu_ns,
+                    min_nodes=min_nodes,
+                    device="cpu",
+                    progress=(lambda msg: _vlog(msg, indent="  ")) if verbose else None,
+                    cluster_ids=_hier_cluster_ids,
+                    initial_layer_assignments=_hier_initial_la,
+                    layer_assignments_callback=_hier_la_callback,
+                    level_callback=_hier_level_callback,
+                    offload_to_disk=config.offload_to_disk,
+                    offload_root=offload_root,
+                    reroute_on_first_stall=True,
+                )
+            except LayerReductionStall as stall:
+                _vlog(f"LAYERS hierarchy stalled; rerouting to FIELD ({stall})")
+                if hasattr(graph, "_edge_index_tensor"):
+                    graph._edge_index_tensor = cpu_ei
+                if hasattr(graph, "node_sizes"):
+                    graph.node_sizes = cpu_ns
+                return _reroute_layers_to_field(graph, config, trace, stall)
             hierarchy_complete_callback = getattr(
                 graph, "_hierarchy_levels_complete_callback", None
             )
@@ -2194,13 +2627,7 @@ def multilevel_layout(
         # Offload original graph to disk — not needed until refinement level
         # i=0.  Skipped if already offloaded in the restore path above.
         if levels and config.offload_to_disk and n > 10_000_000 and _original_graph_path is None:
-            import tempfile as _tmpfile
-
-            _locker_dir = Path("/mnt/locker/jt3295/dagua_bench_large")
-            _orig_dir = _tmpfile.mkdtemp(
-                prefix="dagua_orig_graph_",
-                dir=_locker_dir if _locker_dir.is_dir() else None,
-            )
+            _orig_dir = _make_multilevel_temp_dir("dagua_orig_graph_", offload_root)
             _original_graph_path = Path(_orig_dir) / "original_graph.pt"
             torch.save({"edge_index": cpu_ei, "node_sizes": cpu_ns}, _original_graph_path)
             del cpu_ei, cpu_ns
@@ -2315,14 +2742,11 @@ def multilevel_layout(
             pos = precomputed_coarsest_pos.to(device)
             _vlog(f"Restored coarsest positions ({coarsest.num_nodes:,} nodes)", indent="  ")
         else:
-            coarsest_layer_index = (
-                build_layer_index(
-                    coarsest.coarse_layer_assignments,
-                    device="cpu",
-                    verbose=verbose,
-                )
-                if coarsest.coarse_layer_assignments is not None
-                else None
+            coarsest_layers = _require_coarsest_layer_assignments(coarsest)
+            coarsest_layer_index = build_layer_index(
+                coarsest_layers,
+                device="cpu",
+                verbose=verbose,
             )
             pos = _layout_inner(
                 coarsest.edge_index,
@@ -2330,7 +2754,7 @@ def multilevel_layout(
                 coarsest.node_sizes.to(device),
                 coarse_config,
                 device=device,
-                layer_assignments=coarsest.coarse_layer_assignments,
+                layer_assignments=coarsest_layers,
                 progress_context=ProgressContext(),
                 prebuilt_layer_index=coarsest_layer_index,
                 skip_classification=True,
@@ -2564,6 +2988,15 @@ def multilevel_layout(
                         "total_levels": num_refine_levels,
                         "level_nodes": fine_n,
                     },
+                )
+
+            if i == 0 and level.fine_layer_assignments is not None:
+                pos = _polish_layered_positions(
+                    pos,
+                    level.fine_layer_assignments,
+                    fine_sizes_cpu,
+                    config,
+                    layer_index=level_layer_index,
                 )
 
             levels[i] = CoarseLevel(

@@ -77,3 +77,24 @@ def test_classic_fcose_competitor_produces_layout() -> None:
     assert result.pos is not None
     assert result.pos.shape == (3, 2)
     assert torch.isfinite(result.pos).all()
+
+
+def test_fcose_empty_graph_returns_empty_tensor() -> None:
+    """Guard the N=0 path against zero-size tensor reductions.
+
+    fCoSE's component packing used to raise ``IndexError`` from ``max()``
+    on empty graphs; the cose-family convention is an empty float32 tensor.
+
+    Returns
+    -------
+    None
+        The pipeline must return an empty ``[0, 2]`` float32 tensor.
+    """
+    positions = layout_fcose_pipeline(
+        edge_index=torch.zeros((2, 0), dtype=torch.long),
+        num_nodes=0,
+        seed=42,
+    )
+
+    assert positions.shape == (0, 2)
+    assert positions.dtype == torch.float32

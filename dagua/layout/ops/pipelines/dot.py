@@ -32,13 +32,6 @@ def layout_dot_pipeline(
     graphviz_cluster_label_widths: Optional[Dict[str, float]] = None,
     graphviz_apply_cluster_constraints: bool = False,
     graphviz_enable_cluster_skeleton: bool = False,
-    graphviz_expected_x_inventory: Optional[
-        Union[
-            Tuple[int, Tuple[Tuple[int, int, int], ...]],
-            Tuple[int, Tuple[Tuple[int, int, int], ...], str],
-            Tuple[int, Tuple[Tuple[int, int, int], ...], str, float],
-        ]
-    ] = None,
     config: Optional[Any] = None,
 ) -> Union[
     torch.Tensor,
@@ -93,8 +86,6 @@ def layout_dot_pipeline(
         Whether to enable Graphviz-dot cluster x-boundary machinery.
     graphviz_enable_cluster_skeleton : bool, default=False
         Whether to enable the inactive cluster rank/mincross prototype.
-    graphviz_expected_x_inventory : tuple, optional
-        Instrumented inventory guard for the typed cluster solve.
     config : Any, optional
         Full layout configuration supplied by the engine.
 
@@ -127,7 +118,6 @@ def layout_dot_pipeline(
         graphviz_cluster_label_widths=graphviz_cluster_label_widths,
         graphviz_apply_cluster_constraints=graphviz_apply_cluster_constraints,
         graphviz_enable_cluster_skeleton=graphviz_enable_cluster_skeleton,
-        graphviz_expected_x_inventory=graphviz_expected_x_inventory,
         config=config,
     )
 

@@ -27,6 +27,10 @@ class CoreGDCompetitor(CompetitorBase):
 
     name = "coregd_reference"
     max_nodes = 100_000
+    # The dagua-side prep (pipelines/coregd.py) runs the native_stress_ml
+    # pipeline -- dagua-owned execution with a transitive kernel closure:
+    # tree-key instead of chasing per-file delegates (dry-well R3-B3-Fable F4).
+    executes_dagua_source = True
 
     def available(self) -> bool:
         """Check whether the reference clone and checkpoint are available.

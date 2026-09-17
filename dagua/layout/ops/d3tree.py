@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -186,30 +186,53 @@ def build_d3_hierarchy(edge_index: torch.Tensor, num_nodes: int) -> D3HierarchyN
     visiting: set[int] = set()
 
     def build(index: int, parent: Optional[D3HierarchyNode], depth: int) -> D3HierarchyNode:
-        """Recursively create hierarchy nodes while cutting cycles.
+        """Create hierarchy nodes for one subtree while cutting cycles.
+
+        Iterative pre-order twin of the recursive builder (suspended-iterator
+        stack): node creation order, child order, and the visiting-path
+        cycle-cut semantics are identical, and deep chains no longer exhaust
+        the recursion limit.
 
         Parameters
         ----------
         index : int
-            Current graph node index.
+            Subtree root graph node index.
         parent : D3HierarchyNode | None
             Parent hierarchy node.
         depth : int
-            Current hierarchy depth.
+            Hierarchy depth of the subtree root.
 
         Returns
         -------
         D3HierarchyNode
-            Constructed hierarchy node.
+            Constructed hierarchy subtree root.
         """
         node = D3HierarchyNode(index=index, parent=parent, depth=depth)
         nodes[index] = node
         visiting.add(index)
-        for child_index in children_by_parent[index]:
-            if child_index in visiting:
-                continue
-            node.children.append(build(child_index, node, depth + 1))
-        visiting.remove(index)
+        frames: List[Tuple[D3HierarchyNode, Iterator[int]]] = [
+            (node, iter(children_by_parent[index]))
+        ]
+        while frames:
+            current, child_iter = frames[-1]
+            descended = False
+            for child_index in child_iter:
+                if child_index in visiting:
+                    continue
+                child = D3HierarchyNode(
+                    index=child_index,
+                    parent=current,
+                    depth=current.depth + 1,
+                )
+                nodes[child_index] = child
+                visiting.add(child_index)
+                current.children.append(child)
+                frames.append((child, iter(children_by_parent[child_index])))
+                descended = True
+                break
+            if not descended:
+                visiting.remove(current.index)
+                frames.pop()
         return node
 
     root = build(root_index, None, 0)
@@ -281,12 +304,16 @@ def _tree_root(root: D3HierarchyNode) -> _TreeNode:
     def wrap(node: D3HierarchyNode, sibling_index: int, parent: Optional[_TreeNode]) -> _TreeNode:
         """Wrap a hierarchy node and descendants.
 
+        Iterative twin of the recursive wrapper: the produced structure
+        (sibling indices, child order, parent links) is identical, and deep
+        chains no longer exhaust the recursion limit.
+
         Parameters
         ----------
         node : D3HierarchyNode
-            Node to wrap.
+            Subtree root to wrap.
         sibling_index : int
-            Sibling index.
+            Sibling index of the subtree root.
         parent : _TreeNode | None
             Wrapped parent.
 
@@ -297,10 +324,18 @@ def _tree_root(root: D3HierarchyNode) -> _TreeNode:
         """
         wrapped = _TreeNode(node=node, i=sibling_index, parent=parent)
         wrapper_by_node[node.index] = wrapped
-        if node.children:
-            wrapped.children = [
-                wrap(child, child_index, wrapped) for child_index, child in enumerate(node.children)
+        stack: List[Tuple[D3HierarchyNode, _TreeNode]] = [(node, wrapped)]
+        while stack:
+            source, target = stack.pop()
+            if not source.children:
+                continue
+            target.children = [
+                _TreeNode(node=child, i=child_index, parent=target)
+                for child_index, child in enumerate(source.children)
             ]
+            for child, wrapped_child in zip(source.children, target.children):
+                wrapper_by_node[child.index] = wrapped_child
+            stack.extend(zip(reversed(source.children), reversed(target.children)))
         return wrapped
 
     tree = wrap(root, 0, None)

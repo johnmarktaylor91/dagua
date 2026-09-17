@@ -123,6 +123,7 @@ class GephiYifanHu(CompetitorBase):
 
     name = "gephi_yifanhu"
     max_nodes = 50_000
+    backend_version_key = "gephi"
 
     _JAR_PATH = (
         Path(__file__).resolve().parent.parent.parent.parent
@@ -131,6 +132,11 @@ class GephiYifanHu(CompetitorBase):
     )
     _JAVA_SRC = Path(__file__).resolve().parent / "gephi_layout.java"
     _JAVA_CLASS_DIR = Path(__file__).resolve().parent / "_gephi_build"
+    # The layout driver is the runtime-compiled java source (mtime-gated
+    # recompile: an edit changes behavior on the next run); it is not an
+    # importable module, so declare it by raw path for the cache-signature
+    # closure (dry-well R2-B3-Fable F2b).
+    source_delegate_files = (str(_JAVA_SRC),)
 
     def _ensure_compiled(self) -> None:
         """Compile the Java helper when the cached class file is stale.

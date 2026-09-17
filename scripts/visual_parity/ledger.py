@@ -36,7 +36,11 @@ from typing import Dict, List
 from scripts.visual_parity import ledger
 from scripts.visual_parity.io import read_ledger
 
-LEDGER_PATH = Path(".project-context/research/sprint_visual_parity_v2/ledger.json")
+# Anchored to the repo root so the locks hold regardless of pytest's cwd.
+LEDGER_PATH = (
+    Path(__file__).resolve().parents[1]
+    / ".project-context/research/sprint_visual_parity_v2/ledger.json"
+)
 
 
 def test_generated_lock_file_is_byte_identical() -> None:

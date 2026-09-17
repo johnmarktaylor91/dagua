@@ -406,6 +406,16 @@ class ElkLayered(CompetitorBase):
     name = "elk_layered"
     max_nodes = 15_000
     supports_clusters = True
+    backend_version_key = "elk"
+    # Size-aware external: node boxes gated by dagua/eval/size_policy.py
+    # (dry-well R3-B3-Fable F4 disposition).
+    source_delegate_modules = ("dagua.eval.size_policy",)
+    # Layouts are a FUNCTION of dagua-computed node boxes: the GLaDOS
+    # runner folds the node-box producer stack (graph.py/utils.py/
+    # styles.py) into these engines' run-revision markers so a mid-run
+    # sizing hotfix cannot resume their OLD-box layouts while native
+    # regenerates under new boxes (dry-well R4-B3 Fable F1).
+    consumes_node_boxes = True
 
     def layout(
         self,
@@ -490,6 +500,18 @@ class _ElkSecondary(CompetitorBase):
     algorithm_id = ""
     max_nodes = 15_000
     supports_clusters = False
+    # Family backend: every ELK secondary (force/stress/mrtree/radial)
+    # inherits the elk version component (dry-well R4-B3-Sol).
+    backend_version_key = "elk"
+    # Size-aware external: node boxes gated by dagua/eval/size_policy.py
+    # (dry-well R3-B3-Fable F4 disposition).
+    source_delegate_modules = ("dagua.eval.size_policy",)
+    # Layouts are a FUNCTION of dagua-computed node boxes: the GLaDOS
+    # runner folds the node-box producer stack (graph.py/utils.py/
+    # styles.py) into these engines' run-revision markers so a mid-run
+    # sizing hotfix cannot resume their OLD-box layouts while native
+    # regenerates under new boxes (dry-well R4-B3 Fable F1).
+    consumes_node_boxes = True
 
     def layout(
         self,

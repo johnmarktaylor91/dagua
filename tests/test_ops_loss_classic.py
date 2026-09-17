@@ -1372,3 +1372,15 @@ def test_cyclic_sampler_infers_pool_size_from_active_sgd2_criterion() -> None:
     inferred_epoch = sampler.sample(6)
 
     assert set(inferred_epoch.tolist()) == {0, 1, 2, 3, 4, 5}
+
+
+def test_kl_divergence_loss_returns_zero_scalar_on_empty_graph() -> None:
+    """The exact t-SNE KL loss should degrade to zero instead of crashing at ``N == 0``."""
+
+    problem = LayoutProblem(edge_index=torch.empty((2, 0), dtype=torch.long), num_nodes=0)
+    state = SolveState(pos=torch.zeros((0, 2), dtype=torch.float32))
+
+    loss = KLDivergenceLoss().evaluate(problem, state, RuntimeContext())
+
+    assert loss.ndim == 0
+    assert float(loss.item()) == 0.0

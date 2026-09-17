@@ -340,3 +340,10 @@ def _resolve_pipeline_flex(
     if config is None or config.flex is None:
         return None
     return build_flex_constraints(config, num_nodes=num_nodes, device=device)
+
+
+__all__ = [
+    "build_webcola_pipeline",
+    "layout_webcola_constrained_pipeline",
+    "layout_webcola_pipeline",
+]

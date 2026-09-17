@@ -19,7 +19,10 @@ from collections import Counter
 from pathlib import Path
 
 
-def validate_output(data_dir: Path, previous_dir: Path | None = None) -> list[str]:
+def validate_output(
+    data_dir: Path,
+    previous_dir: Path | None = None,
+) -> tuple[list[str], list[str]]:
     """Validate fidelity analysis output.
 
     Parameters
@@ -31,8 +34,10 @@ def validate_output(data_dir: Path, previous_dir: Path | None = None) -> list[st
 
     Returns
     -------
-    list[str]
-        Error/warning messages. Empty means all checks passed.
+    tuple[list[str], list[str]]
+        ``(errors, warnings)``. Errors drive a nonzero exit; warnings are
+        reported but do not fail validation. Both empty means all checks
+        passed.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -41,14 +46,14 @@ def validate_output(data_dir: Path, previous_dir: Path | None = None) -> list[st
     summary_path = data_dir / "algorithm_summary.csv"
     if not summary_path.exists():
         errors.append("algorithm_summary.csv does not exist")
-        return errors
+        return errors, warnings
 
     with open(summary_path) as f:
         summary_rows = list(csv.DictReader(f))
 
     if len(summary_rows) == 0:
         errors.append("algorithm_summary.csv has 0 rows")
-        return errors
+        return errors, warnings
 
     verdicts = Counter(r["verdict"] for r in summary_rows)
     total = len(summary_rows)
@@ -137,8 +142,7 @@ def validate_output(data_dir: Path, previous_dir: Path | None = None) -> list[st
                         file=sys.stderr,
                     )
 
-    all_issues = errors + warnings
-    return all_issues
+    return errors, warnings
 
 
 def main() -> None:
@@ -158,7 +162,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    issues = validate_output(args.data, args.previous)
+    errors, warnings = validate_output(args.data, args.previous)
+    issues = errors + warnings
 
     if issues:
         print(
@@ -167,12 +172,9 @@ def main() -> None:
         )
         for issue in issues:
             print(f"  {issue}", file=sys.stderr)
-        # Exit 1 only for errors (not warnings)
-        has_errors = any(
-            "IDENTICAL" in i or "does not exist" in i or "0 rows" in i or "NaN RMSD" in i
-            for i in issues
-        )
-        sys.exit(1 if has_errors else 0)
+        # Exit 1 only for errors (not warnings). Severity comes from the
+        # validator's own classification, never from re-parsing message text.
+        sys.exit(1 if errors else 0)
     else:
         print("Fidelity output validation OK")
 

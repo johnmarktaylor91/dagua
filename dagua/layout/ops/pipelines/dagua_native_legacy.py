@@ -63,6 +63,8 @@ from dagua.layout.ops.optimize import (
 from dagua.layout.ops.ordering import (
     ClusterContiguousOrder,
     ClusterContiguousOrderConfig,
+    KeepLowerCrossingOrder,
+    KeepLowerCrossingOrderConfig,
     MedianSweep,
     MedianSweepConfig,
     TransposeHeuristic,
@@ -1221,6 +1223,13 @@ def build_dagua_pipeline(config: LayoutConfig) -> Pipeline:
                 TransposeHeuristic(TransposeHeuristicConfig(passes=native_transpose_passes)),
             ]
         )
+    crossing_reduction_ops.append(
+        KeepLowerCrossingOrder(
+            KeepLowerCrossingOrderConfig(
+                enabled=bool(getattr(config, "use_lower_crossing_order", True))
+            )
+        )
+    )
     crossing_reduction_ops.append(
         ClusterContiguousOrder(
             ClusterContiguousOrderConfig(

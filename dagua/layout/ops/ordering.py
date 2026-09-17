@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -9,8 +10,18 @@ import torch
 
 from dagua.layout.init_placement import _transpose_heuristic
 from dagua.layout.ops.base import Op
+from dagua.layout.ops.dagre import (
+    _DAGRE_GRAPH_KEY,
+    DagreNormalizeEdges,
+    _DagreGraph,
+    _DagreNode,
+    _order_graph,
+)
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
+
+LOWER_CROSSING_ORDER_STATS_KEY = "native_lower_crossing_order_stats"
+DOT_VIRTUAL_EDGE_WEIGHT = 1.0
 
 
 def _target_device(problem: LayoutProblem, state: SolveState) -> torch.device:
@@ -121,6 +132,75 @@ def _validate_edge_index(edge_index: torch.Tensor, num_nodes: int) -> torch.Tens
     if int(edge_index_cpu.min().item()) < 0 or int(edge_index_cpu.max().item()) >= num_nodes:
         raise ValueError("problem.edge_index references a node outside the valid range")
     return edge_index_cpu
+
+
+def _expanded_layered_graph(
+    rank_values: Sequence[int],
+    edge_index: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+) -> Tuple[List[int], torch.Tensor, set[int], List[float]]:
+    """Expand long layered edges into adjacent-rank virtual chains.
+
+    Parameters
+    ----------
+    rank_values : sequence of int
+        Per-real-node rank values with length ``N``.
+    edge_index : torch.Tensor
+        Directed edge tensor with shape ``[2, E]`` over real nodes.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``. When present, each expanded
+        chain edge inherits the original edge weight so downstream weighted
+        x-coordinate stages retain baseline fidelity.
+
+    Returns
+    -------
+    tuple[list[int], torch.Tensor, set[int], list[float]]
+        Expanded rank values, expanded chain edges with shape ``[2, E2]``,
+        virtual node ids, and edge penalties aligned to the expanded edge
+        tensor.
+    """
+    expanded_ranks = [int(value) for value in rank_values]
+    expanded_edges: List[Tuple[int, int]] = []
+    edge_penalties: List[float] = []
+    virtual_ids: set[int] = set()
+    if edge_index.ndim != 2 or int(edge_index.shape[0]) != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+    edges = edge_index.detach().to(device="cpu", dtype=torch.long)
+    weights = (
+        edge_weights.detach().to(device="cpu", dtype=torch.float32)
+        if edge_weights is not None
+        else torch.ones(int(edges.shape[1]), dtype=torch.float32)
+    )
+    original_count = len(expanded_ranks)
+    for edge_id in range(int(edges.shape[1])):
+        tail = int(edges[0, edge_id].item())
+        head = int(edges[1, edge_id].item())
+        edge_weight = float(weights[edge_id].item())
+        if tail == head:
+            continue
+        if not (0 <= tail < original_count and 0 <= head < original_count):
+            raise ValueError("edge_index references a node outside rank_values.")
+        tail_rank = int(expanded_ranks[tail])
+        head_rank = int(expanded_ranks[head])
+        if head_rank <= tail_rank + 1:
+            expanded_edges.append((tail, head))
+            edge_penalties.append(edge_weight)
+            continue
+        previous = tail
+        for rank in range(tail_rank + 1, head_rank):
+            virtual_node = len(expanded_ranks)
+            expanded_ranks.append(rank)
+            virtual_ids.add(virtual_node)
+            expanded_edges.append((previous, virtual_node))
+            edge_penalties.append(edge_weight)
+            previous = virtual_node
+        expanded_edges.append((previous, head))
+        edge_penalties.append(edge_weight)
+    if expanded_edges:
+        expanded_edge_index = torch.tensor(expanded_edges, dtype=torch.long).t().contiguous()
+    else:
+        expanded_edge_index = torch.zeros((2, 0), dtype=torch.long)
+    return expanded_ranks, expanded_edge_index, virtual_ids, edge_penalties
 
 
 def _expanded_layers_to_tensor(layers: Any, num_nodes: int) -> torch.Tensor:
@@ -473,6 +553,218 @@ def _ordering_from_layers(
     return ordering.to(device=device)
 
 
+def _indexed_bilayer_crossing_count(
+    north_nodes: Sequence[int],
+    south_positions: Mapping[int, int],
+    outgoing_by_source: Mapping[int, Sequence[int]],
+) -> int:
+    """Count one adjacent-layer crossing total with a Fenwick accumulator.
+
+    Parameters
+    ----------
+    north_nodes : sequence[int]
+        Source-layer nodes in current left-to-right order.
+    south_positions : mapping[int, int]
+        Target-layer node id to left-to-right position.
+    outgoing_by_source : mapping[int, sequence[int]]
+        Target positions grouped by source node. Targets outside the south
+        layer must already be omitted by the caller.
+
+    Returns
+    -------
+    int
+        Number of realized edge crossings between the two ranks.
+    """
+    target_positions: List[int] = []
+    for source in north_nodes:
+        source_targets = sorted(outgoing_by_source.get(source, ()))
+        target_positions.extend(source_targets)
+
+    if len(target_positions) < 2:
+        return 0
+
+    tree = [0] * (len(south_positions) + 1)
+    crossings = 0
+    seen_edges = 0
+    for position in target_positions:
+        index = position + 1
+        prefix = 0
+        scan = index
+        while scan > 0:
+            prefix += tree[scan]
+            scan -= scan & -scan
+        crossings += seen_edges - prefix
+        while index < len(tree):
+            tree[index] += 1
+            index += index & -index
+        seen_edges += 1
+    return crossings
+
+
+def indexed_layered_crossing_count(
+    edge_index: torch.Tensor,
+    ordered_layers: Sequence[Sequence[int]],
+) -> int:
+    """Count realized crossings in a layered drawing using indexed bilayers.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]`` for the active layered graph.
+    ordered_layers : sequence[sequence[int]]
+        Nodes grouped by layer in left-to-right order.
+
+    Returns
+    -------
+    int
+        Unweighted crossing count across adjacent realized layers.
+    """
+    if edge_index.numel() == 0 or len(ordered_layers) < 2:
+        return 0
+
+    layer_by_node: Dict[int, int] = {}
+    for layer_index, layer_nodes in enumerate(ordered_layers):
+        for node in layer_nodes:
+            layer_by_node[int(node)] = layer_index
+
+    positions_by_layer = [
+        {node: index for index, node in enumerate(layer_nodes)} for layer_nodes in ordered_layers
+    ]
+    outgoing_by_layer: List[Dict[int, List[int]]] = [{} for _ in range(len(ordered_layers) - 1)]
+    for source, target in zip(edge_index[0].tolist(), edge_index[1].tolist()):
+        source_node = int(source)
+        target_node = int(target)
+        source_layer = layer_by_node.get(source_node)
+        target_layer = layer_by_node.get(target_node)
+        if source_layer is None or target_layer is None or target_layer != source_layer + 1:
+            continue
+        target_position = positions_by_layer[target_layer].get(target_node)
+        if target_position is None:
+            continue
+        outgoing_by_layer[source_layer].setdefault(source_node, []).append(target_position)
+
+    crossings = 0
+    for layer_index, outgoing_by_source in enumerate(outgoing_by_layer):
+        crossings += _indexed_bilayer_crossing_count(
+            north_nodes=ordered_layers[layer_index],
+            south_positions=positions_by_layer[layer_index + 1],
+            outgoing_by_source=outgoing_by_source,
+        )
+    return crossings
+
+
+def _dagre_graph_from_native_layers(
+    edge_index: torch.Tensor,
+    layers_cpu: torch.Tensor,
+    num_nodes: int,
+) -> _DagreGraph:
+    """Build a ranked Dagre working graph from native's active layer state.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU active edge tensor with shape ``[2, E]``.
+    layers_cpu : torch.Tensor
+        CPU active layer assignments with shape ``[N]``.
+    num_nodes : int
+        Active node count.
+
+    Returns
+    -------
+    _DagreGraph
+        Ranked Dagre graph normalized enough for ``DagreNormalizeEdges`` and
+        ``_order_graph``.
+    """
+    graph = _DagreGraph(
+        nodes={
+            node: _DagreNode(width=0.0, height=0.0, rank=int(layers_cpu[node].item()))
+            for node in range(num_nodes)
+        },
+        node_order=list(range(num_nodes)),
+        edges=[],
+        num_original_nodes=num_nodes,
+        original_node_ids=list(range(num_nodes)),
+        rank_sep=1.0,
+        node_sep=1.0,
+        edge_sep=1.0,
+        rankdir="TB",
+        ranker="longest-path",
+        acyclicer="greedy",
+    )
+    for edge_offset, (source, target) in enumerate(
+        zip(edge_index[0].tolist(), edge_index[1].tolist())
+    ):
+        source_node = int(source)
+        target_node = int(target)
+        source_rank = int(layers_cpu[source_node].item())
+        target_rank = int(layers_cpu[target_node].item())
+        if target_rank <= source_rank:
+            continue
+        graph.add_edge(
+            source=source_node,
+            target=target_node,
+            weight=1.0,
+            minlen=max(target_rank - source_rank, 1),
+            original_index=edge_offset,
+        )
+    return graph
+
+
+def _dagre_candidate_layers_from_native(
+    problem: LayoutProblem,
+    state: SolveState,
+    ctx: RuntimeContext,
+    edge_index_cpu: torch.Tensor,
+    layers_cpu: torch.Tensor,
+    num_nodes: int,
+) -> List[List[int]]:
+    """Compute a Dagre-order candidate from native ranks using in-house ops.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable layout inputs passed through to the normalization op.
+    state : SolveState
+        Active solve state whose extras are preserved.
+    ctx : RuntimeContext
+        Runtime infrastructure for the borrowed normalization op.
+    edge_index_cpu : torch.Tensor
+        CPU active edge tensor with shape ``[2, E]``.
+    layers_cpu : torch.Tensor
+        CPU active layer assignments with shape ``[N]``.
+    num_nodes : int
+        Active node count.
+
+    Returns
+    -------
+    list[list[int]]
+        Original active nodes grouped by native layer in Dagre candidate order.
+    """
+    dagre_graph = _dagre_graph_from_native_layers(
+        edge_index=edge_index_cpu,
+        layers_cpu=layers_cpu,
+        num_nodes=num_nodes,
+    )
+    dagre_state = SolveState(extras={_DAGRE_GRAPH_KEY: dagre_graph})
+    DagreNormalizeEdges().apply(problem, dagre_state, ctx)
+    dagre_layers = _order_graph(dagre_graph)
+
+    native_layers = _initial_ordered_layers(layers_cpu)
+    candidate_layers: List[List[int]] = [[] for _ in range(len(native_layers))]
+    for layer_index, layer_nodes in enumerate(dagre_layers):
+        if layer_index >= len(candidate_layers):
+            break
+        candidate_layers[layer_index].extend(
+            int(node) for node in layer_nodes if isinstance(node, int) and int(node) < num_nodes
+        )
+
+    present = {node for layer_nodes in candidate_layers for node in layer_nodes}
+    for layer_index, incumbent_nodes in enumerate(native_layers):
+        missing = [node for node in incumbent_nodes if node not in present]
+        candidate_layers[layer_index].extend(missing)
+    return candidate_layers
+
+
 def _node_order_map(layers: Sequence[Sequence[int]]) -> Dict[int, float]:
     """Map each node id to its current in-layer position.
 
@@ -787,6 +1079,19 @@ class TransposeHeuristicConfig:
 
 
 @dataclass(frozen=True)
+class KeepLowerCrossingOrderConfig:
+    """Configuration for :class:`KeepLowerCrossingOrder`.
+
+    Parameters
+    ----------
+    enabled : bool, default=True
+        Whether to compute and compare the Dagre-order candidate.
+    """
+
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class SpectralOrderConfig:
     """Configuration for :class:`SpectralOrder`.
 
@@ -869,6 +1174,52 @@ def _passes_cluster_order_structure_gate(problem: LayoutProblem, cluster_count: 
     ):
         return False
     return cluster_count >= 5 and problem.num_nodes <= 120
+
+
+def _has_semantic_directed_acyclic_structure(problem: LayoutProblem) -> bool:
+    """Return whether native classified this graph as semantic-directed-acyclic.
+
+    Parameters
+    ----------
+    problem : LayoutProblem
+        Immutable graph inputs carrying the native graph-structure
+        classification.
+
+    Returns
+    -------
+    bool
+        ``True`` only when the graph is semantically directed and acyclic.
+    """
+    structure = problem.structure
+    if structure is None:
+        return False
+    is_semantically_directed = bool(getattr(structure, "is_semantically_directed", True))
+    is_directed_acyclic = bool(
+        getattr(structure, "is_directed_acyclic", getattr(structure, "is_acyclic", True))
+    )
+    return is_semantically_directed and is_directed_acyclic
+
+
+def _is_genuine_dag_layering(edge_index: torch.Tensor, layers: torch.Tensor) -> bool:
+    """Return whether all realized edges move strictly forward through layers.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        CPU edge tensor with shape ``[2, E]``.
+    layers : torch.Tensor
+        CPU layer assignment tensor with shape ``[N]``.
+
+    Returns
+    -------
+    bool
+        ``True`` when every edge goes from a lower layer to a higher layer.
+    """
+    if edge_index.numel() == 0:
+        return True
+    source_layers = layers[edge_index[0]]
+    target_layers = layers[edge_index[1]]
+    return bool(torch.all(source_layers < target_layers).item())
 
 
 def _cluster_children(
@@ -1358,6 +1709,104 @@ class TransposeHeuristic(Op):
             ordering_cpu=state.ordering.detach().to(device="cpu", dtype=torch.long),
             num_nodes=num_nodes,
         )
+        return state
+
+
+@register_op
+class KeepLowerCrossingOrder(Op):
+    """Keep Dagre's candidate order only when it lowers realized crossings."""
+
+    name: ClassVar[str] = "keep_lower_crossing_order"
+    category: ClassVar[OpCategory] = OpCategory.ORDERING
+    reads: ClassVar[Tuple[str, ...]] = ("layers", "ordering", "pos")
+    writes: ClassVar[Tuple[str, ...]] = ("ordering", "pos", "extras")
+    requires: ClassVar[Tuple[str, ...]] = ("layers",)
+
+    def __init__(self, config: Optional[KeepLowerCrossingOrderConfig] = None) -> None:
+        """Store the lower-crossing selector configuration.
+
+        Parameters
+        ----------
+        config : KeepLowerCrossingOrderConfig | None, optional
+            Optional operation configuration.
+        """
+        self.config = config or KeepLowerCrossingOrderConfig()
+
+    def apply(
+        self,
+        problem: LayoutProblem,
+        state: SolveState,
+        ctx: RuntimeContext,
+    ) -> SolveState:
+        """Compare native and Dagre-order candidates by realized crossings.
+
+        Parameters
+        ----------
+        problem : LayoutProblem
+            Immutable layout inputs.
+        state : SolveState
+            Mutable solve state with native's incumbent ordering populated.
+        ctx : RuntimeContext
+            Execution infrastructure passed through to the borrowed Dagre
+            normalization op.
+
+        Returns
+        -------
+        SolveState
+            Updated state. Exact ties preserve the incumbent native order.
+        """
+        if not self.config.enabled:
+            return state
+
+        started_at = time.perf_counter()
+        edge_index_cpu, layers_cpu, num_nodes = _resolve_active_layered_graph(problem, state)
+        if not _has_semantic_directed_acyclic_structure(problem) or not _is_genuine_dag_layering(
+            edge_index=edge_index_cpu,
+            layers=layers_cpu,
+        ):
+            return state
+        incumbent_ordering = _resolve_initial_ordering(
+            layers_cpu=layers_cpu,
+            state=state,
+            num_nodes=num_nodes,
+        )
+        incumbent_layers = _initial_ordered_layers(layers_cpu, ordering=incumbent_ordering)
+        incumbent_crossings = indexed_layered_crossing_count(
+            edge_index=edge_index_cpu,
+            ordered_layers=incumbent_layers,
+        )
+        candidate_layers = _dagre_candidate_layers_from_native(
+            problem=problem,
+            state=state,
+            ctx=ctx,
+            edge_index_cpu=edge_index_cpu,
+            layers_cpu=layers_cpu,
+            num_nodes=num_nodes,
+        )
+        candidate_crossings = indexed_layered_crossing_count(
+            edge_index=edge_index_cpu,
+            ordered_layers=candidate_layers,
+        )
+        selected = "dagre" if candidate_crossings < incumbent_crossings else "native"
+        if selected == "dagre":
+            state.ordering = _ordering_from_layers(
+                ordered_layers=candidate_layers,
+                num_nodes=num_nodes,
+                device=_target_device(problem, state),
+            )
+            _apply_ordering_to_positions(
+                state=state,
+                layers_cpu=layers_cpu,
+                ordering_cpu=state.ordering.detach().to(device="cpu", dtype=torch.long),
+                num_nodes=num_nodes,
+            )
+
+        state.extras[LOWER_CROSSING_ORDER_STATS_KEY] = {
+            "native_crossings": incumbent_crossings,
+            "dagre_crossings": candidate_crossings,
+            "selected": selected,
+            "runtime_s": time.perf_counter() - started_at,
+        }
         return state
 
 

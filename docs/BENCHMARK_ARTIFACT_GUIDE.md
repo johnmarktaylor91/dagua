@@ -20,6 +20,15 @@ If you are unsure where to start in the report directory at all, open:
 
 ## Artifact Map
 
+## Field-Best Eligibility
+
+Weighted V3 rows use symmetric severe-G6 field eligibility. A competitor layout
+that breaches the declared edge-weight contract is not eligible to be the
+field-best entry, mirroring native candidate selection's
+`dagua.eval.ruler_v3.severe_g6_breach(result)` /
+`referee_eligibility_key(result)` veto. This is a fairness policy for selecting
+the benchmark field, not a ruler or metric retune.
+
 ### `benchmark_deltas.md`
 
 Use when:

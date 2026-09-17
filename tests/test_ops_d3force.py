@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 
+import pytest
 import torch
 
 from dagua.layout.ops.d3force import (
@@ -12,6 +14,25 @@ from dagua.layout.ops.d3force import (
     d3force_lcg_values,
     d3force_phyllotaxis_positions,
 )
+
+
+def _d3_quadtree_available() -> bool:
+    """Check that Node and the d3-quadtree package are resolvable.
+
+    Returns
+    -------
+    bool
+        True when ``node`` exists and can import ``d3-quadtree`` from the
+        current working directory's module resolution path.
+    """
+    if shutil.which("node") is None:
+        return False
+    probe = subprocess.run(
+        ["node", "--input-type=module", "-e", 'import "d3-quadtree";'],
+        capture_output=True,
+        text=True,
+    )
+    return probe.returncode == 0
 
 
 def test_d3force_lcg_matches_reference_first_20_values() -> None:
@@ -70,6 +91,10 @@ def test_d3force_phyllotaxis_matches_reference_initial_nodes() -> None:
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
+@pytest.mark.skipif(
+    not _d3_quadtree_available(),
+    reason="node with the d3-quadtree package is required for this reference probe",
+)
 def test_d3force_quadtree_accumulation_matches_d3_quadtree_grid_probe() -> None:
     """Pin d3-quadtree topology and accumulated charge centroids.
 

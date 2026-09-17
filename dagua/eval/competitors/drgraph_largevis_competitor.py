@@ -75,6 +75,15 @@ def _write_reference_graph(path: Path, graph: DaguaGraph) -> None:
 def _read_reference_positions(path: Path, num_nodes: int) -> torch.Tensor:
     """Read C++ reference coordinates.
 
+    Both upstream binaries write a header line first (``n_vertices out_dim``:
+    LargeVis.cpp:134, DRGraph visualizemod.cpp:793) followed by one line per
+    node. The header is skipped exactly as
+    ``scripts/verify_drgraph_largevis_fidelity.py`` does. LargeVis rows carry
+    ``name x y`` where ``name`` is the node id echoed from the edge-list input
+    (rows are ordered by first appearance in the edge file, NOT by id), so the
+    id column is authoritative for 3-column rows. DRGraph rows are bare
+    ``x y`` pairs in node-id order.
+
     Parameters
     ----------
     path : pathlib.Path
@@ -86,18 +95,44 @@ def _read_reference_positions(path: Path, num_nodes: int) -> torch.Tensor:
     -------
     torch.Tensor
         Position tensor with shape ``[N, 2]``.
+
+    Raises
+    ------
+    ValueError
+        If the output is empty, the header node count disagrees with
+        ``num_nodes``, a row's node id is invalid or repeated, or any node is
+        missing a coordinate row (for example isolated nodes that never enter
+        the edge-list input). The adapter converts this into a clean error
+        row instead of returning silently corrupted coordinates.
     """
+    lines = [line for line in path.read_text().splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("reference output is empty")
+    header_parts = lines[0].split()
+    reported_nodes = int(header_parts[0])
+    if reported_nodes != num_nodes:
+        raise ValueError(
+            f"reference output header reports {reported_nodes} nodes, "
+            f"expected {num_nodes} (isolated nodes never enter the edge-list input)"
+        )
+    coordinate_lines = lines[1:]
     positions = torch.zeros((num_nodes, 2), dtype=torch.float32)
-    for row_id, line in enumerate(path.read_text().splitlines()):
+    seen: set[int] = set()
+    for row_index, line in enumerate(coordinate_lines):
         parts = line.split()
-        if len(parts) < 2 or row_id >= num_nodes:
-            continue
-        if len(parts) >= 3:
-            positions[row_id, 0] = float(parts[-2])
-            positions[row_id, 1] = float(parts[-1])
-        else:
-            positions[row_id, 0] = float(parts[0])
-            positions[row_id, 1] = float(parts[1])
+        if len(parts) < 2:
+            raise ValueError(f"malformed reference coordinate line: {line!r}")
+        node = int(parts[0]) if len(parts) >= 3 else row_index
+        if node < 0 or node >= num_nodes:
+            raise ValueError(f"reference output row has out-of-range node id {node}")
+        if node in seen:
+            raise ValueError(f"reference output repeats node id {node}")
+        positions[node, 0] = float(parts[-2])
+        positions[node, 1] = float(parts[-1])
+        seen.add(node)
+    missing = sorted(set(range(num_nodes)) - seen)
+    if missing:
+        raise ValueError(f"reference omitted coordinates for nodes {missing[:5]}")
     return positions
 
 

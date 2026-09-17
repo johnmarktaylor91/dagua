@@ -45,6 +45,7 @@ RULER_SCHEMA = "r8-cluster-extended-v1"
 DEGENERACY_CHAMPION_INELIGIBLE_FLAGS = frozenset(
     {"DEGENERATE_SCALE", "SPRAWL_COLLAPSE", "COINCIDENT_COLLAPSE"}
 )
+SYMMETRIC_SEVERE_G6_FIELD_ELIGIBILITY = True
 RAW_CACHE_FILENAME = "R8_EVENTA_RAW_SCORES_V1.json"
 LEGACY_FIELD_CACHE_SHA256 = (
     "019c777c64b914e7b402d981378bb6aa4e3216000f5921bbc0184f8f0fe936ee"  # pragma: allowlist secret
@@ -105,6 +106,16 @@ _PLANTED_PARTITION_GRAPH_NAMES = {
     "weighted_clusters_3x10",
 }
 _RENDER_POINTS_PER_NATIVE_UNIT = 72.0
+# Engines whose stored coordinates are graph-display inches or unit-box/unit-cloud
+# clouds; the scorer multiplies their positions by 72.0 before scoring. Membership
+# is a STATIC per-engine store-unit convention audited from measured layout spans
+# (WP-06 scale table + drywell R1-B3-F1 revived-engine audit, GLaDOS-prep) -- it is
+# never inferred from a row's span at scoring time. NOT members (deliberately):
+# coregd_reference, coregd_reimpl, nnpnet_reference, drgraph_reimpl, omega_reimpl
+# -- their outputs are so collapsed that x72 still leaves rows degenerate
+# (escalation CB-6, WP06-F03); drgraph_reference -- same CB-6 class as its reimpl
+# twin (drywell R1-B3-F1), NOT a mechanical add; and openord -- unavailable in this
+# env (binary absent, records clean skips), audit its span if it ever produces rows.
 _NATIVE_UNIT_ENGINES = frozenset(
     {
         "backbone",
@@ -112,16 +123,27 @@ _NATIVE_UNIT_ENGINES = frozenset(
         "classic_fr_kk",
         "classic_kk",
         "classic_linlog",
+        "classic_neulay",
         "classic_sgd2_multi",
         "classic_spectral",
+        "classic_stress_maj",
+        "classic_stress_sgd",
         "classic_sugiyama",
+        "classic_umap",
         "d3_cluster_radial_reimpl",
         "d3_cluster_reimpl",
         "d3_tree_radial_reimpl",
         "d3_tree_reimpl",
         "d3hierarchy",
+        "deepgd_reference",
+        "deepgd_reimpl",
         "dot",
+        "largevis_reference",
+        "largevis_reimpl",
         "linlog",
+        "mulment_reference",
+        "mulment_reimpl",
+        "neulay",
         "nx_arf",
         "nx_arf_reimpl",
         "nx_bfs",
@@ -141,8 +163,21 @@ _NATIVE_UNIT_ENGINES = frozenset(
         "nx_spectral_random_walk",
         "nx_spiral",
         "nx_spiral_reimpl",
+        "omega_reference",
+        "pacmap",
+        "pacmap_reimpl",
         "sgd2_multi_ref",
+        "sklearn_smacof_nonmetric",
+        "smacof_nonmetric_reimpl",
+        "smartgd_reference",
+        "smartgd_reimpl",
         "sparse_stress",
+        "sparse_stress_reimpl",
+        "tfdp",
+        "tfdp_reimpl",
+        "umap_graph",
+        "word2vecgd",
+        "word2vecgd_reimpl",
     }
 )
 
@@ -217,6 +252,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--old-output", type=Path, required=True)
     parser.add_argument("--extended-output", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=max(1, (mp.cpu_count() or 2) // 2))
+    parser.add_argument(
+        "--no-symmetric-severe-g6-field-eligibility",
+        dest="symmetric_severe_g6_field_eligibility",
+        action="store_false",
+        default=SYMMETRIC_SEVERE_G6_FIELD_ELIGIBILITY,
+        help=(
+            "Use the pre-policy V3 field-best behavior where severe-G6 breaching "
+            "competitors remain selectable."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -463,6 +508,27 @@ def scoring_signature() -> str:
             "dagua/eval/ruler_v3_groups.py": sha256_file(
                 root / "dagua" / "eval" / "ruler_v3_groups.py"
             ),
+            # Score-affecting imports OUTSIDE the frozen set (drywell R2-B3-F3):
+            # render/mpl.py anchors node boxes for every V3 score and the
+            # DEGENERATE predicate; benchmark.py's _declares_hierarchy gates the
+            # V3 conditional groups; graphs.py's is_semantically_directed
+            # parameterizes composite directedness. Hash them so every stale-
+            # score defense (cache header equality, resume quarantine, locks)
+            # sees edits through these seams.
+            "dagua/eval/benchmark.py": sha256_file(root / "dagua" / "eval" / "benchmark.py"),
+            "dagua/eval/graphs.py": sha256_file(root / "dagua" / "eval" / "graphs.py"),
+            "dagua/render/mpl.py": sha256_file(root / "dagua" / "render" / "mpl.py"),
+            # Node-box producer seam (drywell R3-B3): every V3 score consumes
+            # boxes from DaguaGraph.compute_node_sizes (graph.py) and the
+            # text-measurement/box-sizing implementation (utils.py); graph
+            # hashes cannot compensate because to_json never serializes the
+            # computed node_sizes. utils.py is broad and will flip the
+            # signature on unrelated edits -- over-invalidation is the correct
+            # failure direction (it merely rescores from tensors), whereas
+            # under-invalidation silently poisons cached scores.
+            "dagua/graph.py": sha256_file(root / "dagua" / "graph.py"),
+            "dagua/utils.py": sha256_file(root / "dagua" / "utils.py"),
+            "dagua/styles.py": sha256_file(root / "dagua" / "styles.py"),
         },
     }
     return canonical_json_hash(payload)
@@ -692,6 +758,14 @@ def normalize_position_units_for_scoring(
         telemetry for raw-score rows.
     """
     source_positions = positions.to(dtype=torch.float32)
+    kept_float64 = False
+    if not bool(torch.isfinite(source_positions).all()) and bool(torch.isfinite(positions).all()):
+        # Deep block-chain layouts can legitimately store finite float64
+        # coordinates beyond float32 range; scoring the float32 cast would
+        # turn them non-finite and ERROR the row. Keep the finite tensor and
+        # disclose it in the row flags.
+        source_positions = positions.to(dtype=torch.float64)
+        kept_float64 = True
     node_sizes, node_size_scale = _rendered_node_sizes(graph, source_positions)
     source_span = _position_span(source_positions)
     position_scale = _engine_position_scale(engine)
@@ -703,6 +777,8 @@ def normalize_position_units_for_scoring(
         if _is_degenerate_render_span(rendered_span, node_diag_mean)
         else tuple()
     )
+    if kept_float64:
+        flags = (*flags, "FLOAT64_PRESERVED")
     return ScoringUnitNormalization(
         positions=rendered_positions,
         node_sizes=node_sizes,
@@ -1349,7 +1425,10 @@ def score_key_for_table(table_kind: str) -> str:
 
 
 def best_rows_by_graph(
-    rows: Iterable[Mapping[str, Any]], score_key: str, engine: Optional[str]
+    rows: Iterable[Mapping[str, Any]],
+    score_key: str,
+    engine: Optional[str],
+    apply_symmetric_severe_g6_field_eligibility: bool = SYMMETRIC_SEVERE_G6_FIELD_ELIGIBILITY,
 ) -> Dict[str, Dict[str, Any]]:
     """Select best raw row per graph for one score column.
 
@@ -1361,6 +1440,9 @@ def best_rows_by_graph(
         Score column to maximize.
     engine : Optional[str]
         Exact engine filter; ``None`` means all non-native field engines.
+    apply_symmetric_severe_g6_field_eligibility : bool, default=True
+        Whether V3 field rows must pass the same severe-G6 veto native uses
+        for declared-weight fairness.
 
     Returns
     -------
@@ -1376,6 +1458,15 @@ def best_rows_by_graph(
             continue
         if engine is None and row_engine == "dagua":
             continue
+        if _field_row_blocked_by_symmetric_g6_policy(
+            row,
+            score_key,
+            field_selection=engine is None,
+            apply_symmetric_severe_g6_field_eligibility=(
+                apply_symmetric_severe_g6_field_eligibility
+            ),
+        ):
+            continue
         graph_name = str(row["graph"])
         row_key = _selection_key(row, score_key, native_selection=engine == "dagua")
         best_key = (
@@ -1386,6 +1477,55 @@ def best_rows_by_graph(
         if best_key is None or row_key > best_key:
             best[graph_name] = dict(row)
     return best
+
+
+def symmetric_severe_g6_field_eligibility(row: Mapping[str, Any]) -> bool:
+    """Return whether a field row passes native's severe-G6 veto for fairness.
+
+    Parameters
+    ----------
+    row : Mapping[str, Any]
+        Raw V3 score row carrying the persisted native referee eligibility key.
+
+    Returns
+    -------
+    bool
+        ``True`` when the row is eligible for field-best selection.
+    """
+    return _row_referee_eligibility_key(row)[0] == 1
+
+
+def _field_row_blocked_by_symmetric_g6_policy(
+    row: Mapping[str, Any],
+    score_key: str,
+    *,
+    field_selection: bool,
+    apply_symmetric_severe_g6_field_eligibility: bool,
+) -> bool:
+    """Return whether a V3 field row is ineligible under the symmetric G6 policy.
+
+    Parameters
+    ----------
+    row : Mapping[str, Any]
+        Raw score row.
+    score_key : str
+        Score column being selected.
+    field_selection : bool
+        Whether the current selection is choosing non-native field rows.
+    apply_symmetric_severe_g6_field_eligibility : bool
+        Whether the adopted field eligibility policy is active.
+
+    Returns
+    -------
+    bool
+        ``True`` when a competitor row must be excluded from field-best
+        selection because the V3 referee key marks a severe-G6 breach.
+    """
+    if not field_selection or not apply_symmetric_severe_g6_field_eligibility:
+        return False
+    if not score_key.startswith("v3_"):
+        return False
+    return not symmetric_severe_g6_field_eligibility(row)
 
 
 def _selection_key(
@@ -1409,8 +1549,9 @@ def _selection_key(
     -------
     Tuple[int, Tuple[int, float], float]
         Lexicographic selection key. Degeneracy eligibility applies to both
-        native and field rows; native V3 rows then use the shared severe-G6
-        referee eligibility prefix.
+        native and field rows; native V3 rows use the shared severe-G6
+        referee eligibility prefix. Field severe-G6 ineligibility is applied
+        as a separate filter so breaching competitors cannot become field-best.
     """
     degeneracy_eligible = _row_degeneracy_eligibility_key(row)
     referee_eligibility = _row_referee_eligibility_key(row) if native_selection else (1, -0.0)
@@ -1482,6 +1623,7 @@ def build_table(
     table_kind: str,
     signature: str,
     raw_cache_path: Path,
+    apply_symmetric_severe_g6_field_eligibility: bool = SYMMETRIC_SEVERE_G6_FIELD_ELIGIBILITY,
 ) -> Dict[str, Any]:
     """Build one scoreboard table from raw candidate rows.
 
@@ -1499,6 +1641,9 @@ def build_table(
         Current scoring signature.
     raw_cache_path : Path
         Raw score cache path.
+    apply_symmetric_severe_g6_field_eligibility : bool, default=True
+        Whether V3 field-best selection excludes competitors breaching the
+        same severe-G6 contract enforced for native candidate selection.
 
     Returns
     -------
@@ -1507,7 +1652,12 @@ def build_table(
     """
     score_key = score_key_for_table(table_kind)
     native_by_graph = best_rows_by_graph(rows, score_key, engine="dagua")
-    field_by_graph = best_rows_by_graph(rows, score_key, engine=None)
+    field_by_graph = best_rows_by_graph(
+        rows,
+        score_key,
+        engine=None,
+        apply_symmetric_severe_g6_field_eligibility=(apply_symmetric_severe_g6_field_eligibility),
+    )
     per_graph: List[Dict[str, Any]] = []
     tallies = {"strictly_best": 0, "tied": 0, "behind": 0, "missing": 0}
     for graph_name in names:
@@ -1559,6 +1709,7 @@ def build_table(
         "tallies": tallies,
         "scoring_signature": signature,
         "raw_cache_path": str(raw_cache_path),
+        "symmetric_severe_g6_field_eligibility": (apply_symmetric_severe_g6_field_eligibility),
         "per_graph": per_graph,
     }
 
@@ -1654,6 +1805,7 @@ def validate_table_integrity(
     table: Mapping[str, Any],
     rows: Sequence[Mapping[str, Any]],
     names: Sequence[str],
+    apply_symmetric_severe_g6_field_eligibility: bool = SYMMETRIC_SEVERE_G6_FIELD_ELIGIBILITY,
 ) -> None:
     """Validate independent field-best computation for a table.
 
@@ -1665,6 +1817,9 @@ def validate_table_integrity(
         Raw candidate rows.
     names : Sequence[str]
         Expected graph names.
+    apply_symmetric_severe_g6_field_eligibility : bool, default=True
+        Whether V3 field-best selection excludes severe-G6 breaching
+        competitors during independent recomputation.
 
     Returns
     -------
@@ -1675,7 +1830,12 @@ def validate_table_integrity(
     if len(row_names) != len(names) or set(row_names) != set(names):
         raise RuntimeError("table graph-name coverage mismatch")
     score_key = score_key_for_table(str(table["table_kind"]))
-    field_by_graph = best_rows_by_graph(rows, score_key, engine=None)
+    field_by_graph = best_rows_by_graph(
+        rows,
+        score_key,
+        engine=None,
+        apply_symmetric_severe_g6_field_eligibility=(apply_symmetric_severe_g6_field_eligibility),
+    )
     for table_row in table_rows:
         if table_row["status"] == "missing":
             continue
@@ -1733,6 +1893,7 @@ def validate_outputs(
     old_names: Sequence[str],
     extended_names: Sequence[str],
     signature: str,
+    apply_symmetric_severe_g6_field_eligibility: bool = SYMMETRIC_SEVERE_G6_FIELD_ELIGIBILITY,
 ) -> None:
     """Run the recipe's mandatory scorer self-fail checks.
 
@@ -1752,6 +1913,9 @@ def validate_outputs(
         Extended table names.
     signature : str
         Current scoring signature.
+    apply_symmetric_severe_g6_field_eligibility : bool, default=True
+        Whether V3 field-best selection excludes severe-G6 breaching
+        competitors in both generated tables and validation recomputation.
 
     Returns
     -------
@@ -1770,8 +1934,18 @@ def validate_outputs(
             f"extended table must have 121 unique names, got {len(set(extended_names))}"
         )
     validate_raw_integrity(rows, graphs, extended_names, signature)
-    validate_table_integrity(old_table, rows, old_names)
-    validate_table_integrity(extended_table, rows, extended_names)
+    validate_table_integrity(
+        old_table,
+        rows,
+        old_names,
+        apply_symmetric_severe_g6_field_eligibility=(apply_symmetric_severe_g6_field_eligibility),
+    )
+    validate_table_integrity(
+        extended_table,
+        rows,
+        extended_names,
+        apply_symmetric_severe_g6_field_eligibility=(apply_symmetric_severe_g6_field_eligibility),
+    )
     assert_native_runtime_referee_tripwire(rows)
 
 
@@ -1831,12 +2005,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         print(f"[score] raw cache hit: {len(raw_rows)} rows", flush=True)
 
-    old_table = build_table(raw_rows, graphs, old_names, "old", signature, args.score_cache)
+    old_table = build_table(
+        raw_rows,
+        graphs,
+        old_names,
+        "old",
+        signature,
+        args.score_cache,
+        apply_symmetric_severe_g6_field_eligibility=args.symmetric_severe_g6_field_eligibility,
+    )
     extended_table = build_table(
-        raw_rows, graphs, extended_names, "extended", signature, args.score_cache
+        raw_rows,
+        graphs,
+        extended_names,
+        "extended",
+        signature,
+        args.score_cache,
+        apply_symmetric_severe_g6_field_eligibility=args.symmetric_severe_g6_field_eligibility,
     )
     validate_outputs(
-        old_table, extended_table, raw_rows, graphs, old_names, extended_names, signature
+        old_table,
+        extended_table,
+        raw_rows,
+        graphs,
+        old_names,
+        extended_names,
+        signature,
+        apply_symmetric_severe_g6_field_eligibility=args.symmetric_severe_g6_field_eligibility,
     )
 
     args.old_output.parent.mkdir(parents=True, exist_ok=True)

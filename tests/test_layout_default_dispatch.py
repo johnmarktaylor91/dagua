@@ -23,9 +23,13 @@ import torch
 import dagua
 from dagua.eval.graphs import _make_r8_lr_direction
 from dagua.layout.engine import layout as engine_layout
+from dagua.layout.graph_classify import GraphFamily, GraphStructure
 from dagua.layout.ops.pipelines import dagua_native as dn_module
 from dagua.layout.ops.pipelines.dagua_native import _apply_public_direction_frame
-from dagua.layout.ops.pipelines.native_directed import _score_directed_candidate
+from dagua.layout.ops.pipelines.native_directed import (
+    _directed_wide_dag_ordering_enabled,
+    _score_directed_candidate,
+)
 from dagua.layout.ops.state import LayoutProblem
 from dagua.metrics import quick
 
@@ -227,3 +231,323 @@ def test_directed_candidate_scoring_is_tb_lr_transpose_equivalent() -> None:
     lr_score = _score_directed_candidate(lr_pos, lr_problem, cluster_ids=None)
 
     assert lr_score == pytest.approx(tb_score)
+
+
+def test_wide_dag_ordering_gate_opens_for_high_fanout_dag() -> None:
+    """High fanout semantic DAGs should be eligible for ordering candidates."""
+    edge_index = torch.tensor([[0] * 24 + list(range(1, 39)), list(range(1, 25)) + [39] * 38])
+    structure = GraphStructure(
+        family=GraphFamily.GENERAL,
+        num_components=1,
+        max_degree=24,
+        num_layers=3,
+        avg_layer_width=40.0 / 3.0,
+        is_planar_hint=False,
+        is_directed_acyclic=True,
+        is_semantically_directed=True,
+        direction_is_declared=True,
+    )
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=40, structure=structure)
+
+    assert _directed_wide_dag_ordering_enabled(problem)
+
+
+def test_wide_dag_ordering_gate_rejects_ordinary_lattice_like_dag() -> None:
+    """Ordinary lattice-like DAGs should not enter the wide-DAG arm."""
+    sources = []
+    targets = []
+    width = 8
+    height = 5
+    for row in range(height - 1):
+        for col in range(width):
+            node = row * width + col
+            sources.append(node)
+            targets.append((row + 1) * width + col)
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    structure = GraphStructure(
+        family=GraphFamily.GENERAL,
+        num_components=1,
+        max_degree=2,
+        num_layers=height,
+        avg_layer_width=float(width),
+        is_planar_hint=True,
+        is_directed_acyclic=True,
+        topology_tags=("lattice_like",),
+        is_semantically_directed=True,
+        direction_is_declared=True,
+    )
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=width * height, structure=structure)
+
+    assert not _directed_wide_dag_ordering_enabled(problem)
+
+
+def test_wide_dag_ordering_gate_opens_for_weighted_layered_skew() -> None:
+    """Weighted layered skew DAGs should be eligible even when lattice-like."""
+    sources = []
+    targets = []
+    width = 10
+    height = 4
+    for row in range(height - 1):
+        for col in range(width):
+            node = row * width + col
+            sources.append(node)
+            targets.append((row + 1) * width + col)
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    edge_weights = torch.linspace(1.0, 10.0, steps=len(sources))
+    structure = GraphStructure(
+        family=GraphFamily.GENERAL,
+        num_components=1,
+        max_degree=2,
+        num_layers=height,
+        avg_layer_width=float(width),
+        is_planar_hint=False,
+        is_directed_acyclic=True,
+        topology_tags=("lattice_like",),
+        is_semantically_directed=True,
+        direction_is_declared=True,
+        has_edge_weights=True,
+    )
+    problem = LayoutProblem(
+        edge_index=edge_index,
+        num_nodes=width * height,
+        edge_weights=edge_weights,
+        structure=structure,
+    )
+
+    assert _directed_wide_dag_ordering_enabled(problem)
+
+
+def test_wide_dag_ordering_gate_rejects_dense_chain_dag() -> None:
+    """Dense narrow DAGs should not enter the wide-rank ordering arm."""
+    sources = []
+    targets = []
+    node_count = 50
+    for source in range(node_count):
+        for target in range(source + 1, min(node_count, source + 8)):
+            sources.append(source)
+            targets.append(target)
+    edge_index = torch.tensor([sources, targets], dtype=torch.long)
+    structure = GraphStructure(
+        family=GraphFamily.GENERAL,
+        num_components=1,
+        max_degree=14,
+        num_layers=node_count,
+        avg_layer_width=1.0,
+        is_planar_hint=False,
+        is_directed_acyclic=True,
+        topology_tags=("dense_dag",),
+        is_semantically_directed=True,
+        direction_is_declared=True,
+    )
+    problem = LayoutProblem(edge_index=edge_index, num_nodes=node_count, structure=structure)
+
+    assert not _directed_wide_dag_ordering_enabled(problem)
+
+
+# ---------------------------------------------------------------------------
+# WP-23 GLaDOS-prep dispatch pins (branch glados/wp-23-engine-dispatch)
+# ---------------------------------------------------------------------------
+
+
+def _assert_valid_positions(pos: torch.Tensor, expected_nodes: int) -> None:
+    """Assert the dispatch contract: finite float32 positions shaped [N, 2].
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Positions returned by ``dagua.layout``.
+    expected_nodes : int
+        Expected row count.
+    """
+    assert isinstance(pos, torch.Tensor)
+    assert pos.shape == (expected_nodes, 2)
+    assert pos.dtype == torch.float32
+    assert torch.isfinite(pos).all()
+
+
+@pytest.mark.parametrize(
+    "edges, num_nodes",
+    [
+        pytest.param([], 0, id="empty"),
+        pytest.param([], 1, id="single_node"),
+        pytest.param([("a", "a")], 1, id="self_loop"),
+        pytest.param([("a", "b"), ("a", "b"), ("b", "c")], 3, id="multi_edge"),
+        pytest.param([("a", "b"), ("c", "d")], 4, id="disconnected"),
+    ],
+)
+def test_default_dispatch_survives_degenerate_inputs(
+    edges: list[tuple[str, str]], num_nodes: int
+) -> None:
+    """The full default dispatch must return finite [N, 2] float32 positions.
+
+    Pins the WP-03 positive assurance (malformed-input probes): empty,
+    single-node, self-loop, duplicate multi-edge, and disconnected graphs all
+    survive the GLaDOS-reachable default path.
+    """
+    g = dagua.DaguaGraph()
+    node_ids = [chr(ord("a") + i) for i in range(num_nodes)]
+    for node_id in node_ids:
+        g.add_node(node_id)
+    for src, dst in edges:
+        g.add_edge(src, dst)
+
+    pos = dagua.layout(g, dagua.LayoutConfig(seed=42))
+    _assert_valid_positions(pos, num_nodes)
+
+
+def test_scale_gate_and_router_pin_small_dense_hijack() -> None:
+    """Pin the scale-gate mechanism the certified default path relies on.
+
+    Documents WP03-F01 (ESCALATION, scale/ frozen): the gate fires on EDGE
+    count alone, so a small dense graph (n<=2000, E>200K) enters the scale
+    path, and ``route()`` never returns NATIVE without an explicit
+    ``algorithm_params["scale_strategy"]`` override. Any future change to
+    this behavior must be deliberate.
+    """
+    from dagua.layout.scale.router import ScaleStrategy, route, should_enter_scale_gate
+    from dagua.layout.scale.sketch import TopologySketch
+
+    base = dagua.LayoutConfig()
+    assert not should_enter_scale_gate(2_000, 200_000, base)
+    assert should_enter_scale_gate(2_000, 200_001, base)
+    assert should_enter_scale_gate(20_001, 0, base)
+    assert not should_enter_scale_gate(20_000, 200_000, base)
+
+    chain = _build_chain_graph(8)
+    acyclic_sketch = TopologySketch.from_edge_index(chain.edge_index, chain.num_nodes, depth_cap=64)
+    assert route(acyclic_sketch, base).strategy is not ScaleStrategy.NATIVE
+
+    cyclic = dagua.DaguaGraph()
+    for node_id in ("a", "b", "c"):
+        cyclic.add_node(node_id)
+    cyclic.add_edge("a", "b")
+    cyclic.add_edge("b", "c")
+    cyclic.add_edge("c", "a")
+    cyclic_sketch = TopologySketch.from_edge_index(
+        cyclic.edge_index, cyclic.num_nodes, depth_cap=64
+    )
+    assert route(cyclic_sketch, base).strategy is not ScaleStrategy.NATIVE
+
+    override = dagua.LayoutConfig(algorithm_params={"scale_strategy": "NATIVE"})
+    assert route(acyclic_sketch, override).strategy is ScaleStrategy.NATIVE
+
+
+def test_declared_direction_forwards_graph_structure_to_pipeline(monkeypatch) -> None:
+    """A declared-direction graph must reach the pipeline pre-classified.
+
+    Pins the certified/holdout classification-path parity: both the certified
+    corpus and the GLaDOS runner declare ``is_semantically_directed``, so the
+    engine-side ``classify_graph(..., graph=graph)`` branch fires and the
+    pipeline receives the declared structure instead of re-inferring it.
+    """
+    import functools
+
+    captured: list[object] = []
+    original = dn_module.layout_dagua_native_pipeline
+
+    @functools.wraps(original)
+    def _capture(*args: object, **kwargs: object) -> torch.Tensor:
+        """Capture the forwarded structure and return placeholder positions."""
+        captured.append(kwargs.get("graph_structure"))
+        return torch.zeros((kwargs["num_nodes"], 2), dtype=torch.float32)
+
+    monkeypatch.setattr(dn_module, "layout_dagua_native_pipeline", _capture)
+
+    declared = _build_chain_graph(6)
+    declared.is_semantically_directed = True
+    dagua.layout(declared, dagua.LayoutConfig(seed=42, device="cpu"))
+
+    assert len(captured) == 1
+    structure = captured[0]
+    assert structure is not None, "declared graphs must be classified engine-side"
+    assert structure.direction_is_declared is True
+    assert structure.is_semantically_directed is True
+
+    from dagua.layout.graph_classify import classify_graph
+
+    reference = classify_graph(
+        declared.edge_index, declared.num_nodes, graph=declared, device="cpu"
+    )
+    assert structure.family == reference.family
+    assert structure.is_directed_acyclic == reference.is_directed_acyclic
+    assert structure.is_semantically_directed == reference.is_semantically_directed
+
+    captured.clear()
+    undeclared = _build_chain_graph(6)
+    dagua.layout(undeclared, dagua.LayoutConfig(seed=42, device="cpu"))
+    assert captured == [None], "undeclared graphs must keep the pipeline-side classify path"
+
+
+def test_engine_classify_receives_config_device(monkeypatch) -> None:
+    """The engine-side classify must receive the config's explicit device.
+
+    Pins WP03-F13 at the dispatch site: a device="cpu" run must not launch
+    CUDA work for classification layering.
+    """
+    import importlib
+
+    engine_module = importlib.import_module("dagua.layout.engine")
+    seen: list[object] = []
+    original = engine_module.classify_graph
+
+    def _spy(edge_index: torch.Tensor, num_nodes: int, *args: object, **kwargs: object):
+        """Record the device forwarded to classify_graph."""
+        seen.append(kwargs.get("device"))
+        return original(edge_index, num_nodes, *args, **kwargs)
+
+    monkeypatch.setattr(engine_module, "classify_graph", _spy)
+
+    g = _build_chain_graph(6)
+    g.is_semantically_directed = True
+    dagua.layout(g, dagua.LayoutConfig(seed=42, device="cpu"))
+    assert "cpu" in seen
+
+
+def test_algorithm_params_reserved_keys_raise() -> None:
+    """algorithm_params must not silently replace the graph topology.
+
+    Pins WP03-F10: a param named ``edge_index``/``num_nodes``/``config`` used
+    to overwrite the dispatch kwargs with no validation.
+    """
+    g = _build_chain_graph(4)
+    bad = dagua.LayoutConfig(
+        algorithm="fr",
+        steps=2,
+        algorithm_params={"edge_index": torch.zeros((2, 0), dtype=torch.long)},
+    )
+    with pytest.raises(ValueError, match="reserved dispatch"):
+        dagua.layout(g, bad)
+
+
+def test_algorithm_params_ignored_and_unknown_keys_warn() -> None:
+    """Silently-ignored and unknown algorithm_params must emit warnings.
+
+    Pins WP03-F10: ``fidelity_dtype`` is config-driven (a user param is
+    overwritten), and misspelled params used to vanish in the signature
+    filter with no diagnostics.
+    """
+    g = _build_chain_graph(4)
+
+    with pytest.warns(UserWarning, match="fidelity_dtype"):
+        pos = dagua.layout(
+            g,
+            dagua.LayoutConfig(
+                algorithm="fr",
+                steps=2,
+                seed=42,
+                algorithm_params={"fidelity_dtype": torch.float64},
+            ),
+        )
+    _assert_valid_positions(pos, 4)
+
+    with pytest.warns(UserWarning, match="definitely_not_a_param"):
+        pos = dagua.layout(
+            g,
+            dagua.LayoutConfig(
+                algorithm="fr",
+                steps=2,
+                seed=42,
+                algorithm_params={"definitely_not_a_param": 1},
+            ),
+        )
+    _assert_valid_positions(pos, 4)

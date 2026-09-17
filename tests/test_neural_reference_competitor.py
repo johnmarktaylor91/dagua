@@ -113,3 +113,19 @@ def test_deepgd_reference_layout_is_seed_deterministic() -> None:
     assert second.pos is not None
     assert first.pos.shape == (graph.num_nodes, 2)
     assert torch.equal(first.pos, second.pos)
+
+
+def test_reference_device_is_pinned_to_cpu() -> None:
+    """Reference inference must be CPU-pinned for cross-machine reproducibility.
+
+    cuda-when-available produced machine-dependent field rows (CUDA vs CPU
+    inference differ in low-order bits even under deterministic algorithms).
+
+    Returns
+    -------
+    None
+        This test asserts on the resolved inference device.
+    """
+    from dagua.eval.competitors.neural_reference_competitor import _reference_device
+
+    assert _reference_device().type == "cpu"

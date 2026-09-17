@@ -233,6 +233,11 @@ def layout_fcose_pipeline(
         If the pipeline fails to produce final positions.
     """
     del node_sizes
+    if num_nodes == 0:
+        # Empty-graph guard: FCoSE's component packing reduces over node
+        # extents and crashes on zero-size tensors. Match the cose-family
+        # empty output (float32, [0, 2]).
+        return torch.zeros((0, 2), dtype=torch.float32, device=edge_index.device)
     config = FCoSEConfig(
         quality=quality,
         randomize=randomize,

@@ -142,23 +142,6 @@ class TestLongestPathLayeringVectorized:
         )
         assert scalar_list == vector_list
 
-    @pytest.mark.slow
-    def test_100k_chain_completes_in_time(self):
-        """Deep chain of 100K nodes must complete in <5s."""
-        n = 100_000
-        src = torch.arange(n - 1, dtype=torch.long)
-        tgt = torch.arange(1, n, dtype=torch.long)
-        edge_index = torch.stack([src, tgt])
-
-        t0 = time.perf_counter()
-        layers = _longest_path_layering_vectorized(edge_index, n)
-        elapsed = time.perf_counter() - t0
-
-        assert elapsed < 5.0, f"Took {elapsed:.2f}s, expected <5s"
-        assert layers.shape[0] == n
-        assert layers[0].item() == 0
-        assert layers[-1].item() == n - 1
-
     def test_diamond_dag(self):
         """Diamond: 0->1, 0->2, 1->3, 2->3 — node 3 should be at layer 2."""
         edge_index = torch.tensor([[0, 0, 1, 2], [1, 2, 3, 3]], dtype=torch.long)
@@ -270,8 +253,37 @@ class TestLongestPathLayeringVectorized:
 
         assert list(fallback_result) == list(cpu_result)
 
+
+@pytest.mark.slow
+class TestLongestPathLayeringPerfPins:
+    """Load-sensitive 100K-node layering perf pins, kept out of the smoke tier.
+
+    These pin the vectorized/fast layering paths against hang or quadratic
+    blowup regressions. They carry wall-clock assertions, so they live in the
+    slow tier with generous bounds instead of the smoke tier (WP-11B F06:
+    smoke-tier wall asserts flake under measurement load on this box).
+    """
+
+    def test_100k_chain_completes_in_time(self):
+        """Deep chain of 100K nodes must complete in bounded time."""
+        n = 100_000
+        src = torch.arange(n - 1, dtype=torch.long)
+        tgt = torch.arange(1, n, dtype=torch.long)
+        edge_index = torch.stack([src, tgt])
+
+        t0 = time.perf_counter()
+        layers = _longest_path_layering_vectorized(edge_index, n)
+        elapsed = time.perf_counter() - t0
+
+        # Generous bound: the pinned regression is a hang/quadratic blowup
+        # (minutes), not a 5s budget; 30s keeps the pin load-tolerant.
+        assert elapsed < 30.0, f"Took {elapsed:.2f}s, expected <30s"
+        assert layers.shape[0] == n
+        assert layers[0].item() == 0
+        assert layers[-1].item() == n - 1
+
     def test_large_wide_dag_completes_in_time(self):
-        """A 100K-node wide DAG should complete quickly on the fast path."""
+        """A 100K-node wide DAG should complete on the fast path."""
         n = 100_000
         width = 1_000
         src = torch.arange(0, n - width, dtype=torch.long)
@@ -282,7 +294,8 @@ class TestLongestPathLayeringVectorized:
         result = longest_path_layering(edge_index, n)
         elapsed = time.perf_counter() - t0
 
-        assert elapsed < 5.0, f"Layering took {elapsed:.2f}s, expected <5s"
+        # Generous bound: pins the fast path against hang-scale regressions.
+        assert elapsed < 30.0, f"Layering took {elapsed:.2f}s, expected <30s"
         if isinstance(result, torch.Tensor):
             assert result.max().item() == (n // width) - 1
 

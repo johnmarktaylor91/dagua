@@ -369,6 +369,61 @@ def test_dagua_competitor_signature_uses_device_and_source_hash(monkeypatch):
 
 
 @pytest.mark.smoke
+def test_dagua_competitor_scopes_deterministic_budget_to_det_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production keeps deadline plus ledger while det mode stays ledger-only."""
+    import importlib
+
+    layout_module = importlib.import_module("dagua.layout")
+
+    captured_configs: list[object] = []
+
+    def fake_layout(graph: DaguaGraph, config: object) -> torch.Tensor:
+        """Capture the forwarded config and return a valid position tensor.
+
+        Parameters
+        ----------
+        graph : DaguaGraph
+            Graph passed through the competitor adapter.
+        config : LayoutConfig
+            Adapter-created layout configuration.
+
+        Returns
+        -------
+        torch.Tensor
+            Zero positions with shape ``[N, 2]``.
+        """
+        captured_configs.append(config)
+        return torch.zeros((graph.num_nodes, 2), dtype=torch.float32)
+
+    monkeypatch.setattr(layout_module, "layout", fake_layout)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    graph = DaguaGraph.from_edge_list([("a", "b")])
+    competitor = DaguaCompetitor()
+
+    production_result = competitor.layout(graph, timeout=30.0, seed=42)
+    deterministic_result = competitor.layout(
+        graph,
+        timeout=30.0,
+        seed=42,
+        deterministic_native=True,
+    )
+
+    assert production_result.error is None
+    assert deterministic_result.error is None
+    production_config, deterministic_config = captured_configs
+    assert hasattr(production_config, "_dagua_native_deadline_s")
+    assert getattr(production_config, "_dagua_native_deterministic_budget_s") == pytest.approx(30.0)
+    assert not hasattr(deterministic_config, "_dagua_native_deadline_s")
+    assert getattr(deterministic_config, "_dagua_native_deterministic_budget_s") == pytest.approx(
+        30.0
+    )
+    assert getattr(deterministic_config, "_dagua_native_deterministic_measurement") is True
+    assert deterministic_config.device == "cpu"
+
+
+@pytest.mark.smoke
 def test_competitor_signatures_cover_extended_families(monkeypatch):
     """Ensure the benchmark cache key logic covers all supported families."""
     source_signature = "abc123def4567890"  # pragma: allowlist secret
@@ -424,17 +479,26 @@ def test_competitor_signatures_cover_extended_families(monkeypatch):
 
     signatures = {name: _competitor_signature(name, system) for name in names}
 
+    from dagua.eval.benchmark import _adapter_source_signature
+
+    src = {
+        probe: _adapter_source_signature(probe)
+        for probe in ("igraph_mds", "sgd2_mds", "neulay", "tsne_graph", "umap_graph", "ogdf_gem")
+    }
+
     assert all(":None" not in signature for signature in signatures.values())
     assert signatures["classic_fr"] == f"classic_fr:{source_signature}"
     assert signatures["classic_fmmm"] == f"classic_fmmm:{source_signature}"
-    assert signatures["igraph_mds"] == "igraph_mds:0.11.8"
-    assert signatures["sgd2_mds"] == "sgd2_mds:1.0.0"
-    assert signatures["neulay"] == "neulay:2.6.1"
-    assert signatures["tsne_graph"] == "tsne_graph:1.6.1:1.15.2"
-    assert signatures["umap_graph"] == "umap_graph:0.5.7:1.15.2"
+    assert signatures["igraph_mds"] == f"igraph_mds:0.11.8:src={src['igraph_mds']}"
+    assert signatures["sgd2_mds"] == f"sgd2_mds:1.0.0:src={src['sgd2_mds']}"
+    # neulay's real implementation is dagua/layout/_archive code, so it also
+    # carries the dagua-tree component (monkeypatched above).
+    assert signatures["neulay"] == f"neulay:2.6.1:src={src['neulay']}:dagua={source_signature}"
+    assert signatures["tsne_graph"] == f"tsne_graph:1.6.1:1.15.2:src={src['tsne_graph']}"
+    assert signatures["umap_graph"] == f"umap_graph:0.5.7:1.15.2:src={src['umap_graph']}"
     assert signatures["ogdf_gem"] in {
-        "ogdf_gem:ogdf_available",
-        "ogdf_gem:ogdf_unavailable",
+        f"ogdf_gem:ogdf_available:src={src['ogdf_gem']}",
+        f"ogdf_gem:ogdf_unavailable:src={src['ogdf_gem']}",
     }
 
 
@@ -649,7 +713,10 @@ def test_standard_suite_reuses_cached_non_dagua_results(tmp_path, monkeypatch):
             .hexdigest()
         },
         "competitor_signatures": {
-            "graphviz_dot": "graphviz_dot:dot 1.0",
+            # Computed (not hardcoded) so the cached fixture always matches the
+            # live signature format, incl. the adapter-source ':src=' component
+            # (dry-well R1-B3 finding 1).
+            "graphviz_dot": _competitor_signature("graphviz_dot", {"graphviz": "dot 1.0"}),
             "dagua": "dagua:cpu:newhash",
         },
     }
@@ -999,7 +1066,10 @@ def test_standard_suite_retry_failed_reruns_failed_cached_results(tmp_path, monk
             .hexdigest()
         },
         "competitor_signatures": {
-            "graphviz_dot": "graphviz_dot:dot 1.0",
+            # Computed (not hardcoded) so the cached fixture always matches the
+            # live signature format, incl. the adapter-source ':src=' component
+            # (dry-well R1-B3 finding 1).
+            "graphviz_dot": _competitor_signature("graphviz_dot", {"graphviz": "dot 1.0"}),
             "dagua": "dagua:cpu:newhash",
         },
     }
@@ -1243,3 +1313,828 @@ def test_dagua_competitor_handles_multilevel_path(monkeypatch):
     assert result.error is None
     assert result.pos is not None
     assert result.pos.shape == (graph.num_nodes, 2)
+
+
+# ---------------------------------------------------------------------------
+# WP07-F05: weight-aware companion signature (additive field)
+# ---------------------------------------------------------------------------
+
+
+def _tiny_graph(weights: bool = False) -> DaguaGraph:
+    graph = DaguaGraph()
+    for index in range(3):
+        graph.add_node(index)
+    if weights:
+        graph.add_edge(0, 1, weight=2.5)
+        graph.add_edge(1, 2, weight=0.5)
+    else:
+        graph.add_edge(0, 1)
+        graph.add_edge(1, 2)
+    return graph
+
+
+def test_graph_weight_signature_none_for_unweighted() -> None:
+    from dagua.eval.benchmark import _graph_weight_signature
+
+    assert _graph_weight_signature(_tiny_graph(weights=False)) is None
+
+
+def test_graph_weight_signature_detects_weight_drift() -> None:
+    from dagua.eval.benchmark import _graph_weight_signature
+
+    weighted = _tiny_graph(weights=True)
+    signature = _graph_weight_signature(weighted)
+    assert signature is not None
+    # Deterministic: same weights -> same signature.
+    assert _graph_weight_signature(_tiny_graph(weights=True)) == signature
+
+    drifted = DaguaGraph()
+    for index in range(3):
+        drifted.add_node(index)
+    drifted.add_edge(0, 1, weight=2.5)
+    drifted.add_edge(1, 2, weight=7.0)
+    assert _graph_weight_signature(drifted) != signature
+
+
+def test_structural_graph_signature_stays_weight_blind() -> None:
+    """Pins the LEGACY field's byte-compatibility (WP07-F05 constraint).
+
+    The structural signature must remain weight-blind so every stored
+    ``graph_signatures`` value (weighted rows included) survives unchanged;
+    weight drift detection lives ONLY in the additive companion field.
+    """
+    from dagua.eval.benchmark import _graph_signature
+
+    assert _graph_signature(_tiny_graph(weights=True)) == _graph_signature(
+        _tiny_graph(weights=False)
+    )
+
+
+def test_graph_weight_signature_map_only_lists_weighted_graphs() -> None:
+    from dagua.eval.benchmark import _graph_weight_signature_map
+
+    graphs = [
+        BenchmarkGraph(
+            test_graph=TestGraph(name="unweighted", graph=_tiny_graph(weights=False)),
+            structural_category="chain",
+            suite="standard",
+        ),
+        BenchmarkGraph(
+            test_graph=TestGraph(name="weighted", graph=_tiny_graph(weights=True)),
+            structural_category="chain",
+            suite="standard",
+        ),
+    ]
+    weight_map = _graph_weight_signature_map(graphs)
+    assert set(weight_map) == {"weighted"}
+
+
+def test_reuse_cached_result_weight_tripwire_is_legacy_tolerant(tmp_path: Path) -> None:
+    from dagua.eval.benchmark import _reuse_cached_result
+
+    cached_payload = {
+        "run_id": "old-run",
+        "graphs": {"g": {"competitors": {"comp": {"status": "OK", "positions_path": None}}}},
+    }
+    base_metadata = {
+        "graph_signatures": {"g": "sig"},
+        "competitor_signatures": {"comp": "csig"},
+    }
+    common = dict(
+        graph_name="g",
+        competitor_name="comp",
+        run_dir=tmp_path / "new",
+        cached_payload=cached_payload,
+        latest_run_dir=tmp_path / "old",
+        graph_signatures={"g": "sig"},
+        competitor_signatures={"comp": "csig"},
+    )
+
+    # Legacy metadata (field absent): reuse decision unchanged even though the
+    # current run computes weight signatures.
+    reused = _reuse_cached_result(
+        cached_metadata=dict(base_metadata),
+        graph_weight_signatures={"g": "wsig-new"},
+        **common,
+    )
+    assert reused is not None and reused["status"] == "OK"
+
+    # New metadata with matching weight signature: reuse allowed.
+    matching = dict(base_metadata, graph_weight_signatures={"g": "wsig"})
+    reused = _reuse_cached_result(
+        cached_metadata=matching,
+        graph_weight_signatures={"g": "wsig"},
+        **common,
+    )
+    assert reused is not None and reused["status"] == "OK"
+
+    # New metadata with drifted weight signature: reuse refused.
+    refused = _reuse_cached_result(
+        cached_metadata=matching,
+        graph_weight_signatures={"g": "wsig-drifted"},
+        **common,
+    )
+    assert refused is None
+
+
+# ---------------------------------------------------------------------------
+# WP07-F06: max_nodes == 0 must mean "no limit", not "always skip"
+# ---------------------------------------------------------------------------
+
+
+def test_run_one_competitor_treats_max_nodes_zero_as_unlimited(tmp_path: Path) -> None:
+    from dagua.eval.benchmark import _run_one_competitor
+    from dagua.eval.competitors.base import CompetitorBase
+
+    class _DefaultLimitCompetitor(CompetitorBase):
+        name = "default_limit"
+        # Inherits max_nodes = 0 (the documented "no limit" default).
+
+        def layout(self, graph, timeout=300.0, seed=None):
+            raise RuntimeError("sentinel: gate passed, layout invoked")
+
+    bg = BenchmarkGraph(
+        test_graph=TestGraph(name="tiny", graph=_tiny_graph()),
+        structural_category="chain",
+        suite="standard",
+    )
+    result = _run_one_competitor(bg, _DefaultLimitCompetitor(), timeout=5.0, run_dir=tmp_path)
+
+    # Old bug: status == "SKIPPED" / "exceeds known limit" for EVERY graph.
+    assert result["status"] == "FAILED"
+    assert "sentinel: gate passed" in (result.get("error") or "")
+
+
+# ---------------------------------------------------------------------------
+# WP07-F07: record-IO robustness (torn JSON, latest repointing)
+# ---------------------------------------------------------------------------
+
+
+def test_load_latest_payload_survives_corrupted_results(tmp_path: Path) -> None:
+    from dagua.eval.benchmark import _load_latest_payload_and_metadata
+
+    suite_root = tmp_path / "benchmark_db" / "standard"
+    run_dir = suite_root / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "results.json").write_text('{"graphs": {  TORN', encoding="utf-8")
+    (suite_root / "latest").symlink_to("run-1")
+
+    payload, metadata, latest_dir = _load_latest_payload_and_metadata(str(tmp_path), "standard")
+    assert payload is None and metadata is None and latest_dir is None
+
+
+def test_load_resumable_payload_skips_torn_partial(tmp_path: Path) -> None:
+    from dagua.eval.benchmark import (
+        _load_resumable_payload_and_metadata,
+        _partial_results_path,
+    )
+
+    suite_root = tmp_path / "benchmark_db" / "standard"
+    older = suite_root / "2024-01-01T00:00:00+00:00"
+    newer = suite_root / "2024-01-02T00:00:00+00:00"
+    for run_dir in (older, newer):
+        run_dir.mkdir(parents=True)
+    _partial_results_path(newer).write_text('{"graphs":  TORN', encoding="utf-8")
+    _partial_results_path(older).write_text(
+        json.dumps({"run_id": "ok-run", "graphs": {}}), encoding="utf-8"
+    )
+
+    payload, _metadata, run_dir, run_id = _load_resumable_payload_and_metadata(
+        str(tmp_path), "standard"
+    )
+    assert payload is not None and payload["run_id"] == "ok-run"
+    assert run_dir == older and run_id == older.name
+
+
+def test_update_latest_symlink_replaces_existing_target(tmp_path: Path) -> None:
+    from dagua.eval.benchmark import _update_latest_symlink
+
+    (tmp_path / "run-1").mkdir()
+    (tmp_path / "run-2").mkdir()
+    _update_latest_symlink(tmp_path, "run-1")
+    assert (tmp_path / "latest").resolve() == (tmp_path / "run-1").resolve()
+    _update_latest_symlink(tmp_path, "run-2")
+    assert (tmp_path / "latest").resolve() == (tmp_path / "run-2").resolve()
+    # No temp debris left behind.
+    assert not list(tmp_path.glob(".latest.*.tmp"))
+
+
+def test_latest_repoints_only_after_successful_final_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crashed run must leave `latest` on the previous complete run."""
+    import dagua.eval.benchmark as benchmark_module
+    from dagua.eval.benchmark import run_suite
+
+    monkeypatch.setattr(benchmark_module, "_suite_graphs", lambda suite: [])
+    monkeypatch.setattr(benchmark_module, "_competitor_map", lambda names=None: [])
+    monkeypatch.setattr(benchmark_module, "_system_metadata", lambda: {"host": "test"})
+
+    suite_root = tmp_path / "benchmark_db" / "standard"
+
+    def _boom(**kwargs):
+        raise RuntimeError("simulated crash before final save")
+
+    monkeypatch.setattr(benchmark_module, "_build_results_payload", _boom)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        run_suite(
+            suite="standard",
+            output_dir=str(tmp_path),
+            generate_report_artifacts=False,
+            reuse_cached=False,
+            resume_incomplete=False,
+            checkpoint_each_graph=False,
+        )
+    # Crash before the final save: latest must NOT point anywhere yet.
+    assert not (suite_root / "latest").is_symlink()
+
+    monkeypatch.undo()
+    monkeypatch.setattr(benchmark_module, "_suite_graphs", lambda suite: [])
+    monkeypatch.setattr(benchmark_module, "_competitor_map", lambda names=None: [])
+    monkeypatch.setattr(benchmark_module, "_system_metadata", lambda: {"host": "test"})
+    run_suite(
+        suite="standard",
+        output_dir=str(tmp_path),
+        generate_report_artifacts=False,
+        reuse_cached=False,
+        resume_incomplete=False,
+        checkpoint_each_graph=False,
+    )
+    latest = suite_root / "latest"
+    assert latest.is_symlink()
+    saved = json.loads((latest / "results.json").read_text(encoding="utf-8"))
+    assert saved["suite"] == "standard"
+    metadata = json.loads((latest / "metadata.json").read_text(encoding="utf-8"))
+    # Additive weight-signature field is always present (empty when no
+    # weighted graphs are in the suite).
+    assert "graph_weight_signatures" in metadata
+
+
+# ---------------------------------------------------------------------------
+# Dry-well R1-B3 finding 1: adapter-source-aware competitor cache signatures
+# ---------------------------------------------------------------------------
+
+
+def test_reference_adapter_signatures_gain_real_source_component() -> None:
+    """Formerly '<name>:None'-keyed engines must carry a real src component.
+
+    Sol's probe produced 'drgraph_reference:None', 'largevis_reference:None',
+    and 'sklearn_smacof_nonmetric:None' -- adapter parser/device fixes did not
+    invalidate those cached rows.
+    """
+    from dagua.eval.benchmark import _competitor_signature
+
+    for name in ("drgraph_reference", "largevis_reference", "sklearn_smacof_nonmetric"):
+        signature = _competitor_signature(name, {})
+        assert signature != f"{name}:None"
+        assert ":src=" in signature
+        # Deterministic within an unchanged checkout.
+        assert _competitor_signature(name, {}) == signature
+
+
+def test_adapter_source_edit_flips_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Editing an adapter's implementing module must change its cache key."""
+    import importlib.util
+    import sys
+
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    module_path = tmp_path / "fake_adapter_module.py"
+    module_path.write_text(
+        "from dagua.eval.competitors.base import CompetitorBase\n"
+        "\n"
+        "\n"
+        "class FakeAdapter(CompetitorBase):\n"
+        '    name = "fake_signature_probe"\n'
+        "\n"
+        "    def layout(self, graph, timeout=300.0, seed=None):\n"
+        "        raise NotImplementedError\n",
+        encoding="utf-8",
+    )
+    spec = importlib.util.spec_from_file_location("fake_adapter_module", module_path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "fake_adapter_module", module)
+    spec.loader.exec_module(module)
+    monkeypatch.setitem(_COMPETITORS, "fake_signature_probe", module.FakeAdapter())
+
+    before = _adapter_source_signature("fake_signature_probe")
+
+    with open(module_path, "a", encoding="utf-8") as handle:
+        handle.write("\n# simulated adapter fix\n")
+    after = _adapter_source_signature("fake_signature_probe")
+
+    assert before != after
+
+
+def test_unchanged_adapter_signature_is_stable_and_shared_per_module() -> None:
+    """Same checkout -> same signature; same module -> same src component."""
+    from dagua.eval.benchmark import _adapter_source_signature
+
+    first = _adapter_source_signature("igraph_mds")
+    second = _adapter_source_signature("igraph_mds")
+    assert first == second
+    # drgraph and largevis share drgraph_largevis_competitor.py.
+    assert _adapter_source_signature("drgraph_reference") == _adapter_source_signature(
+        "largevis_reference"
+    )
+    # Different implementing modules -> different components.
+    assert _adapter_source_signature("igraph_mds") != _adapter_source_signature("drgraph_reference")
+
+
+def test_dagua_owned_signatures_carry_no_adapter_src_component(monkeypatch) -> None:
+    """dagua/classic_*/dot/fdp keys are unchanged by construction."""
+    from dagua.eval.benchmark import _competitor_signature
+
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._dagua_source_signature",
+        lambda: "abc123def4567890",  # pragma: allowlist secret
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    assert _competitor_signature("dagua", {}) == "dagua:cpu:abc123def4567890"
+    assert _competitor_signature("classic_fr", {}) == "classic_fr:abc123def4567890"
+    assert _competitor_signature("dot", {}) == "dot:abc123def4567890"
+    assert _competitor_signature("fdp", {}) == "fdp:abc123def4567890"
+
+
+def test_unregistered_adapter_name_still_gets_deterministic_source_component() -> None:
+    """Names missing from the registry fall back to the shared base module."""
+    from dagua.eval.benchmark import _adapter_source_signature
+
+    first = _adapter_source_signature("definitely_not_registered_engine")
+    second = _adapter_source_signature("definitely_not_registered_engine")
+    assert first == second
+    assert len(first) == 16
+
+
+# ---------------------------------------------------------------------------
+# Dry-well R2-B3: dynamic reimpls and delegated adapters hash their REAL
+# implementation closure, not stdlib abc.py
+# ---------------------------------------------------------------------------
+
+
+def test_dynamic_reimpl_signatures_differ_and_hash_pipeline_module() -> None:
+    """Two reimpl engines must carry DIFFERENT source components.
+
+    Sol's R2 probe: all 45 type(...)-generated *_reimpl classes reported
+    __module__ == 'abc', hashed stdlib abc.py + base.py, and shared ONE
+    digest (05b2712859fe9821), leaving pipeline_reimpl_competitor.py and the
+    executed pipeline module unhashed.
+    """
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    sparse = _adapter_source_signature("sparse_stress_reimpl")
+    largevis = _adapter_source_signature("largevis_reimpl")
+    assert sparse != largevis
+
+    closure = {path.name for path in _COMPETITORS["sparse_stress_reimpl"].source_files()}
+    # Shared plumbing + shared base + the engine's own pipeline module; the
+    # stdlib abc.py must NOT be part of the closure.
+    assert "pipeline_reimpl_competitor.py" in closure
+    assert "base.py" in closure
+    assert "sparse_stress.py" in closure
+    assert "abc.py" not in closure
+
+
+def test_editing_pipeline_module_flips_only_its_reimpl_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pipeline-module edit invalidates ITS reimpl's rows and nobody else's."""
+    import importlib.util
+    import sys
+
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.eval.competitors.pipeline_reimpl_competitor import (
+        PipelineReimplementationCompetitor,
+        PipelineReimplementationSpec,
+    )
+    from dagua.layout.ops.pipelines import PIPELINE_REGISTRY
+
+    module_path = tmp_path / "wp24a_fake_pipeline_module.py"
+    module_path.write_text(
+        "def fake_layout(edge_index, num_nodes, **kwargs):\n    raise NotImplementedError\n",
+        encoding="utf-8",
+    )
+    spec_obj = importlib.util.spec_from_file_location("wp24a_fake_pipeline_module", module_path)
+    module = importlib.util.module_from_spec(spec_obj)
+    monkeypatch.setitem(sys.modules, "wp24a_fake_pipeline_module", module)
+    spec_obj.loader.exec_module(module)
+    monkeypatch.setitem(
+        PIPELINE_REGISTRY, "wp24a_fake_pipeline", ("wp24a_fake_pipeline_module", "fake_layout")
+    )
+
+    # Mirror the production factory: a dynamically generated class.
+    fake_cls = type(
+        "Wp24aFakeReimplCompetitor",
+        (PipelineReimplementationCompetitor,),
+        {
+            "spec": PipelineReimplementationSpec(
+                name="wp24a_fake_reimpl",
+                pipeline_name="wp24a_fake_pipeline",
+                max_nodes=10,
+                default_params={},
+            ),
+            "supports_clusters": False,
+        },
+    )
+    monkeypatch.setitem(_COMPETITORS, "wp24a_fake_reimpl", fake_cls())
+
+    fake_before = _adapter_source_signature("wp24a_fake_reimpl")
+    bystander_before = _adapter_source_signature("sparse_stress_reimpl")
+
+    with open(module_path, "a", encoding="utf-8") as handle:
+        handle.write("\n# simulated pipeline fix\n")
+
+    assert _adapter_source_signature("wp24a_fake_reimpl") != fake_before
+    assert _adapter_source_signature("sparse_stress_reimpl") == bystander_before
+
+
+def test_neulay_signature_tracks_its_wrapper_delegate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """neulay executes neulay_wrapper.py; a wrapper change must flip its key."""
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors import neulay_wrapper
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    wrapper_path = Path(neulay_wrapper.__file__).resolve()
+    assert wrapper_path in set(_COMPETITORS["neulay"].source_files())
+
+    before = _adapter_source_signature("neulay")
+
+    # Simulate a wrapper edit by pointing the delegate module at a copy with
+    # different bytes (editing the real repo file from a test is off-limits).
+    edited = tmp_path / "neulay_wrapper.py"
+    edited.write_text(
+        wrapper_path.read_text(encoding="utf-8") + "\n# simulated wrapper fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(neulay_wrapper, "__file__", str(edited))
+
+    assert _adapter_source_signature("neulay") != before
+
+
+def test_delegated_adapters_declare_their_execution_delegates() -> None:
+    """Pin the declared delegate closure of the swept delegated adapters.
+
+    R3-B3-Fable F4: coregd_reference and pacmap moved OFF per-file
+    declarations to tree-keying (their delegates run dagua pipelines with
+    transitive closures); word2vecgd keeps its declaration (plus the tree
+    key), and sklearn_smacof keeps graph_utils.py, a self-contained leaf
+    module whose one-hop declaration is complete.
+    """
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    expected = {
+        "word2vecgd": "word2vecgd.py",
+        "sklearn_smacof_nonmetric": "graph_utils.py",
+    }
+    for name, delegate_file in expected.items():
+        closure = {path.name for path in _COMPETITORS[name].source_files()}
+        assert delegate_file in closure, f"{name} missing delegate {delegate_file}"
+
+
+# ---------------------------------------------------------------------------
+# Dry-well R2-B3-Fable F2: dagua-owned implementations key on the whole
+# dagua tree; external backends declare their dagua-side prep artifacts
+# ---------------------------------------------------------------------------
+
+
+def _dagua_tree_hash_domain_contains(path: Path) -> bool:
+    """Mirror _dagua_source_signature's file filter: *.py under dagua/, eval excluded."""
+    import dagua
+
+    dagua_root = Path(dagua.__file__).resolve().parent
+    resolved = path.resolve()
+    if resolved.suffix != ".py" or not resolved.is_relative_to(dagua_root):
+        return False
+    return "eval" not in resolved.relative_to(dagua_root).parts
+
+
+def test_dagua_owned_engines_carry_tree_component_externals_do_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dagua/layout edit flips reimpl/dagua-owned keys, not external ones."""
+    from dagua.eval.benchmark import _competitor_signature
+
+    # R3-B3-Fable F4: the neural pair, coregd_reference, and pacmap moved to
+    # tree-keyed (their dagua-side prep RUNS dagua pipelines).
+    dagua_owned = (
+        "sparse_stress_reimpl",
+        "smacof_nonmetric_reimpl",
+        "neulay",
+        "word2vecgd",
+        "deepgd_reference",
+        "smartgd_reference",
+        "coregd_reference",
+        "pacmap",
+    )
+    external = ("graphviz_dot", "webcola", "gephi_yifanhu", "nx_bipartite", "ogdf_gem")
+
+    before = {name: _competitor_signature(name, {}) for name in dagua_owned + external}
+    for name in dagua_owned:
+        assert ":dagua=" in before[name], name
+    for name in external:
+        assert ":dagua=" not in before[name], name
+
+    # Simulate a dagua/layout source edit: the tree hash changes.
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._dagua_source_signature",
+        lambda: "feedfacefeedface",  # pragma: allowlist secret
+    )
+    for name in dagua_owned:
+        assert _competitor_signature(name, {}) != before[name], name
+    for name in external:
+        assert _competitor_signature(name, {}) == before[name], name
+
+
+def test_smacof_twins_share_equal_graph_utils_treatment() -> None:
+    """Both smacof twins must invalidate when graph_utils.py changes.
+
+    R2-B3-Fable F2a: the sklearn twin declared graph_utils.py while the
+    bit-identical reimpl twin (same shortest_path_distances kernel) missed it
+    one import level down.
+    """
+    # NOTE: `import dagua.layout.ops...` (attribute-traversal form) breaks
+    # because dagua.layout the ATTRIBUTE is the layout() function.
+    from dagua.eval.benchmark import _competitor_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.layout.ops import graph_utils
+
+    graph_utils_path = Path(graph_utils.__file__).resolve()
+    # sklearn twin: explicit delegate declaration puts the file in its closure.
+    assert graph_utils_path in set(_COMPETITORS["sklearn_smacof_nonmetric"].source_files())
+    # reimpl twin: the file is inside the dagua-tree hash domain and the
+    # signature carries the tree component, so the same edit flips it too.
+    assert _dagua_tree_hash_domain_contains(graph_utils_path)
+    assert ":dagua=" in _competitor_signature("smacof_nonmetric_reimpl", {})
+
+
+def test_neulay_archive_implementation_is_inside_tree_component() -> None:
+    """neulay's REAL implementation (_archive/classic/neulay.py) is hashed."""
+    import dagua
+    from dagua.eval.benchmark import _competitor_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    archive_path = (
+        Path(dagua.__file__).resolve().parent / "layout" / "_archive" / "classic" / "neulay.py"
+    )
+    assert archive_path.is_file()
+    assert _dagua_tree_hash_domain_contains(archive_path)
+    assert ":dagua=" in _competitor_signature("neulay", {})
+    # The wrapper (under dagua/eval/, EXCLUDED from the tree hash) must stay
+    # separately declared in the per-file closure.
+    closure_names = {path.name for path in _COMPETITORS["neulay"].source_files()}
+    assert "neulay_wrapper.py" in closure_names
+
+
+def test_webcola_signature_tracks_initial_positions_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """webcola's solve is seeded by ops/webcola.py; an edit must flip its key."""
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.layout.ops import webcola as webcola_module
+
+    module_path = Path(webcola_module.__file__).resolve()
+    assert module_path in set(_COMPETITORS["webcola"].source_files())
+
+    before = _adapter_source_signature("webcola")
+    edited = tmp_path / "webcola.py"
+    edited.write_text(
+        module_path.read_text(encoding="utf-8") + "\n# simulated prep fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(webcola_module, "__file__", str(edited))
+    assert _adapter_source_signature("webcola") != before
+
+
+def test_neural_reference_signatures_are_tree_keyed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """deepgd/smartgd prep RUNS the native-stress pipeline: tree-keyed.
+
+    R3-B3-Fable F4: prepare_smartgd_data invokes the full
+    layout_native_stress_pipeline (smartgd.py:1530), so a per-file smartgd.py
+    declaration was one hop short; the pair now carries the dagua-tree
+    component, which covers smartgd.py AND its converge/stress/graph_utils
+    kernel closure.
+    """
+    from dagua.eval.benchmark import _competitor_signature
+    from dagua.layout.ops.pipelines import smartgd as smartgd_module
+
+    assert _dagua_tree_hash_domain_contains(Path(smartgd_module.__file__))
+    before = {n: _competitor_signature(n, {}) for n in ("deepgd_reference", "smartgd_reference")}
+    for name, signature in before.items():
+        assert ":dagua=" in signature, name
+
+    monkeypatch.setattr(
+        "dagua.eval.benchmark._dagua_source_signature",
+        lambda: "feedfacefeedface",  # pragma: allowlist secret
+    )
+    for name in ("deepgd_reference", "smartgd_reference"):
+        assert _competitor_signature(name, {}) != before[name]
+
+
+def test_gephi_signature_tracks_java_driver_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """gephi's runtime-compiled java driver is declared by raw path."""
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.eval.competitors.gephi_competitor import GephiYifanHu
+
+    closure_names = {path.name for path in _COMPETITORS["gephi_yifanhu"].source_files()}
+    assert "gephi_layout.java" in closure_names
+
+    before = _adapter_source_signature("gephi_yifanhu")
+    edited = tmp_path / "gephi_layout.java"
+    edited.write_text(
+        GephiYifanHu._JAVA_SRC.read_text(encoding="utf-8") + "\n// simulated driver fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(GephiYifanHu, "source_delegate_files", (str(edited),))
+    assert _adapter_source_signature("gephi_yifanhu") != before
+
+
+# ---------------------------------------------------------------------------
+# Dry-well R3-B3-Fable F4: remaining delegate residuals closed
+# ---------------------------------------------------------------------------
+
+
+def test_tree_keyed_engine_set_is_pinned() -> None:
+    """Pin exactly which engines carry the dagua-tree component (51 total).
+
+    45 dynamic *_reimpl engines + the six adapters whose dagua-side execution
+    runs dagua pipelines (neulay via _archive, word2vecgd via its pipeline,
+    deepgd/smartgd via native-stress prep, coregd_reference via
+    native_stress_ml prep, pacmap via the tsne_graph kernel). Growing this
+    set is fine; SHRINKING it (an engine silently losing tree protection)
+    must be a deliberate decision.
+    """
+    from dagua.eval.benchmark import _competitor_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    tree_keyed = {name for name in _COMPETITORS if ":dagua=" in _competitor_signature(name, {})}
+    reimpls = {name for name in _COMPETITORS if name.endswith("_reimpl")}
+    assert reimpls <= tree_keyed
+    assert tree_keyed - reimpls == {
+        "neulay",
+        "word2vecgd",
+        "deepgd_reference",
+        "smartgd_reference",
+        "coregd_reference",
+        "pacmap",
+    }
+    assert len(tree_keyed) == 51
+
+
+def test_nx_partition_engines_track_networkx_simple_delegate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nx_bipartite/nx_multipartite/nx_bfs coordinates are parameterized by
+    dagua-side nx_bipartite_node_set/nx_bfs_layers; an edit must flip their
+    keys -- and only theirs (nx_spring stays untouched)."""
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.layout.ops import networkx_simple as nx_simple_module
+
+    module_path = Path(nx_simple_module.__file__).resolve()
+    trio = ("nx_bipartite", "nx_multipartite", "nx_bfs")
+    for name in trio:
+        assert module_path in set(_COMPETITORS[name].source_files()), name
+    assert module_path not in set(_COMPETITORS["nx_spring"].source_files())
+
+    before = {n: _adapter_source_signature(n) for n in trio + ("nx_spring",)}
+    edited = tmp_path / "networkx_simple.py"
+    edited.write_text(
+        module_path.read_text(encoding="utf-8") + "\n# simulated partition fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(nx_simple_module, "__file__", str(edited))
+    for name in trio:
+        assert _adapter_source_signature(name) != before[name], name
+    assert _adapter_source_signature("nx_spring") == before["nx_spring"]
+
+
+def test_ogdf_engines_track_planar_gate_delegate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ogdf rows are ok-vs-error gated by dagua-side check_planarity."""
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.layout.ops.pipelines import planar as planar_module
+
+    module_path = Path(planar_module.__file__).resolve()
+    for name in ("ogdf_gem", "ogdf_fpp", "ogdf_schnyder"):
+        if name in _COMPETITORS:
+            assert module_path in set(_COMPETITORS[name].source_files()), name
+
+    before = _adapter_source_signature("ogdf_gem")
+    edited = tmp_path / "planar.py"
+    edited.write_text(
+        module_path.read_text(encoding="utf-8") + "\n# simulated gate fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(planar_module, "__file__", str(edited))
+    assert _adapter_source_signature("ogdf_gem") != before
+
+
+def test_size_aware_externals_track_size_policy_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """graphviz/elk/dagre/d3dag node-box behavior is gated by size_policy.py.
+
+    size_policy.py lives under dagua/eval/ (outside the tree hash), so the
+    delegate declaration is the only signature coverage it can get. The
+    measurement stack behind the boxes (graph.py/utils.py) is a documented
+    residual per the F4 disposition: G-5 uses no caches, and G-3's A10
+    sample-check covers pool reuse.
+    """
+    import dagua.eval.size_policy as size_policy_module
+    from dagua.eval.benchmark import _adapter_source_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+
+    module_path = Path(size_policy_module.__file__).resolve()
+    for name in ("graphviz_dot", "graphviz_sfdp", "elk_layered", "elk_force", "dagre", "d3dag"):
+        assert module_path in set(_COMPETITORS[name].source_files()), name
+
+    before = _adapter_source_signature("dagre")
+    edited = tmp_path / "size_policy.py"
+    edited.write_text(
+        module_path.read_text(encoding="utf-8") + "\n# simulated policy fix\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(size_policy_module, "__file__", str(edited))
+    assert _adapter_source_signature("dagre") != before
+
+
+# ---------------------------------------------------------------------------
+# Dry-well R4-B3-Sol HIGH: family-based backend-version keys
+# ---------------------------------------------------------------------------
+
+
+def test_backend_family_version_flip_covers_all_sol_aliases() -> None:
+    """All 16 aliases Sol proved byte-stable must flip with their family.
+
+    The old per-name version_keys table covered only selected names per
+    backend family; siblings fell through to key=None and their signatures
+    did not move on a backend upgrade (Sol's probe: graphviz_dot's marker
+    moved, graphviz_circo's stayed byte-stable). Version keys now resolve
+    from backend_version_key on the family BASE class.
+    """
+    from dagua.eval.benchmark import _competitor_signature
+
+    aliases = (
+        "graphviz_circo",
+        "graphviz_osage",
+        "graphviz_twopi",
+        "elk_force",
+        "elk_stress",
+        "elk_mrtree",
+        "elk_radial",
+        "nx_circular",
+        "nx_shell",
+        "nx_spiral",
+        "nx_bipartite",
+        "nx_multipartite",
+        "nx_bfs",
+        "nx_arf",
+        "nx_planar",
+        "igraph_rt_circular",
+    )
+    controls = ("graphviz_dot", "elk_layered", "nx_spring", "igraph_rt")
+    old = {"graphviz": "OLD", "elk": "OLD", "networkx": "OLD", "igraph": "OLD"}
+    new = {"graphviz": "NEW", "elk": "NEW", "networkx": "NEW", "igraph": "NEW"}
+
+    for name in aliases + controls:
+        before = _competitor_signature(name, old)
+        after = _competitor_signature(name, new)
+        assert before != after, f"{name} byte-stable under backend version change"
+        assert ":None:" not in before, f"{name} missing its backend version component"
+
+
+def test_new_family_member_inherits_backend_version_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A brand-new family member needs NO table edit to be version-keyed."""
+    from dagua.eval.benchmark import _competitor_signature
+    from dagua.eval.competitors.base import _COMPETITORS
+    from dagua.eval.competitors.graphviz_competitor import _GraphvizBase
+
+    class SyntheticGraphvizPatchwork(_GraphvizBase):
+        name = "graphviz_patchwork_synthetic"
+        engine = "patchwork"
+        max_nodes = 10
+
+    monkeypatch.setitem(_COMPETITORS, "graphviz_patchwork_synthetic", SyntheticGraphvizPatchwork())
+
+    old = _competitor_signature("graphviz_patchwork_synthetic", {"graphviz": "dot 12.0"})
+    new = _competitor_signature("graphviz_patchwork_synthetic", {"graphviz": "dot 13.0"})
+    assert "dot 12.0" in old
+    assert old != new

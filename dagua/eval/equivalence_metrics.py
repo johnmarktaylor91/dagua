@@ -207,6 +207,14 @@ def procrustes_rmsd(positions_a: np.ndarray, positions_b: np.ndarray) -> float:
     float
         Scale-, translation-, rotation-, and reflection-invariant RMSD using
         the same unit-cloud normalization as ``scripts/fast_fidelity_report.py``.
+
+    Notes
+    -----
+    Despite the name, this is the Frobenius norm of the aligned unit-cloud
+    residual, with NO ``1/sqrt(N)`` factor -- a project-convention "RMSD",
+    not a textbook per-node RMSD. Values are directly comparable to the
+    certified fidelity tiers (~1e-8) that use the same convention; do not
+    change the math (fidelity-tier semantics are frozen by usage).
     """
     a = as_float64_positions(positions_a)
     b = as_float64_positions(positions_b)

@@ -266,8 +266,18 @@ def _build_dagre_input(graph: DaguaGraph) -> Dict[str, object]:
 @register
 class DagreCompetitor(CompetitorBase):
     name = "dagre"
+    backend_version_key = "dagre"
     max_nodes = 1_500  # JS stack overflow at 2000 on dense graphs
     supports_clusters = True
+    # Size-aware external: node boxes gated by dagua/eval/size_policy.py
+    # (dry-well R3-B3-Fable F4 disposition).
+    source_delegate_modules = ("dagua.eval.size_policy",)
+    # Layouts are a FUNCTION of dagua-computed node boxes: the GLaDOS
+    # runner folds the node-box producer stack (graph.py/utils.py/
+    # styles.py) into these engines' run-revision markers so a mid-run
+    # sizing hotfix cannot resume their OLD-box layouts while native
+    # regenerates under new boxes (dry-well R4-B3 Fable F1).
+    consumes_node_boxes = True
 
     def layout(
         self,

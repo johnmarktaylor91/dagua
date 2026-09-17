@@ -44,6 +44,10 @@ References: igraph-style star angles; documented degree-ring concentric; documen
 | osage | cycle_4 | 0.000e+00 | 0.000e+00 | bit-exact |  |
 | osage | random_dag_50 | 2.404e-16 | 0.000e+00 | bit-exact |  |
 | osage | k5_non_planar | 1.388e-16 | 0.000e+00 | bit-exact |  |
+| osage | cluster_siblings | 0.000e+00 | 0.000e+00 | bit-exact |  |
+| osage | cluster_nested | 1.804e-16 | 0.000e+00 | bit-exact |  |
+| osage | cluster_labeled | 1.831e-16 | 0.000e+00 | bit-exact |  |
+| osage | cluster_mixed | 2.362e-16 | 0.000e+00 | bit-exact |  |
 | arc | single_node | 0.000e+00 | 0.000e+00 | bit-exact |  |
 | arc | small_chain | 0.000e+00 | 0.000e+00 | bit-exact |  |
 | arc | binary_tree | 0.000e+00 | 0.000e+00 | bit-exact |  |
@@ -60,5 +64,5 @@ References: igraph-style star angles; documented degree-ring concentric; documen
 - `star`: 10 bit-exact, 0 positional, 0 N/A; max d_R=3.179e-16.
 - `concentric`: 10 bit-exact, 0 positional, 0 N/A; max d_R=1.170e-16.
 - `circlepack`: 10 bit-exact, 0 positional, 0 N/A; max d_R=1.063e-16.
-- `osage`: 10 bit-exact, 0 positional, 0 N/A; max d_R=2.404e-16.
+- `osage`: 14 bit-exact, 0 positional, 0 N/A; max d_R=2.404e-16.
 - `arc`: 10 bit-exact, 0 positional, 0 N/A; max d_R=0.000e+00.

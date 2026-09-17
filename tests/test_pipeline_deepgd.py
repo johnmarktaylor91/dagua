@@ -6,6 +6,7 @@ import importlib
 import inspect
 from pathlib import Path
 
+import pytest
 import torch
 
 import dagua
@@ -109,7 +110,9 @@ def test_deepgd_pretrained_checkpoint_loads_strictly_when_available() -> None:
     try:
         state_dict = torch.load(checkpoint, map_location=torch.device("cpu"))
     except FileNotFoundError:
-        return
+        # Skip (not silent PASS): a missing checkpoint must report lost
+        # coverage, not a green result (WP-11B F10).
+        pytest.skip(f"reference checkpoint not present at {checkpoint}")
 
     model = build_deepgd_model(DeepGDConfig(use_reference_checkpoint=False))
 
@@ -124,3 +127,23 @@ def test_deepgd_pipeline_has_no_runtime_reference_import() -> None:
 
     assert "from deepgd.model" not in source
     assert "import deepgd" not in source
+
+
+def test_deepgd_single_node_returns_finite_position() -> None:
+    """A one-node graph should lay out instead of indexing empty pair tensors.
+
+    Returns
+    -------
+    None
+        Regression pin for the shared ``prepare_smartgd_data``
+        empty-permutation guard (single-node graphs have no ordered pairs).
+    """
+    out = layout_deepgd_pipeline(
+        torch.empty((2, 0), dtype=torch.long),
+        1,
+        config=_small_config(seed=5),
+        seed=5,
+    )
+
+    assert out.shape == (1, 2)
+    assert torch.isfinite(out).all()

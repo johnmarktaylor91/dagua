@@ -61,6 +61,55 @@ def _deadline_gate_config() -> LayoutConfig:
     return config
 
 
+def test_dagua_native_restores_finite_checkpoint_after_nan_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A native stage returning NaN degrades to a finite checkpoint."""
+    import importlib
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+
+    finite_checkpoint = torch.tensor(
+        [[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    node_sizes = torch.full((3, 2), 2.0, dtype=torch.float32)
+    config = LayoutConfig(
+        algorithm="dagua_native",
+        seed=42,
+        device="cpu",
+        decompose_components=False,
+        route_flat_to_stress=False,
+        edge_equalize_polish=False,
+    )
+    config._dagua_native_terminal_w5_owner = True
+
+    def fake_run_native_problem(
+        problem: Any,
+        state: Any,
+        ctx: Any,
+        prepared_config: LayoutConfig,
+    ) -> torch.Tensor:
+        """Return a non-finite stage result after a finite warm start."""
+        del problem, state, ctx, prepared_config
+        return torch.full_like(finite_checkpoint, float("nan"))
+
+    monkeypatch.setattr(native, "_run_native_problem", fake_run_native_problem)
+
+    actual = layout_dagua_native_pipeline(
+        edge_index=edge_index,
+        num_nodes=3,
+        node_sizes=node_sizes,
+        config=config,
+        init_pos=finite_checkpoint,
+        seed=42,
+    )
+
+    assert bool(torch.isfinite(actual).all().item())
+    assert torch.equal(actual, finite_checkpoint)
+
+
 def _install_proxy_honest_w5_fixture(
     monkeypatch: pytest.MonkeyPatch,
     base_pos: torch.Tensor,
@@ -375,6 +424,149 @@ def test_gate_row_deadline_runs_real_pipeline_not_prelayout_fallback(
     assert not torch.equal(actual, fallback)
 
 
+def test_terminal_smacof_stress_polish_accepts_v3_improvement() -> None:
+    """Terminal SMACOF keeps a strict restricted-V3 improvement."""
+    from dagua.layout.ops.pipelines.native_budget import install_budget_ledger
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5ScorePair,
+        run_w5_terminal_smacof_stress_polish,
+    )
+
+    config = LayoutConfig()
+    install_budget_ledger(config, 120.0, return_reserve_dwu=0.0)
+    incumbent = torch.tensor(
+        [[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 0.1, dtype=torch.float32)
+    all_pairs = [
+        [0.0, 1.0, 2.0, 3.0],
+        [1.0, 0.0, 1.0, 2.0],
+        [2.0, 1.0, 0.0, 1.0],
+        [3.0, 2.0, 1.0, 0.0],
+    ]
+
+    def score_fn(pos: torch.Tensor) -> W5ScorePair:
+        """Score every non-incumbent tensor as an honest V3 improvement."""
+        score = 10.0 if torch.allclose(pos.detach().cpu(), incumbent) else 11.0
+        return W5ScorePair(
+            directed=score,
+            undirected=score,
+            v3=score,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    result = run_w5_terminal_smacof_stress_polish(
+        incumbent_pos=incumbent,
+        incumbent_score_pair=score_fn(incumbent),
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        all_pairs_dist=all_pairs,
+        score_fn=score_fn,
+        referee_key_fn=lambda pos: (1, -0.0),
+        config=config,
+        iterations=(20,),
+        output_scales=(1.0,),
+    )
+
+    assert result.selected
+    assert result.skipped_reason is None
+    assert result.candidates[0].reason == "v3_argmax"
+    assert not torch.equal(result.winner_pos, incumbent)
+
+
+def test_terminal_smacof_stress_polish_rejects_collapsed_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal SMACOF rejects a collapsed candidate before scoring."""
+    from dagua.layout.ops.pipelines import native_finisher
+    from dagua.layout.ops.pipelines.native_budget import install_budget_ledger
+    from dagua.layout.ops.pipelines.native_finisher import W5ScorePair
+
+    config = LayoutConfig()
+    install_budget_ledger(config, 120.0, return_reserve_dwu=0.0)
+    incumbent = torch.tensor(
+        [[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]],
+        dtype=torch.float32,
+    )
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    node_sizes = torch.full((4, 2), 1.0, dtype=torch.float32)
+    all_pairs = [
+        [0.0, 1.0, 2.0, 3.0],
+        [1.0, 0.0, 1.0, 2.0],
+        [2.0, 1.0, 0.0, 1.0],
+        [3.0, 2.0, 1.0, 0.0],
+    ]
+
+    def collapsed_smacof(*args: object, **kwargs: object) -> object:
+        """Return a collapsed layout to exercise the pre-score guard."""
+        del args, kwargs
+        return torch.zeros((4, 2), dtype=torch.float64).numpy()
+
+    def fail_score(pos: torch.Tensor) -> W5ScorePair:
+        """Fail if the collapsed candidate reaches the scorer."""
+        if not torch.allclose(pos.detach().cpu(), incumbent):
+            raise AssertionError("collapsed SMACOF candidate should not be scored")
+        return W5ScorePair(
+            directed=10.0,
+            undirected=10.0,
+            v3=10.0,
+            champion_ineligibility_flags=frozenset(),
+        )
+
+    monkeypatch.setattr(native_finisher, "_smacof_stress_polish_np", collapsed_smacof)
+
+    result = native_finisher.run_w5_terminal_smacof_stress_polish(
+        incumbent_pos=incumbent,
+        incumbent_score_pair=fail_score(incumbent),
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        all_pairs_dist=all_pairs,
+        score_fn=fail_score,
+        referee_key_fn=lambda pos: (1, -0.0),
+        config=config,
+        iterations=(20,),
+        output_scales=(1.0,),
+    )
+
+    assert not result.selected
+    assert result.candidates[0].reason == "pre_score_degenerate"
+    assert torch.equal(result.winner_pos, incumbent)
+
+
+def test_terminal_smacof_stress_polish_skips_disconnected_graph() -> None:
+    """Terminal SMACOF only runs on connected full-pair stress problems."""
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5ScorePair,
+        run_w5_terminal_smacof_stress_polish,
+    )
+
+    incumbent = torch.tensor([[0.0, 0.0], [2.0, 0.0], [10.0, 0.0]], dtype=torch.float32)
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    node_sizes = torch.full((3, 2), 0.1, dtype=torch.float32)
+    incumbent_pair = W5ScorePair(
+        directed=10.0,
+        undirected=10.0,
+        v3=10.0,
+        champion_ineligibility_flags=frozenset(),
+    )
+
+    result = run_w5_terminal_smacof_stress_polish(
+        incumbent_pos=incumbent,
+        incumbent_score_pair=incumbent_pair,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        all_pairs_dist=[[0.0, 1.0, 3.0], [1.0, 0.0, 3.0], [3.0, 3.0, 0.0]],
+        score_fn=lambda pos: incumbent_pair,
+        referee_key_fn=lambda pos: (1, -0.0),
+    )
+
+    assert not result.selected
+    assert result.skipped_reason == "disconnected_components"
+    assert result.candidates == ()
+
+
 def test_worker_timeout_returns_registered_prelayout_fallback(
     monkeypatch: Any,
 ) -> None:
@@ -544,9 +736,10 @@ def test_terminal_w5_incumbent_is_final_return_tensor_and_runs_once(
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
         shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Capture terminal W5 inputs and return a no-op result."""
-        del node_sizes, score_fn, accept_margin
+        del node_sizes, score_fn, accept_margin, shape_geometry, referee_key_fn
         captured["calls"] = int(captured["calls"]) + 1
         captured["incumbent_pos"] = incumbent_pos.detach().cpu()
         captured["incumbent_score_pair"] = incumbent_score_pair
@@ -607,14 +800,18 @@ def test_terminal_w5_incumbent_is_final_return_tensor_and_runs_once(
     assert int(captured["calls"]) == 1
     assert torch.equal(actual, terminal)
     assert torch.equal(captured["incumbent_pos"], terminal)
-    assert captured["incumbent_score_pair"] == W5ScorePair(directed=90.0, undirected=94.0)
+    captured_pair = captured["incumbent_score_pair"]
+    assert isinstance(captured_pair, W5ScorePair)
+    assert captured_pair.directed == 90.0
+    assert captured_pair.undirected == 94.0
+    assert captured_pair.v3 is not None
     assert captured["incumbent_axes"] == W5HonestAxes(
         flow=0.753,
         depth=0.875,
         ksm=0.922,
         edge_length=0.876,
     )
-    assert captured["seed_names"][0] == "terminal_final"
+    assert "terminal_final" in captured["seed_names"]
     assert "candidate_a" in captured["seed_names"]
 
 
@@ -669,6 +866,7 @@ def test_terminal_w5_preserves_final_tensor_when_candidate_does_not_dominate(
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
         shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Return a one-sided W5 candidate that must be rejected."""
         del (
@@ -684,6 +882,7 @@ def test_terminal_w5_preserves_final_tensor_when_candidate_does_not_dominate(
             accept_margin,
             incumbent_axes,
             shape_geometry,
+            referee_key_fn,
         )
         accepted = W5Candidate("w5_one_sided", w5_pos, one_sided_pair, "barrier_2d")
         return W5FinisherResult(
@@ -749,9 +948,11 @@ def test_terminal_w5_preserves_compliant_final_tensor_when_candidate_breaches_re
         node_sizes: Optional[torch.Tensor],
         edge_weights: Optional[torch.Tensor],
         direction: str,
+        all_pairs_dist: Optional[object] = None,
+        result_fn: Optional[object] = None,
     ) -> object:
         """Return a scorer that marks only the terminal W5 winner as breaching."""
-        del edge_index, num_nodes, node_sizes, direction
+        del edge_index, num_nodes, node_sizes, direction, all_pairs_dist, result_fn
         assert edge_weights is not None
 
         def referee_key(pos: torch.Tensor) -> tuple[int, float]:
@@ -808,6 +1009,11 @@ def test_terminal_w5_preserves_compliant_final_tensor_when_candidate_breaches_re
         )
 
     monkeypatch.setattr(native, "_w5_referee_key_fn", fake_referee_key_fn)
+    monkeypatch.setattr(
+        native,
+        "_terminal_weighted_stress_majorization_candidate",
+        lambda **kwargs: None,
+    )
     monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
 
     actual = _terminal_w5_polish(
@@ -822,6 +1028,108 @@ def test_terminal_w5_preserves_compliant_final_tensor_when_candidate_breaches_re
 
     assert winner_pair.directed > W5ScorePair(directed=90.0, undirected=94.0).directed
     assert torch.equal(actual, terminal)
+
+
+def test_terminal_weighted_stress_candidate_can_replace_breaching_incumbent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terminal weighted-stress coverage can close a severe-G6 incumbent breach."""
+    import importlib
+
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5FinisherResult,
+        W5HonestAxes,
+        W5ScorePair,
+        W5Seed,
+        make_w5_skip_result,
+    )
+
+    native = importlib.import_module("dagua.layout.ops.pipelines.dagua_native")
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    _candidate_a, terminal, _w5_pos = _terminal_w5_fixture_tensors()
+    weighted_stress = terminal + torch.tensor([0.0, 50.0])
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    edge_weights = torch.tensor([7.0, 1.0, 0.25], dtype=torch.float32)
+    node_sizes = torch.full((4, 2), 1.0)
+    config = _terminal_w5_config()
+    config._dagua_native_terminal_w5_owner = True
+    captured: dict[str, torch.Tensor] = {}
+
+    _install_terminal_w5_metric_fixture(monkeypatch, terminal, weighted_stress, weighted_stress)
+    monkeypatch.setattr(native_finisher, "w5_predicted_skip_reason", lambda *args: None)
+    monkeypatch.setattr(native_finisher, "_finisher_slice_s", lambda config: 1.0)
+    monkeypatch.setattr(native_finisher, "log_w5_telemetry", lambda *args: None)
+    monkeypatch.setattr(
+        native,
+        "_terminal_weighted_stress_majorization_candidate",
+        lambda **kwargs: weighted_stress,
+    )
+
+    def fake_referee_key_fn(
+        *,
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        node_sizes: Optional[torch.Tensor],
+        edge_weights: Optional[torch.Tensor],
+        direction: str,
+        all_pairs_dist: Optional[object] = None,
+        result_fn: Optional[object] = None,
+    ) -> object:
+        """Return severe-G6 keys for the terminal weighted-stress fixture."""
+        del edge_index, num_nodes, node_sizes, edge_weights, direction, all_pairs_dist, result_fn
+
+        def referee_key(pos: torch.Tensor) -> tuple[int, float]:
+            """Return compliant only for the weighted-stress candidate."""
+            return (1, -0.0) if torch.equal(pos.detach().cpu(), weighted_stress) else (0, -0.25)
+
+        return referee_key
+
+    def fake_run_w5_finisher(
+        *,
+        incumbent_pos: torch.Tensor,
+        incumbent_score_pair: W5ScorePair,
+        seeds: Sequence[W5Seed],
+        edge_index: torch.Tensor,
+        node_sizes: torch.Tensor,
+        score_fn: object,
+        is_semantically_directed: bool,
+        declared_hierarchical: bool,
+        direction_is_declared: bool = False,
+        config: Optional[LayoutConfig] = None,
+        accept_margin: float = 0.05,
+        incumbent_axes: Optional[W5HonestAxes] = None,
+        shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
+    ) -> W5FinisherResult:
+        """Capture the weighted-stress incumbent and return a no-op result."""
+        del node_sizes, score_fn, accept_margin, incumbent_axes, shape_geometry, referee_key_fn
+        captured["incumbent"] = incumbent_pos.detach().cpu()
+        return make_w5_skip_result(
+            incumbent_pos=incumbent_pos,
+            incumbent_score_pair=incumbent_score_pair,
+            reason="unit_noop",
+            edge_index=edge_index,
+            config=config,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+
+    monkeypatch.setattr(native, "_w5_referee_key_fn", fake_referee_key_fn)
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+
+    actual = _terminal_w5_polish(
+        terminal,
+        edge_index=edge_index,
+        node_sizes=node_sizes,
+        edge_weights=edge_weights,
+        config=config,
+        structure=None,
+        direction="TB",
+    )
+
+    assert torch.equal(captured["incumbent"], weighted_stress)
+    assert torch.equal(actual, weighted_stress)
 
 
 def test_terminal_w5_noops_on_fidelity_no_budget_and_trivial_graph(
@@ -968,6 +1276,7 @@ def test_terminal_w5_large_row_runs_once_and_keeps_monotone_incumbent(
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
         shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Return a one-sided W5 winner for terminal monotonicity checks."""
         del (
@@ -983,6 +1292,7 @@ def test_terminal_w5_large_row_runs_once_and_keeps_monotone_incumbent(
             accept_margin,
             incumbent_axes,
             shape_geometry,
+            referee_key_fn,
         )
         calls["run_w5"] += 1
         accepted = W5Candidate("w5_one_sided", w5_pos, one_sided_pair, "x_only")
@@ -1004,10 +1314,26 @@ def test_terminal_w5_large_row_runs_once_and_keeps_monotone_incumbent(
         del args
         return None
 
+    def no_terminal_scale_sweep(**kwargs: object) -> object:
+        """Keep this W5 monotonicity fixture isolated from terminal scaling."""
+        del kwargs
+
+        class NoScaleResult:
+            """Minimal scale-sweep no-op result for the local fixture."""
+
+            selected = False
+
+        return NoScaleResult()
+
     monkeypatch.setattr(metrics, "full", fake_full)
     monkeypatch.setattr(metrics, "composite", fake_composite)
     monkeypatch.setattr(metrics, "composite_undirected", fake_composite_undirected)
     monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+    monkeypatch.setattr(
+        native_finisher,
+        "run_w5_terminal_global_scale_sweep",
+        no_terminal_scale_sweep,
+    )
     monkeypatch.setattr(native_finisher, "log_w5_telemetry", ignore_w5_telemetry)
 
     first = _terminal_w5_polish(
@@ -1241,9 +1567,10 @@ def test_best_of_polish_w5_receives_final_honest_winner(
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
         shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Capture W5 inputs and return a no-op result."""
-        del node_sizes, score_fn, accept_margin
+        del node_sizes, score_fn, accept_margin, shape_geometry, referee_key_fn
         captured["calls"] = int(captured["calls"]) + 1
         captured["incumbent_pos"] = incumbent_pos.detach().cpu()
         captured["incumbent_score_pair"] = incumbent_score_pair
@@ -1275,7 +1602,11 @@ def test_best_of_polish_w5_receives_final_honest_winner(
     assert int(captured["calls"]) == 1
     assert torch.equal(polished, base_pos)
     assert torch.equal(captured["incumbent_pos"], base_pos)
-    assert captured["incumbent_score_pair"] == W5ScorePair(directed=20.0, undirected=20.0)
+    captured_pair = captured["incumbent_score_pair"]
+    assert isinstance(captured_pair, W5ScorePair)
+    assert captured_pair.directed == 20.0
+    assert captured_pair.undirected == 20.0
+    assert captured_pair.v3 is not None
     assert captured["incumbent_axes"] == W5HonestAxes(
         flow=0.753,
         depth=0.875,
@@ -1283,6 +1614,119 @@ def test_best_of_polish_w5_receives_final_honest_winner(
         edge_length=0.876,
     )
     assert captured["seed_names"][:2] == ["incumbent", "proxy_polish_winner"]
+
+
+def test_best_of_polish_retains_id_keyed_v3_candidate_tensors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best-of-polish keeps scored W5 tensors alive beside the id-keyed cache."""
+    import gc
+    import importlib
+    import weakref
+
+    from dagua.layout.ops.pipelines.native_finisher import (
+        W5FinisherResult,
+        W5HonestAxes,
+        W5ScorePair,
+        W5Seed,
+        make_w5_skip_result,
+    )
+
+    native_finisher = importlib.import_module("dagua.layout.ops.pipelines.native_finisher")
+    base_pos, proxy_pos, edge_index, node_sizes, cluster_ids = _proxy_honest_fixture_tensors()
+    _install_proxy_honest_w5_fixture(monkeypatch, base_pos, proxy_pos)
+    retained: dict[str, bool] = {}
+
+    def fake_run_w5_finisher(
+        *,
+        incumbent_pos: torch.Tensor,
+        incumbent_score_pair: W5ScorePair,
+        seeds: Sequence[W5Seed],
+        edge_index: torch.Tensor,
+        node_sizes: torch.Tensor,
+        score_fn: object,
+        is_semantically_directed: bool,
+        declared_hierarchical: bool,
+        direction_is_declared: bool = False,
+        config: Optional[LayoutConfig] = None,
+        accept_margin: float = 0.05,
+        incumbent_axes: Optional[W5HonestAxes] = None,
+        shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
+    ) -> W5FinisherResult:
+        """Score a short-lived W5 candidate and verify cache-side retention.
+
+        Parameters
+        ----------
+        incumbent_pos : torch.Tensor
+            Current best-of-polish winner with shape ``[N, 2]``.
+        incumbent_score_pair : W5ScorePair
+            Honest score pair for ``incumbent_pos``.
+        seeds : Sequence[W5Seed]
+            W5 seed bank; unused in this retention fixture.
+        edge_index : torch.Tensor
+            Edge-index tensor with shape ``[2, E]``.
+        node_sizes : torch.Tensor
+            Node-size tensor with shape ``[N, 2]``.
+        score_fn : object
+            W5 score callback to exercise.
+        is_semantically_directed : bool
+            Whether the fixture graph is semantically directed.
+        declared_hierarchical : bool
+            Whether the fixture graph declares hierarchy.
+        direction_is_declared : bool, default=False
+            Whether direction was explicit.
+        config : LayoutConfig, optional
+            Layout configuration passed through to the skip result.
+        accept_margin : float, default=0.05
+            W5 accept margin; unused.
+        incumbent_axes : W5HonestAxes, optional
+            Honest routing axes; unused.
+        shape_geometry : object, optional
+            Shape geometry; unused.
+        referee_key_fn : object, optional
+            Severe-G6 key scorer; unused.
+
+        Returns
+        -------
+        W5FinisherResult
+            No-op W5 result after proving the candidate remains live.
+        """
+        del seeds, node_sizes, accept_margin, incumbent_axes, shape_geometry, referee_key_fn
+        scorer = score_fn
+        assert callable(scorer)
+        candidate = incumbent_pos.detach().clone() + torch.tensor([0.0, 7.0])
+        candidate_ref = weakref.ref(candidate)
+        scored_pair = scorer(candidate)
+        assert isinstance(scored_pair, W5ScorePair)
+        del candidate
+        gc.collect()
+        retained["candidate_alive"] = candidate_ref() is not None
+        return make_w5_skip_result(
+            incumbent_pos=incumbent_pos,
+            incumbent_score_pair=incumbent_score_pair,
+            reason="unit_noop",
+            edge_index=edge_index,
+            config=config,
+            is_semantically_directed=is_semantically_directed,
+            declared_hierarchical=declared_hierarchical,
+            direction_is_declared=direction_is_declared,
+        )
+
+    monkeypatch.setattr(native_finisher, "run_w5_finisher", fake_run_w5_finisher)
+
+    polished = _best_of_polish(
+        base_pos,
+        edge_index,
+        node_sizes,
+        is_semantically_directed=True,
+        declared_hierarchical=True,
+        cluster_ids=cluster_ids,
+        config=LayoutConfig(),
+    )
+
+    assert torch.equal(polished, base_pos)
+    assert retained == {"candidate_alive": True}
 
 
 def test_best_of_polish_returns_w5_candidate_only_when_dominating_final_winner(
@@ -1321,6 +1765,7 @@ def test_best_of_polish_returns_w5_candidate_only_when_dominating_final_winner(
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
         shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Return a W5 winner that dominates the final honest incumbent."""
         del (
@@ -1336,6 +1781,7 @@ def test_best_of_polish_returns_w5_candidate_only_when_dominating_final_winner(
             accept_margin,
             incumbent_axes,
             shape_geometry,
+            referee_key_fn,
         )
         captured["incumbent"] = incumbent_score_pair
         accepted = W5Candidate("w5_unit", w5_pos, winner_pair, "barrier_2d")
@@ -1364,7 +1810,11 @@ def test_best_of_polish_returns_w5_candidate_only_when_dominating_final_winner(
         config=LayoutConfig(),
     )
 
-    assert captured["incumbent"] == W5ScorePair(directed=20.0, undirected=20.0)
+    captured_pair = captured["incumbent"]
+    assert isinstance(captured_pair, W5ScorePair)
+    assert captured_pair.directed == 20.0
+    assert captured_pair.undirected == 20.0
+    assert captured_pair.v3 is not None
     assert winner_pair.directed > captured["incumbent"].directed + 0.05
     assert winner_pair.undirected > captured["incumbent"].undirected + 0.05
     assert torch.equal(polished, w5_pos)
@@ -1405,6 +1855,7 @@ def test_best_of_polish_preserves_final_winner_when_w5_does_not_dominate(
         accept_margin: float = 0.05,
         incumbent_axes: Optional[W5HonestAxes] = None,
         shape_geometry: Optional[object] = None,
+        referee_key_fn: Optional[object] = None,
     ) -> W5FinisherResult:
         """Return a W5 winner that fails the unchanged dual-ruler gate."""
         del (
@@ -1420,6 +1871,7 @@ def test_best_of_polish_preserves_final_winner_when_w5_does_not_dominate(
             accept_margin,
             incumbent_axes,
             shape_geometry,
+            referee_key_fn,
         )
         accepted = W5Candidate("w5_one_sided", w5_pos, one_sided_pair, "barrier_2d")
         return W5FinisherResult(
@@ -1479,9 +1931,11 @@ def test_best_of_polish_preserves_compliant_winner_when_w5_breaches_referee(
         node_sizes: Optional[torch.Tensor],
         edge_weights: Optional[torch.Tensor],
         direction: str,
+        all_pairs_dist: Optional[object] = None,
+        result_fn: Optional[object] = None,
     ) -> object:
         """Return a scorer that marks only the fake W5 winner as breaching."""
-        del edge_index, num_nodes, node_sizes, direction
+        del edge_index, num_nodes, node_sizes, direction, all_pairs_dist, result_fn
         assert edge_weights is not None
 
         def referee_key(pos: torch.Tensor) -> tuple[int, float]:
@@ -1638,6 +2092,35 @@ def test_dot_cluster_fidelity_layout_separates_sibling_cluster_boxes() -> None:
     rank_mean = sum(ranks) / len(ranks)
     for node, rank in enumerate(ranks):
         assert float(out[node, 1].item()) == float((rank - rank_mean) * 72.0)
+
+
+def test_dot_cluster_fidelity_layout_spreads_collinear_leaf_cluster_internals() -> None:
+    """Leaf clusters with one node per rank should get nonzero internal width."""
+    edge_index = torch.tensor(
+        [
+            [0, 1, 2, 4, 5, 6],
+            [1, 2, 3, 5, 6, 7],
+        ],
+        dtype=torch.long,
+    )
+    node_sizes = torch.full((8, 2), 20.0, dtype=torch.float32)
+    base_pos = torch.zeros((8, 2), dtype=torch.float32)
+    clusters = {"left": (0, 1, 2, 3), "right": (4, 5, 6, 7)}
+
+    out = _apply_dot_cluster_fidelity_layout(
+        base_pos,
+        edge_index,
+        node_sizes,
+        clusters,
+        cluster_parents=None,
+    )
+
+    for members in clusters.values():
+        idx = torch.tensor(members, dtype=torch.long)
+        x_span = float((out[idx, 0].max() - out[idx, 0].min()).item())
+        y_span = float((out[idx, 1].max() - out[idx, 1].min()).item())
+        assert x_span > 0.0
+        assert y_span > 0.0
 
 
 def test_dagua_native_pipeline_cluster_fidelity_mode_is_invokable() -> None:

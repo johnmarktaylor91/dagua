@@ -118,6 +118,7 @@ def test_build_csr_empty_graph() -> None:
     assert (offsets == 0).all()
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_cuda_csr_matches_cpu(medium_graph: tuple) -> None:
     """CUDA CSR kernel should produce same adjacency as CPU path."""
@@ -141,6 +142,7 @@ def test_cuda_csr_matches_cpu(medium_graph: tuple) -> None:
         pytest.skip("CUDA kernels not available")
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_cuda_csr_int32_edges() -> None:
     """CUDA CSR should handle int32 edge tensors."""

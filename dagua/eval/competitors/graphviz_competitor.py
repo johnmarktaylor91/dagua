@@ -667,13 +667,14 @@ def _layout_with_graphviz_engine(
     node_sizes = None
     if graph.node_sizes is not None and size_aware_externals():
         node_sizes = graph.node_sizes
+    dot_source = _graph_to_dot(graph) if engine == "osage" else to_dot(graph, node_sizes=node_sizes)
     with tempfile.NamedTemporaryFile(
         mode="w",
         suffix=".dot",
         delete=False,
         encoding="utf-8",
     ) as handle:
-        handle.write(to_dot(graph, node_sizes=node_sizes))
+        handle.write(dot_source)
         dot_path = Path(handle.name)
 
     try:
@@ -698,6 +699,21 @@ class _GraphvizBase(CompetitorBase):
     """Base class for Graphviz engine variants."""
 
     engine: str = "dot"
+    # Family backend: every graphviz_* member (incl. circo/osage/twopi)
+    # inherits the dot binary version component (dry-well R4-B3-Sol).
+    backend_version_key = "graphviz"
+    # Size-aware externals receive dagua-computed node boxes gated by
+    # size_policy (under dagua/eval/, outside the tree hash); declared per
+    # dry-well R3-B3-Fable F4 disposition. The measurement stack itself
+    # (graph.py/utils.py) is a documented residual: G-5 uses no caches and
+    # G-3's A10 sample-check covers pool reuse.
+    source_delegate_modules = ("dagua.eval.size_policy",)
+    # Layouts are a FUNCTION of dagua-computed node boxes: the GLaDOS
+    # runner folds the node-box producer stack (graph.py/utils.py/
+    # styles.py) into these engines' run-revision markers so a mid-run
+    # sizing hotfix cannot resume their OLD-box layouts while native
+    # regenerates under new boxes (dry-well R4-B3 Fable F1).
+    consumes_node_boxes = True
 
     def layout(
         self,

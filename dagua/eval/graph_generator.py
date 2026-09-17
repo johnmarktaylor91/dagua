@@ -46,7 +46,12 @@ from dagua.eval.graphs import (
     make_wide_dag,
 )
 
-DEFAULT_SALT_PATH = Path(".project-context/private/holdout_salt")
+# Anchored to the repo root (three levels above dagua/eval/) rather than the
+# process CWD, so make_holdout_suite() works from any working directory
+# (WP07-F10; the old CWD-relative path raised FileNotFoundError elsewhere).
+DEFAULT_SALT_PATH = (
+    Path(__file__).resolve().parents[2] / ".project-context" / "private" / "holdout_salt"
+)
 
 
 # Priority-ordered family spec: (family_tag, builder, size_arg_name).
@@ -186,10 +191,10 @@ def _derive_seed(salt: bytes, sprint_tag: str, family: str, index: int) -> int:
 
 
 def _topology_hash(graph) -> str:
-    """SHA256 hex of (sorted edge_index bytes + num_nodes), truncated to 16
+    """SHA256 hex of (sorted edge_index bytes + num_nodes), truncated to 10
     chars so the committed MANIFEST does not trip detect-secrets' high-entropy
-    rule. 16 hex chars (64 bits) is still way more than enough for per-suite
-    drift detection.
+    rule. 10 hex chars (40 bits) is still way more than enough for per-suite
+    drift detection across a 30-graph suite.
     """
     h = hashlib.sha256()
     h.update(int(graph.num_nodes).to_bytes(8, "big"))

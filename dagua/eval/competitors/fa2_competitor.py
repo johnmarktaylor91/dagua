@@ -87,6 +87,7 @@ class FA2Reference(CompetitorBase):
 
     name = "fa2_ref"
     max_nodes = 20_000
+    backend_version_key = "fa2"
     variant_param_names = frozenset(
         {
             "barnesHutOptimize",
@@ -117,7 +118,7 @@ class FA2Reference(CompetitorBase):
             compatibility with the benchmark harness.
         seed : int | None, default=None
             Random seed for the NumPy-backed initial positions used by the
-            reference implementation. ``None`` keeps the library default.
+            reference implementation. ``None`` falls back to ``42``.
 
         Returns
         -------
@@ -145,7 +146,7 @@ class FA2Reference(CompetitorBase):
             compatibility with the benchmark harness.
         seed : int | None, default=None
             Random seed for the NumPy-backed initial positions used by the
-            reference implementation. ``None`` keeps the library default.
+            reference implementation. ``None`` falls back to ``42``.
 
         Returns
         -------
@@ -157,13 +158,17 @@ class FA2Reference(CompetitorBase):
 
         start = time.perf_counter()
         try:
-            if seed is not None:
-                import numpy as np
+            import numpy as np
 
-                # The maintained FA2 package initializes from both Python's
-                # RNG and NumPy's global RNG, so we must seed both for parity.
-                random.seed(seed)
-                np.random.seed(seed)
+            # The maintained FA2 package initializes from both Python's RNG
+            # and NumPy's global RNG, so we must seed both for parity. The
+            # seed=None fallback is pinned to 42: unseeded runs depended on
+            # ambient process RNG state (run-order nondeterminism), and every
+            # certified-pool fa2_ref row carries an explicit seed, so this
+            # cannot alter any regenerated pool row.
+            resolved_seed = 42 if seed is None else seed
+            random.seed(resolved_seed)
+            np.random.seed(resolved_seed)
 
             if graph.num_nodes <= 1:
                 pos = torch.zeros((graph.num_nodes, 2), dtype=torch.float32)
@@ -199,10 +204,9 @@ class FA2Reference(CompetitorBase):
                 "gravity": 1.0,
                 "verbose": False,
             }
-            if seed is not None:
-                # Newer ``fa2`` releases initialize from random.Random(self.seed);
-                # global RNG seeding above only covers older reference packages.
-                engine_kwargs["seed"] = seed
+            # Newer ``fa2`` releases initialize from random.Random(self.seed);
+            # global RNG seeding above only covers older reference packages.
+            engine_kwargs["seed"] = resolved_seed
             layout_kwargs: dict[str, Any] = {"pos": None, "iterations": 100}
             if weights is not None:
                 layout_kwargs["weight_attr"] = "weight"

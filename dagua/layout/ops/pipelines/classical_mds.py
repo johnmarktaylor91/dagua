@@ -740,26 +740,6 @@ def _igraph_layout_align_nematic_basis(
         retried = True
 
 
-def _rng_unif(rng: random.Random, low: float, high: float) -> float:
-    """Draw a uniform value matching igraph's ``RNG_UNIF`` call sites.
-
-    Parameters
-    ----------
-    rng : random.Random
-        Seeded Python RNG used by the benchmark igraph adapter.
-    low : float
-        Inclusive lower bound.
-    high : float
-        Exclusive upper bound.
-
-    Returns
-    -------
-    float
-        Uniform draw in ``[low, high)``.
-    """
-    return low + (high - low) * rng.random()
-
-
 def _igraph_layout_merge_dla_walk(
     grid: "_IgraphMergeGrid",
     radius: float,

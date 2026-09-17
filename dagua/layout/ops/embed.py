@@ -25,6 +25,13 @@ _LAPLACIAN_PINV_KEY = "laplacian_pinv"
 _GCN_MODEL_KEY = "gcn_model"
 _GCN_ADJACENCY_REF_KEY = "gcn_model_adjacency"
 _PROBABILITIES_KEY = "probabilities"
+# Canonical consumer channel: KLDivergenceLoss resolves affinities from
+# extras["tsne_probabilities"] (loss_classic._resolve_tsne_probabilities).
+# PerplexityMatch publishes the SAME tensor under both keys so composing
+# the two ops hits the cache instead of recomputing the [N, N] perplexity
+# search on every evaluate() call. The legacy "probabilities" key is
+# retained for compatibility with existing consumers.
+_TSNE_PROBABILITIES_KEY = "tsne_probabilities"
 _SIGMAS_KEY = "sigmas"
 _RHOS_KEY = "rhos"
 _FUZZY_GRAPH_KEY = "fuzzy_graph"
@@ -1843,7 +1850,10 @@ class PerplexityMatch(Op):
     name: ClassVar[str] = "perplexity_match"
     category: ClassVar[OpCategory] = OpCategory.EMBED
     reads: ClassVar[Tuple[str, ...]] = ("distance_matrix",)
-    writes: ClassVar[Tuple[str, ...]] = (f"extras.{_PROBABILITIES_KEY}",)
+    writes: ClassVar[Tuple[str, ...]] = (
+        f"extras.{_PROBABILITIES_KEY}",
+        f"extras.{_TSNE_PROBABILITIES_KEY}",
+    )
     requires: ClassVar[Tuple[str, ...]] = ("distance_matrix",)
     access_pattern: ClassVar[str] = "global"
 
@@ -1877,7 +1887,10 @@ class PerplexityMatch(Op):
         Returns
         -------
         SolveState
-            State with ``extras["probabilities"]`` populated.
+            State with ``extras["probabilities"]`` and
+            ``extras["tsne_probabilities"]`` populated (the same tensor
+            under both keys; the latter is the canonical channel that
+            ``KLDivergenceLoss`` resolves from).
         """
         _ = problem
         _ = ctx
@@ -1906,7 +1919,11 @@ class PerplexityMatch(Op):
         probabilities = (conditional + conditional.transpose(0, 1)) / (
             _TSNE_JOINT_PROBABILITY_DIVISOR * max(distance_matrix.shape[0], 1)
         )
-        state.extras[_PROBABILITIES_KEY] = probabilities.clamp(min=_EPSILON)
+        clamped = probabilities.clamp(min=_EPSILON)
+        state.extras[_PROBABILITIES_KEY] = clamped
+        # Same tensor object under the canonical consumer key -- zero-copy
+        # cache handoff to KLDivergenceLoss (no per-step N^2 recompute).
+        state.extras[_TSNE_PROBABILITIES_KEY] = clamped
         return state
 
 

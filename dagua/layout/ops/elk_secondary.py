@@ -128,7 +128,12 @@ def _node_sizes_or_default(
         sizes[:, 0] = _DEFAULT_NODE_WIDTH
         sizes[:, 1] = _DEFAULT_NODE_HEIGHT
         return sizes
-    return node_sizes.detach().to(device="cpu", dtype=dtype)
+    sizes = node_sizes.detach().to(device="cpu", dtype=dtype)
+    if num_nodes == 0 and sizes.numel() == 0:
+        # Degenerate empty graphs may carry a 0-element size tensor of any
+        # shape (e.g. ``[0]``); normalize so downstream broadcasting holds.
+        return sizes.reshape(0, 2)
+    return sizes
 
 
 def _edge_pairs(edge_index: torch.Tensor) -> List[Tuple[int, int]]:
@@ -147,36 +152,6 @@ def _edge_pairs(edge_index: torch.Tensor) -> List[Tuple[int, int]]:
     if edge_index.numel() == 0:
         return []
     return [(int(source), int(target)) for source, target in edge_index.t().detach().cpu().tolist()]
-
-
-def _initial_model_positions(num_nodes: int, node_sizes: torch.Tensor) -> torch.Tensor:
-    """Create deterministic non-overlapping initial top-left positions.
-
-    Parameters
-    ----------
-    num_nodes : int
-        Number of nodes.
-    node_sizes : torch.Tensor
-        Node sizes with shape ``[N, 2]``.
-
-    Returns
-    -------
-    torch.Tensor
-        Center positions with shape ``[N, 2]``.
-    """
-    if num_nodes == 0:
-        return torch.empty((0, 2), dtype=node_sizes.dtype)
-    columns = max(1, int(math.ceil(math.sqrt(float(num_nodes)))))
-    max_width = float(torch.max(node_sizes[:, 0]).item()) if num_nodes else _DEFAULT_NODE_WIDTH
-    max_height = float(torch.max(node_sizes[:, 1]).item()) if num_nodes else _DEFAULT_NODE_HEIGHT
-    x_step = max_width + _ELK_TREE_NODE_SPACING
-    y_step = max_height + _ELK_TREE_NODE_SPACING
-    pos = torch.empty((num_nodes, 2), dtype=node_sizes.dtype)
-    for node in range(num_nodes):
-        row, col = divmod(node, columns)
-        pos[node, 0] = col * x_step + node_sizes[node, 0] / 2.0
-        pos[node, 1] = row * y_step + node_sizes[node, 1] / 2.0
-    return pos
 
 
 def _initial_random_positions(num_nodes: int, rng: JavaRandom, dtype: torch.dtype) -> torch.Tensor:

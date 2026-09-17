@@ -129,3 +129,44 @@ def test_cell_list_gradient_matches_exact_when_cutoff_covers_all_pairs() -> None
     assert exact_pos.grad is not None
     assert cell_pos.grad is not None
     assert torch.allclose(cell_pos.grad, exact_pos.grad, rtol=1.0e-5, atol=1.0e-5)
+
+
+def test_candidate_pairs_handle_degenerate_point_sets() -> None:
+    """Empty / single-node inputs should yield empty pair tensors."""
+    empty = UniformSpatialHash(
+        torch.empty((0, 2), dtype=torch.float32),
+        cutoff_radius=1.0,
+    ).candidate_pairs()
+    assert empty.shape == (2, 0)
+    assert empty.dtype == torch.long
+
+    single = UniformSpatialHash(
+        torch.tensor([[5.0, -3.0]], dtype=torch.float32),
+        cutoff_radius=1.0,
+    ).candidate_pairs()
+    assert single.shape == (2, 0)
+
+
+def test_candidate_pairs_cover_coincident_points() -> None:
+    """All-coincident points share one cell and must produce every pair."""
+    pos = torch.zeros((4, 2), dtype=torch.float32)
+
+    pairs = _pair_set(UniformSpatialHash(pos, cutoff_radius=0.5).candidate_pairs())
+
+    assert pairs == _true_pairs_within_radius(pos, 0.5)
+
+
+def test_candidate_neighbors_include_isolated_nodes() -> None:
+    """Far-apart nodes keep empty neighbor rows of the right dtype."""
+    pos = torch.tensor(
+        [[0.0, 0.0], [0.4, 0.0], [100.0, 100.0]],
+        dtype=torch.float32,
+    )
+
+    neighbors = UniformSpatialHash(pos, cutoff_radius=1.0).candidate_neighbors()
+
+    assert len(neighbors) == 3
+    assert set(neighbors[0].tolist()) == {1}
+    assert set(neighbors[1].tolist()) == {0}
+    assert neighbors[2].numel() == 0
+    assert neighbors[2].dtype == torch.long

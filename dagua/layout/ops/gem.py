@@ -1855,54 +1855,6 @@ class GEMApplyDisplacement(Op):
 
 @register_op
 @dataclass(frozen=True)
-class GEMConvergenceCheck(Op):
-    """Optional batched convergence marker based on mean temperature."""
-
-    config: GEMPhysicsConfig = field(default_factory=GEMPhysicsConfig)
-
-    name: ClassVar[str] = "gem_convergence_check"
-    category: ClassVar[OpCategory] = OpCategory.CONVERGE
-    reads: ClassVar[Tuple[str, ...]] = ("extras", "converged")
-    writes: ClassVar[Tuple[str, ...]] = ("converged",)
-    requires: ClassVar[Tuple[str, ...]] = ("extras",)
-
-    def apply(
-        self,
-        problem: LayoutProblem,
-        state: SolveState,
-        ctx: RuntimeContext,
-    ) -> SolveState:
-        """Raise ``state.converged`` when batched temperatures fall below threshold.
-
-        Parameters
-        ----------
-        problem : LayoutProblem
-            Immutable layout inputs. Unused by this op.
-        state : SolveState
-            Mutable solve state containing cached temperatures.
-        ctx : RuntimeContext
-            Execution infrastructure. Unused by this op.
-
-        Returns
-        -------
-        SolveState
-            State with an updated ``converged`` flag.
-        """
-        del problem, ctx
-
-        if state.converged:
-            return state
-
-        temperatures = state.extras.get(_GEM_BATCHED_TEMPERATURES_KEY)
-        if temperatures is not None:
-            state.converged = bool(
-                float(temperatures.mean().item()) < self.config.minimal_temperature
-            )
-        return state
-
-
-@register_op
-@dataclass(frozen=True)
 class GEMBatchedSolve(Op):
     """Run the vectorized GEM fallback for graphs above the sequential cutoff."""
 

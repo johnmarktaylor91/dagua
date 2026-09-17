@@ -225,8 +225,19 @@ def test_random_uniform_init_numpy_backend_matches_randomstate_exactly() -> None
     assert torch.equal(result.pos.cpu(), expected)
 
 
-def test_graphopt_fidelity_init_matches_igraph_adapter_seed_matrix() -> None:
-    """GraphOpt fidelity init should match the igraph benchmark seed matrix."""
+def test_graphopt_fidelity_init_falls_back_to_igraph_default_rng_stream() -> None:
+    """GraphOpt fidelity init should mirror igraph's native fallback layout.
+
+    Contract history: round 31 had ``fidelity_mode`` reproduce the benchmark
+    adapter's ``np.random.RandomState(seed).uniform(-1, 1)`` matrix directly.
+    The R33-R35 seed audit (05136e5d) deliberately retargeted the no-matrix
+    fallback to igraph's compiled default RNG (PCG32, ``RNG_UNIF(-1, 1)``,
+    row-major node-then-dim draw order); the adapter now supplies its NumPy
+    matrix explicitly through ``extras["graphopt_initial_pos"]`` (covered by
+    ``test_graphopt_init_uses_supplied_matrix_before_rng``). The golden values
+    below are the seed-13 ``IgraphPCG32`` stream, whose raw words are pinned
+    against compiled igraph in ``tests/test_igraph_rng.py``.
+    """
 
     problem = _make_problem(num_nodes=6, seed=13)
 
@@ -238,10 +249,20 @@ def test_graphopt_fidelity_init_matches_igraph_adapter_seed_matrix() -> None:
         _make_context(),
     )
 
-    expected = torch.from_numpy(np.random.RandomState(13).uniform(-1.0, 1.0, size=(6, 2)))
+    expected = torch.tensor(
+        [
+            [-0.9246324484002173, 0.97882760812163827],
+            [0.61327247411190111, 0.75694163176263984],
+            [-0.37390610939829827, -0.088942730691421001],
+            [0.13094064932031335, -0.13123803002056533],
+            [-0.010632280355086454, 0.99185814238779502],
+            [0.39999399020143889, -0.47729049962206593],
+        ],
+        dtype=torch.float64,
+    )
 
     assert result.pos is not None
-    torch.testing.assert_close(result.pos.cpu(), expected)
+    torch.testing.assert_close(result.pos.cpu(), expected, rtol=0.0, atol=0.0)
 
 
 def test_graphopt_init_uses_supplied_matrix_before_rng() -> None:

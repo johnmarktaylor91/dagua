@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import nbformat
 import pytest
 
@@ -43,7 +45,9 @@ def test_apply_overrides_updates_layout_config() -> None:
 
 
 def test_interactive_playground_notebook_is_valid() -> None:
-    path = "/home/jtaylor/projects/dagua/docs/interactive_playground.ipynb"
+    # Repo-relative: a hardcoded absolute path broke worktrees/other clones
+    # (WP-11B F02).
+    path = Path(__file__).resolve().parents[1] / "docs" / "interactive_playground.ipynb"
     with open(path, "r", encoding="utf-8") as f:
         nb = nbformat.read(f, as_version=4)
     assert nb.cells[0]["cell_type"] == "markdown"

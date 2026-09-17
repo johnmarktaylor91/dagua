@@ -7,7 +7,7 @@ import gc
 import json
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Dict, Optional, Tuple, Union
@@ -79,6 +79,64 @@ def _atomic_json_write(path: Path, payload: Dict[str, object]) -> None:
         json.dump(payload, handle, sort_keys=True)
         handle.write("\n")
     tmp_path.replace(path)
+
+
+def _checkpoint_safe_value(value: object) -> object:
+    """Return a ``torch.save``-safe version of a single state value.
+
+    Parameters
+    ----------
+    value : object
+        Arbitrary state payload value.
+
+    Returns
+    -------
+    object
+        ``value.detach()`` for non-leaf tensors that require grad (which
+        ``torch.save`` refuses to pickle), otherwise ``value`` unchanged.
+    """
+    if isinstance(value, torch.Tensor) and value.requires_grad and not value.is_leaf:
+        return value.detach()
+    return value
+
+
+def _sanitized_checkpoint_payload(state: SolveState) -> SolveState:
+    """Build a pickle-safe shallow copy of ``state`` for checkpointing.
+
+    ``torch.save`` raises on non-leaf tensors that require grad, and a
+    mid-loop solve state can legitimately hold such transients: the
+    per-step context caches (``edge_batch_context`` builds tensors FROM
+    the differentiable positions) and grad-carrying ``extras`` values.
+    Those are per-step products that their producer ops rebuild, so the
+    checkpoint payload drops the context caches and detaches non-leaf
+    tensors. Every field that serializes today is passed through
+    unchanged (leaf tensors keep their identity, so optimizer/positions
+    aliasing survives the round trip). The live ``state`` is never
+    mutated.
+
+    Parameters
+    ----------
+    state : SolveState
+        Mutable solve state to snapshot.
+
+    Returns
+    -------
+    SolveState
+        Shallow copy safe to pass to ``torch.save``.
+    """
+    updates: Dict[str, Any] = {
+        "sampled_node_context": None,
+        "edge_batch_context": None,
+        "extras": {key: _checkpoint_safe_value(val) for key, val in state.extras.items()},
+    }
+    for spec in fields(state):
+        if spec.name in updates:
+            continue
+        value = getattr(state, spec.name)
+        safe = _checkpoint_safe_value(value)
+        if safe is not value:
+            updates[spec.name] = safe
+    return replace(state, **updates)
 
 
 def _resolve_checkpoint_path(
@@ -219,7 +277,14 @@ class CheckpointConfig:
 @register_op
 @dataclass(frozen=True)
 class Checkpoint(Op):
-    """Serialize the current solve state to disk."""
+    """Serialize the current solve state to disk.
+
+    The saved payload is a sanitized shallow copy: per-step context
+    caches (``sampled_node_context``, ``edge_batch_context``) are
+    dropped and non-leaf grad-carrying tensors are detached, because
+    ``torch.save`` cannot pickle them. Those fields are rebuilt per
+    step by their producer ops, so restore semantics are unaffected.
+    """
 
     config: CheckpointConfig = CheckpointConfig()
 
@@ -252,7 +317,7 @@ class Checkpoint(Op):
         """
         del problem
         path = _resolve_checkpoint_path(self.config.path, ctx, state)
-        _atomic_torch_save(path, state)
+        _atomic_torch_save(path, _sanitized_checkpoint_payload(state))
         state.extras["checkpoint_path"] = str(path)
         ctx.trace_sink.log(f"{ctx.log_prefix} checkpoint saved to {path}")
         return state

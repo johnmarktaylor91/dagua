@@ -10,6 +10,7 @@ import sys
 from collections import Counter, defaultdict, deque
 from typing import Callable
 
+import pytest
 import torch
 from _pytest.monkeypatch import MonkeyPatch
 
@@ -121,6 +122,7 @@ def _changed_snapshot_names(left: bytes, right: bytes) -> list[str]:
     return [name for name in names if left_payload.get(name) != right_payload.get(name)]
 
 
+@pytest.mark.slow
 def test_benchmark_graphs_are_hash_seed_deterministic() -> None:
     """Every benchmark graph should serialize identically across hash seeds."""
     seed_zero_snapshot = _build_graph_catalog_snapshot("0")
@@ -678,3 +680,81 @@ def test_new_graph_generators_handle_edge_cases_and_grid_compatibility() -> None
     legacy_grid = make_grid(25, seed=7)
     assert hasattr(legacy_grid, "graph")
     assert legacy_grid.graph.num_nodes >= 4
+
+
+# ---------------------------------------------------------------------------
+# Certified real-graph shape pins (WP07-F02 / WP07-F03)
+# ---------------------------------------------------------------------------
+# The expected values below are DELIBERATELY duplicated from
+# dagua.eval.graphs._CERTIFIED_REAL_GRAPH_PINS: a drifted environment (or a
+# hasty "update the pin to match") must change TWO independent places before
+# these tests go quiet.
+
+
+def test_real_lesmis_matches_certified_pinned_shape() -> None:
+    """real_lesmis_77 must stay the genuine 77-node Les Miserables graph.
+
+    If networkx ever drops/renames ``les_miserables_graph``, the builder's
+    florentine fallback (15 nodes) would silently ship under the certified
+    name; this pin makes that a loud failure (WP07-F03).
+    """
+    import hashlib
+
+    test_graph = make_real_lesmis_graph()
+    graph = test_graph.graph
+    assert test_graph.name == "real_lesmis_77"
+    assert graph.num_nodes == 77
+    assert graph.num_edges == 254
+    degrees = torch.bincount(graph.edge_index.reshape(-1), minlength=graph.num_nodes)
+    payload = ",".join(str(int(d)) for d in sorted(degrees.tolist()))
+    expected_degree_hash = (
+        "53027542bebf150780181e5c33554add"  # pragma: allowlist secret
+        "761145c10b4f46ef9dc6d62045380717"  # pragma: allowlist secret
+    )
+    assert hashlib.sha256(payload.encode("utf-8")).hexdigest() == expected_degree_hash
+    # One of the 6 weighted certified rows: the weights must survive import.
+    assert graph.edge_weights is not None
+    assert graph.edge_weights.shape[0] == graph.num_edges
+
+
+def test_real_football_matches_certified_pinned_shape() -> None:
+    """real_football_115 must stay the certified seeded SBM fallback.
+
+    networkx 3.x has no ``football_graph`` loader, so the SBM fallback IS the
+    certified artifact. If a future networkx adds the loader, the primary
+    branch would silently swap the topology under the certified name; this
+    pin makes that a loud failure (WP07-F02).
+    """
+    import hashlib
+
+    test_graph = make_real_football_graph(seed=42)
+    graph = test_graph.graph
+    assert test_graph.name == "real_football_115"
+    assert test_graph.source == "synthetic-fallback"
+    assert graph.num_nodes == 115
+    assert graph.num_edges == 653
+    degrees = torch.bincount(graph.edge_index.reshape(-1), minlength=graph.num_nodes)
+    payload = ",".join(str(int(d)) for d in sorted(degrees.tolist()))
+    expected_degree_hash = (
+        "e3d9aee366394f964e1d084afcc0cf94"  # pragma: allowlist secret
+        "f86329484ab724807efc6397afe4ef83"  # pragma: allowlist secret
+    )
+    assert hashlib.sha256(payload.encode("utf-8")).hexdigest() == expected_degree_hash
+
+
+def test_certified_shape_guard_raises_loudly_on_drift() -> None:
+    """The in-builder guard must raise RuntimeError, not substitute silently."""
+    import pytest
+
+    from dagua.eval.graphs import _assert_certified_real_graph_shape
+
+    wrong = DaguaGraph()
+    for index in range(15):
+        wrong.add_node(index)
+    for index in range(14):
+        wrong.add_edge(index, index + 1)
+
+    with pytest.raises(RuntimeError, match="real_lesmis_77"):
+        _assert_certified_real_graph_shape("real_lesmis_77", wrong)
+    with pytest.raises(RuntimeError, match="real_football_115"):
+        _assert_certified_real_graph_shape("real_football_115", wrong)

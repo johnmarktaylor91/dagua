@@ -376,12 +376,14 @@ def test_ogdf_gem_matched_seed_parity_guardrail(
         reference.pos.detach().cpu().numpy(),
     )
 
-    if rmsd >= 1.0e-3:
-        pytest.xfail(
-            f"current benchmark-path GEM seed parity fails for "
-            f"{graph_name} seed={seed} rounds={rounds}: RMSD={rmsd:.6g}"
-        )
-    assert rmsd < 1.0e-3
+    # This used to xfail when RMSD >= 1e-3, which made the guardrail unable to
+    # fail. Benchmark-path GEM seed parity now holds (all parametrized cases
+    # measured RMSD < 1e-3 on the certified toolchain, 2026-08-05), so the
+    # parity assertion is enforced for real.
+    assert rmsd < 1.0e-3, (
+        f"benchmark-path GEM seed parity regressed for "
+        f"{graph_name} seed={seed} rounds={rounds}: RMSD={rmsd:.6g}"
+    )
 
 
 @pytest.mark.skipif(not OGDF_AVAILABLE, reason="OGDF runner not available")

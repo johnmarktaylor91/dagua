@@ -623,12 +623,17 @@ class PrepareWarmStartStressMajorization(Op):
             target_distances *= unit_scale
 
         if self.config.size_aware:
-            target_distances = _inflate_dense_adjacent_distances(
-                distances=target_distances,
-                radii=_node_bounding_radii(problem.node_sizes),
-                edge_pairs=_adjacent_pair_set(problem.edge_index),
-                scale=float(self.config.size_scale),
-            )
+            radii = _node_bounding_radii(problem.node_sizes)
+            # Without node sizes there are no radii to inflate by; indexing an
+            # empty radii vector would fail on any graph with edges (mirrors
+            # the InflateStressTargetDistances no-sizes skip).
+            if radii.size > 0:
+                target_distances = _inflate_dense_adjacent_distances(
+                    distances=target_distances,
+                    radii=radii,
+                    edge_pairs=_adjacent_pair_set(problem.edge_index),
+                    scale=float(self.config.size_scale),
+                )
 
         with np.errstate(divide="ignore", invalid="ignore"):
             weights = np.where(target_distances > 0.0, 1.0 / np.square(target_distances), 0.0)

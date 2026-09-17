@@ -76,7 +76,18 @@ def layout_circo_pipeline(
         SolveState(),
         RuntimeContext(plan=ExecutionPlan(device=str(edge_index.device))),
     )
-    return state.pos.to(dtype=fidelity_dtype)
+    final_pos = state.pos
+    if final_pos is None:
+        raise RuntimeError("circo pipeline produced no positions.")
+    positions = final_pos.to(dtype=fidelity_dtype)
+    if not bool(torch.isfinite(positions).all()) and bool(torch.isfinite(final_pos).all()):
+        # Deep chains of articulation-linked blocks legitimately grow block
+        # radii past float32 range (reference Graphviz circo produces the
+        # same exponential growth and simply emits the large doubles).
+        # Keep the finite float64 internals instead of casting them into
+        # infinities.
+        return final_pos
+    return positions
 
 
 __all__ = ["build_circo_pipeline", "layout_circo_pipeline"]

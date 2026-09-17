@@ -1,11 +1,16 @@
+"""Smoke coverage for the exhaustive reference glossary builder."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+import pytest
+
 from dagua.reference_glossary import build_glossary
 
 
+@pytest.mark.slow
 def test_reference_glossary_rebuilds(tmp_path: Path):
     result = build_glossary(
         output_dir=str(tmp_path / "glossary"),

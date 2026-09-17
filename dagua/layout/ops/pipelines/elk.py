@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 import torch
 
@@ -110,6 +110,9 @@ def layout_elk_pipeline(
     variant: Optional[str] = None,
     fidelity_dtype: Optional[torch.dtype] = None,
     config: Optional["LayoutConfig"] = None,
+    clusters: Optional[Mapping[str, Any]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
 ) -> torch.Tensor:
     """Run the native ELK Layered-style pipeline.
 
@@ -158,6 +161,14 @@ def layout_elk_pipeline(
         ``float64`` coordinates.
     config : LayoutConfig | None, optional
         Optional config for direction fallback.
+    clusters : mapping[str, Any] | None, optional
+        Cluster membership mapping. When populated, ELK's default
+        ``SEPARATE_CHILDREN`` recursion wrapper is used.
+    cluster_parents : mapping[str, str | None] | None, optional
+        Cluster hierarchy mapping.
+    cluster_labels : mapping[str, str] | None, optional
+        Accepted for API parity with the elkjs adapter. Labels are not passed
+        to the current native node-size pipeline.
 
     Returns
     -------
@@ -169,7 +180,7 @@ def layout_elk_pipeline(
     RuntimeError
         If the composed pipeline does not produce positions.
     """
-    del edge_weights, fidelity_dtype
+    del edge_weights, fidelity_dtype, cluster_labels
     resolved_direction = direction or str(getattr(config, "direction", "DOWN"))
     resolved_node_spacing = node_node_spacing
     if nodeNode is not None:
@@ -196,6 +207,38 @@ def layout_elk_pipeline(
         else:
             raise ValueError("variant must be elk_layered_ns, elk_layered_bk, elk_lp, or None.")
 
+    if clusters:
+        from dagua.layout.ops.elk_compound import ElkRecursiveCompound, _CompoundOptions
+
+        compound_problem = LayoutProblem(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            clusters=dict(clusters),
+            cluster_parents=None if cluster_parents is None else dict(cluster_parents),
+            seed=resolved_seed,
+        )
+        compound_state = ElkRecursiveCompound(
+            root_options=_CompoundOptions(
+                direction=resolved_direction,
+                node_node_spacing=resolved_node_spacing,
+                between_layers_spacing=resolved_between_layers,
+                cycle_breaking_strategy=cycle_breaking_strategy,
+                layering_strategy=layering_strategy,
+                crossing_minimization_strategy=crossing_minimization_strategy,
+                node_placement_strategy=node_placement_strategy,
+                random_seed=resolved_seed,
+                thoroughness=thoroughness,
+            ),
+        ).apply(
+            compound_problem,
+            SolveState(),
+            RuntimeContext(plan=ExecutionPlan(device="cpu")),
+        )
+        if compound_state.pos is None:
+            raise RuntimeError("ELK compound pipeline did not produce final positions.")
+        return compound_state.pos
+
     problem = LayoutProblem(
         edge_index=edge_index,
         num_nodes=num_nodes,
@@ -221,15 +264,50 @@ def layout_elk_pipeline(
     return final_state.pos
 
 
-def layout_elk_layered_ns_pipeline(*args: object, **kwargs: object) -> torch.Tensor:
+def layout_elk_layered_ns_pipeline(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor] = None,
+    seed: Optional[int] = 42,
+    edge_weights: Optional[torch.Tensor] = None,
+    fidelity_dtype: Optional[torch.dtype] = None,
+    config: Optional["LayoutConfig"] = None,
+    clusters: Optional[Mapping[str, Any]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
+    **kwargs: Any,
+) -> torch.Tensor:
     """Run the ELK network-simplex/BK named variant.
+
+    The wrapper names every kwarg the engine's registry dispatch forwards
+    (it filters by inspected signature, so a bare ``*args, **kwargs``
+    wrapper would receive nothing) and pins ``variant``.
 
     Parameters
     ----------
-    *args : object
-        Positional arguments forwarded to :func:`layout_elk_pipeline`.
+    edge_index : torch.Tensor
+        Directed graph edges with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes ``N``.
+    node_sizes : torch.Tensor | None, optional
+        Node box widths and heights with shape ``[N, 2]``.
+    seed : int | None, default=42
+        Public random seed used by ELK-style layer-sweep restarts.
+    edge_weights : torch.Tensor | None, optional
+        Accepted for pipeline API consistency; ignored by this source stage.
+    fidelity_dtype : torch.dtype | None, optional
+        Accepted for engine compatibility. Output is always ``float64``.
+    config : LayoutConfig | None, optional
+        Optional config for direction fallback.
+    clusters : mapping[str, Any] | None, optional
+        Cluster membership mapping.
+    cluster_parents : mapping[str, str | None] | None, optional
+        Cluster hierarchy mapping.
+    cluster_labels : mapping[str, str] | None, optional
+        Accepted for API parity with the elkjs adapter; unused.
     **kwargs : object
-        Keyword arguments forwarded to :func:`layout_elk_pipeline`.
+        Additional parameters forwarded to :func:`layout_elk_pipeline`
+        (spacings, strategy selectors, ``thoroughness``, ...).
 
     Returns
     -------
@@ -237,18 +315,64 @@ def layout_elk_layered_ns_pipeline(*args: object, **kwargs: object) -> torch.Ten
         Node positions with shape ``[N, 2]``.
     """
     kwargs["variant"] = "elk_layered_ns"
-    return layout_elk_pipeline(*args, **kwargs)  # type: ignore[arg-type]
+    return layout_elk_pipeline(
+        edge_index,
+        num_nodes,
+        node_sizes=node_sizes,
+        seed=seed,
+        edge_weights=edge_weights,
+        fidelity_dtype=fidelity_dtype,
+        config=config,
+        clusters=clusters,
+        cluster_parents=cluster_parents,
+        cluster_labels=cluster_labels,
+        **kwargs,
+    )
 
 
-def layout_elk_layered_bk_pipeline(*args: object, **kwargs: object) -> torch.Tensor:
+def layout_elk_layered_bk_pipeline(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor] = None,
+    seed: Optional[int] = 42,
+    edge_weights: Optional[torch.Tensor] = None,
+    fidelity_dtype: Optional[torch.dtype] = None,
+    config: Optional["LayoutConfig"] = None,
+    clusters: Optional[Mapping[str, Any]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
+    **kwargs: Any,
+) -> torch.Tensor:
     """Run the ELK Brandes-Koepf named variant.
+
+    See :func:`layout_elk_layered_ns_pipeline` for why the dispatchable
+    kwargs are named explicitly.
 
     Parameters
     ----------
-    *args : object
-        Positional arguments forwarded to :func:`layout_elk_pipeline`.
+    edge_index : torch.Tensor
+        Directed graph edges with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes ``N``.
+    node_sizes : torch.Tensor | None, optional
+        Node box widths and heights with shape ``[N, 2]``.
+    seed : int | None, default=42
+        Public random seed used by ELK-style layer-sweep restarts.
+    edge_weights : torch.Tensor | None, optional
+        Accepted for pipeline API consistency; ignored by this source stage.
+    fidelity_dtype : torch.dtype | None, optional
+        Accepted for engine compatibility. Output is always ``float64``.
+    config : LayoutConfig | None, optional
+        Optional config for direction fallback.
+    clusters : mapping[str, Any] | None, optional
+        Cluster membership mapping.
+    cluster_parents : mapping[str, str | None] | None, optional
+        Cluster hierarchy mapping.
+    cluster_labels : mapping[str, str] | None, optional
+        Accepted for API parity with the elkjs adapter; unused.
     **kwargs : object
-        Keyword arguments forwarded to :func:`layout_elk_pipeline`.
+        Additional parameters forwarded to :func:`layout_elk_pipeline`
+        (spacings, strategy selectors, ``thoroughness``, ...).
 
     Returns
     -------
@@ -256,18 +380,64 @@ def layout_elk_layered_bk_pipeline(*args: object, **kwargs: object) -> torch.Ten
         Node positions with shape ``[N, 2]``.
     """
     kwargs["variant"] = "elk_layered_bk"
-    return layout_elk_pipeline(*args, **kwargs)  # type: ignore[arg-type]
+    return layout_elk_pipeline(
+        edge_index,
+        num_nodes,
+        node_sizes=node_sizes,
+        seed=seed,
+        edge_weights=edge_weights,
+        fidelity_dtype=fidelity_dtype,
+        config=config,
+        clusters=clusters,
+        cluster_parents=cluster_parents,
+        cluster_labels=cluster_labels,
+        **kwargs,
+    )
 
 
-def layout_elk_lp_pipeline(*args: object, **kwargs: object) -> torch.Tensor:
+def layout_elk_lp_pipeline(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: Optional[torch.Tensor] = None,
+    seed: Optional[int] = 42,
+    edge_weights: Optional[torch.Tensor] = None,
+    fidelity_dtype: Optional[torch.dtype] = None,
+    config: Optional["LayoutConfig"] = None,
+    clusters: Optional[Mapping[str, Any]] = None,
+    cluster_parents: Optional[Mapping[str, Optional[str]]] = None,
+    cluster_labels: Optional[Mapping[str, str]] = None,
+    **kwargs: Any,
+) -> torch.Tensor:
     """Run the ELK longest-path/simple-placement named variant.
+
+    See :func:`layout_elk_layered_ns_pipeline` for why the dispatchable
+    kwargs are named explicitly.
 
     Parameters
     ----------
-    *args : object
-        Positional arguments forwarded to :func:`layout_elk_pipeline`.
+    edge_index : torch.Tensor
+        Directed graph edges with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes ``N``.
+    node_sizes : torch.Tensor | None, optional
+        Node box widths and heights with shape ``[N, 2]``.
+    seed : int | None, default=42
+        Public random seed used by ELK-style layer-sweep restarts.
+    edge_weights : torch.Tensor | None, optional
+        Accepted for pipeline API consistency; ignored by this source stage.
+    fidelity_dtype : torch.dtype | None, optional
+        Accepted for engine compatibility. Output is always ``float64``.
+    config : LayoutConfig | None, optional
+        Optional config for direction fallback.
+    clusters : mapping[str, Any] | None, optional
+        Cluster membership mapping.
+    cluster_parents : mapping[str, str | None] | None, optional
+        Cluster hierarchy mapping.
+    cluster_labels : mapping[str, str] | None, optional
+        Accepted for API parity with the elkjs adapter; unused.
     **kwargs : object
-        Keyword arguments forwarded to :func:`layout_elk_pipeline`.
+        Additional parameters forwarded to :func:`layout_elk_pipeline`
+        (spacings, strategy selectors, ``thoroughness``, ...).
 
     Returns
     -------
@@ -275,7 +445,19 @@ def layout_elk_lp_pipeline(*args: object, **kwargs: object) -> torch.Tensor:
         Node positions with shape ``[N, 2]``.
     """
     kwargs["variant"] = "elk_lp"
-    return layout_elk_pipeline(*args, **kwargs)  # type: ignore[arg-type]
+    return layout_elk_pipeline(
+        edge_index,
+        num_nodes,
+        node_sizes=node_sizes,
+        seed=seed,
+        edge_weights=edge_weights,
+        fidelity_dtype=fidelity_dtype,
+        config=config,
+        clusters=clusters,
+        cluster_parents=cluster_parents,
+        cluster_labels=cluster_labels,
+        **kwargs,
+    )
 
 
 __all__ = [

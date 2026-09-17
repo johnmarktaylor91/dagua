@@ -188,9 +188,76 @@ def test_explicit_dagua_native_forwards_user_config_to_pipeline(
     pos = dagua.layout(graph, config)
 
     assert pos.shape == (graph.num_nodes, 2)
-    assert captured["config"] is config
+    # Dispatch forwards an equal COPY of the caller's config (copy-before-
+    # mutate, WP-23): pin the forwarding contract, not object identity, and
+    # pin that the caller's object is never mutated.
+    assert captured["config"] == config
     assert captured["config"].edge_equalize_polish is False
     assert captured["config"].direction == "LR"
-    assert captured["config"].flex is flex
+    assert captured["config"].flex == flex
+    assert config.direction == "LR"
+    assert config.flex is flex
     assert captured["clusters"] is graph.clusters
     assert captured["cluster_parents"] is graph.cluster_parents
+
+
+def test_registry_counts_match_certified_inventory() -> None:
+    """Pin the live registry counts against the certified inventory.
+
+    Baseline was 385 ops (bare import) / 114 pipelines at 181d471c;
+    WP-22a removed 5 zero-reference ops (of the 6 TRIAGE-approved
+    candidates -- ``fmmm_uncoarsen_loop`` turned out to be live via the
+    ``_UncoarsenLoop`` alias in ``pipelines/fmmm.py`` and was kept), so
+    the bare-import count is 380. Two more ops
+    (``directed_portfolio_route``, ``undirected_portfolio_route``)
+    register lazily when the native support modules first import (any
+    ``dagua_native`` run does this), so the test imports them explicitly
+    and pins the order-independent all-in count of 382. Any other drift
+    (a module silently dropping out of auto-discovery, an incidental
+    transitive-import registration disappearing) must fail loudly here.
+    """
+    import dagua.layout.ops.pipelines.native_directed  # noqa: F401
+    import dagua.layout.ops.pipelines.native_undirected  # noqa: F401
+    from dagua.layout.ops import OP_REGISTRY
+
+    assert len(OP_REGISTRY) == 382
+    assert len(PIPELINE_REGISTRY) == 114
+
+
+def test_trimmed_zero_reference_ops_stay_gone() -> None:
+    """The 5 trimmed zero-reference ops must not silently reappear."""
+    from dagua.layout.ops import OP_REGISTRY
+
+    trimmed = (
+        "crossing_swap_polish",
+        "family_conditional_init",
+        "gem_convergence_check",
+        "graphopt_apply_displacement",
+        "maxent_majorization_step",
+    )
+    for name in trimmed:
+        assert name not in OP_REGISTRY
+
+
+def test_register_op_rejects_unnamed_op_classes() -> None:
+    """``@register_op`` must fail loudly on classes without a proper name.
+
+    A silent skip would leave the op invisibly absent from the registry --
+    the only silent-drop vector in op discovery.
+    """
+    from dagua.layout.ops.base import Op
+    from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
+    from dagua.layout.ops.taxonomy import register_op
+
+    with pytest.raises(ValueError, match="name"):
+
+        @register_op
+        class _NamelessOp(Op):
+            def apply(
+                self,
+                problem: LayoutProblem,
+                state: SolveState,
+                ctx: RuntimeContext,
+            ) -> SolveState:
+                del problem, ctx
+                return state

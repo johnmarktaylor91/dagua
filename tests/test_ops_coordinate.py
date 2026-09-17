@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import sys
+
 import torch
 
 from dagua.layout.ops.coordinate import (
+    _BRANDES_KOEPF_APPLIED_KEY,
+    BrandesKoepfHorizontalRefine,
+    BrandesKoepfHorizontalRefineConfig,
     BrandesKopf4Pass,
     BrandesKopf4PassConfig,
     BucheimWalkerTree,
@@ -15,6 +20,8 @@ from dagua.layout.ops.coordinate import (
     ComponentTilingCrossingRiskConfig,
     RankRowSnap,
     RankRowSnapConfig,
+    ReingoldTilfordTree,
+    _cluster_depths,
     _enforce_row_adjacent_min_spacing,
 )
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
@@ -403,3 +410,138 @@ def test_component_tiling_crossing_risk_skips_connected_graph() -> None:
 
     assert result.pos is not None
     assert torch.equal(result.pos, pos)
+
+
+def test_brandes_koepf_refine_survives_wide_rank_at_default_recursion_limit() -> None:
+    """WP05-F01 regression: wide-rank layered DAGs must not hit the recursion limit.
+
+    Builds the reported crash shape -- a 6-node chain feeding a 1500-wide
+    final rank, with in-rank order reversed against node-id order so the
+    first-processed compaction block sits at the far right of the wide rank.
+    The pre-fix recursive ``_place_compaction_block`` raised RecursionError
+    here under Python's default limit of 1000; the iterative version must
+    complete with finite coordinates.
+    """
+    num_wide = 1500
+    num_nodes = 6 + num_wide
+    chain_edges = [(node, node + 1) for node in range(5)]
+    fan_edges = [(5, wide) for wide in range(6, num_nodes)]
+    problem = LayoutProblem(
+        edge_index=_edge_index(chain_edges + fan_edges),
+        num_nodes=num_nodes,
+        node_sizes=torch.ones((num_nodes, 2), dtype=torch.float32),
+    )
+
+    layers = torch.tensor([0, 1, 2, 3, 4, 5] + [6] * num_wide, dtype=torch.long)
+    pos = torch.zeros((num_nodes, 2), dtype=torch.float32)
+    for rank, node in enumerate(range(6)):
+        pos[node, 1] = float(rank)
+    for wide in range(6, num_nodes):
+        # Descending x with id: the LOWEST wide id (processed first in the
+        # compaction sweep) lands at the far right of the rank, so its
+        # left-block chain covers the whole 1500-wide rank.
+        pos[wide, 0] = float(num_nodes - 1 - wide)
+        pos[wide, 1] = 6.0
+    state = SolveState(pos=pos.clone(), layers=layers)
+
+    previous_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        result = BrandesKoepfHorizontalRefine(BrandesKoepfHorizontalRefineConfig()).apply(
+            problem, state, RuntimeContext()
+        )
+    finally:
+        sys.setrecursionlimit(previous_limit)
+
+    assert result.extras[_BRANDES_KOEPF_APPLIED_KEY] is True
+    assert result.pos is not None
+    assert torch.isfinite(result.pos).all()
+    assert torch.equal(result.pos[:, 1], pos[:, 1])
+
+
+def test_cluster_depths_tolerates_parent_cycles() -> None:
+    """WP05-F02 regression: cyclic cluster parents must not recurse forever.
+
+    Every cluster participating in a parent cycle is treated as a root;
+    clusters pointing INTO a cycle keep their parent.
+    """
+    depths = _cluster_depths(("A", "B", "C"), {"A": "B", "B": "A", "C": "A"})
+    assert depths == {"A": 0, "B": 0, "C": 1}
+
+    self_parent_depths = _cluster_depths(("A",), {"A": "A"})
+    assert self_parent_depths == {"A": 0}
+
+    acyclic_depths = _cluster_depths(("A", "B", "C"), {"B": "A", "C": "B"})
+    assert acyclic_depths == {"A": 0, "B": 1, "C": 2}
+
+
+def test_bucheim_walker_tree_restores_recursion_limit() -> None:
+    """WP05-F08 regression: the raised recursion limit must not leak."""
+    num_nodes = 700
+    problem = LayoutProblem(
+        edge_index=_edge_index([(node, node + 1) for node in range(num_nodes - 1)]),
+        num_nodes=num_nodes,
+        node_sizes=torch.ones((num_nodes, 2), dtype=torch.float32),
+    )
+
+    original_limit = sys.getrecursionlimit()
+    pinned_limit = 1000
+    sys.setrecursionlimit(pinned_limit)
+    try:
+        result = BucheimWalkerTree(BucheimWalkerTreeConfig()).apply(
+            problem, SolveState(), RuntimeContext()
+        )
+        assert sys.getrecursionlimit() == pinned_limit
+    finally:
+        sys.setrecursionlimit(original_limit)
+
+    assert result.pos is not None
+    assert torch.isfinite(result.pos).all()
+
+
+def test_reingold_tilford_tree_restores_recursion_limit() -> None:
+    """WP05-F08 regression: the raised recursion limit must not leak."""
+    num_nodes = 700
+    problem = LayoutProblem(
+        edge_index=_edge_index([(node, node + 1) for node in range(num_nodes - 1)]),
+        num_nodes=num_nodes,
+        node_sizes=torch.ones((num_nodes, 2), dtype=torch.float32),
+    )
+
+    original_limit = sys.getrecursionlimit()
+    pinned_limit = 1000
+    sys.setrecursionlimit(pinned_limit)
+    try:
+        result = ReingoldTilfordTree().apply(problem, SolveState(), RuntimeContext())
+        assert sys.getrecursionlimit() == pinned_limit
+    finally:
+        sys.setrecursionlimit(original_limit)
+
+    assert result.pos is not None
+    assert torch.isfinite(result.pos).all()
+
+
+def test_cluster_depths_survives_deep_linear_nesting_both_query_orders() -> None:
+    """B2-F01 regression: ~1990-deep valid linear nesting must not RecursionError.
+
+    The pre-fix memoized recursion crashed at ~998 levels when the deepest
+    cluster was queried first (one frame per level), while a root-first query
+    order survived via memoization -- both query orders are pinned here, at
+    Python's default recursion limit.
+    """
+    depth = 1990
+    names = [f"c{index:06d}" for index in range(depth)]
+    # parent of c_i is c_{i+1}: root is LAST, so names-as-given queries the
+    # deepest cluster first (the pre-fix crash order).
+    parent_of = {names[index]: names[index + 1] for index in range(depth - 1)}
+
+    previous_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        for query_order in (tuple(names), tuple(reversed(names))):
+            depths = _cluster_depths(query_order, parent_of)
+            assert depths[names[-1]] == 0
+            assert depths[names[0]] == depth - 1
+            assert len(depths) == depth
+    finally:
+        sys.setrecursionlimit(previous_limit)
