@@ -1,0 +1,8 @@
+BLOCKER=FIXED
+MAJORS=4/4
+MINORS=7/7_addressed(5_fixed,2_docketed)
+DISPUTED=1
+OPUS=folded
+TESTS=ruff_pass;mypy_cli_pass;tests_eval_478_pass_11_deselected;P5_harness_18_pass;layout_gate_385_pass_1_skip_1_out_of_scope_baseline_fail_reproduced
+HEAD_SHA=35ae629a
+PYTHONPATH_PROOF=/home/jtaylor/.claude/worktrees/dagua-ruler-v4-impl/dagua/__init__.py;/home/jtaylor/.claude/worktrees/dagua-ruler-v4-impl/dagua/eval/ruler_v4/fit/__init__.py

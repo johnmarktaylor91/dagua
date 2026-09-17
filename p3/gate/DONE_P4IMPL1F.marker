@@ -1,0 +1,5 @@
+HEAD_SHA=e5fb7683b885cd10e7eb4c82b60c1cbc64b58fb8 BLOCKERS_CLOSED=2/2 REGRESSION_CLOSED=yes
+FINDINGS_CLOSED=22/22 GOLDENS_REPLACED=7
+REPRO_QUOTES=U30_sweep=8/8_scenes_exact_zero_across_all_12_alpha_rows, U20a_column=0.0, U21_weight_delta=0.0
+TESTS_PASS=246/246 PYTHONPATH_PROOF=/home/jtaylor/.claude/worktrees/dagua-ruler-v4-impl/dagua/__init__.py;/home/jtaylor/.claude/worktrees/dagua-ruler-v4-impl/dagua/eval/ruler_v4/__init__.py
+OPEN=not_committed_per_active_AGENTS_instruction; unrelated_pre_existing_failures: collateral test_quality_high_smoke_spends_more_and_scores_near_draft and final test_center_port_style
