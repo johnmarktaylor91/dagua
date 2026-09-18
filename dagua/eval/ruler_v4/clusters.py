@@ -1002,8 +1002,8 @@ def _signed_top_padding(box: BoxGeometry, region: _ClusterRegion) -> Scalar:
         Positive inset inside the boundary, zero at contact, and negative outside.
     """
 
-    boundary = _region_top_at_x(region, float(box.center[0]))
-    near_edge = float(box.center[1] + box.half_extents[1])
+    boundary = _region_top_at_x(region, as_float(box.center[0]))
+    near_edge = keep(box.center[1] + box.half_extents[1])
     return boundary - near_edge
 
 
@@ -1196,7 +1196,7 @@ def _region_relation_area(
     regions = (left,) if right is None else (left, right)
     breakpoints = sorted(
         {
-            float(box.center[0]) + offset
+            as_float(box.center[0]) + offset
             for region in regions
             for box in region.boxes
             for offset in (
@@ -1209,7 +1209,7 @@ def _region_relation_area(
     )
     scale = max(
         1.0,
-        float(4.0 * torch.prod(left.bounds.half_extents)),
+        as_float(4.0 * torch.prod(left.bounds.half_extents)),
     )
     interval_tolerance = 1e-11 * scale / max(1, len(breakpoints) - 1)
 
@@ -1374,7 +1374,7 @@ def U25(scene: Scene) -> FacetResult:
         center = torch.median(points, dim=0).values
         radii = _row_norms_or_zero(points - center)
         radius = keep(torch.median(radii))
-        radius_q90 = float(torch.quantile(radii, 0.9, interpolation="lower"))
+        radius_q90 = as_float(torch.quantile(radii, 0.9, interpolation="lower"))
         fraction = len(members) / scene.node_count
         diameter = _induced_diameter(scene, members)
         elongation = 1.0 + 0.5 * max(0.0, diameter / math.sqrt(len(members)) - 1.0)
@@ -1677,7 +1677,9 @@ def U27(scene: Scene, alpha_grid_index: Optional[int]) -> FacetResult:
         for name, members in clusters.items()
         for route in resolved_routes(scene)
         if not set(scene.graph.edges[route.edge_index]) & set(members)
-        and float(torch.sum(torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1)))
+        and as_float(
+            torch.sum(torch.linalg.vector_norm(route.points[1:] - route.points[:-1], dim=1))
+        )
         > 0.0
     ]
     route_value = global_blend(route_intrusions, route_weights) if route_intrusions else None
