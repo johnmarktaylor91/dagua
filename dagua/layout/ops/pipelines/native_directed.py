@@ -5845,10 +5845,12 @@ def layout_native_directed_portfolio(
                 force_cost,
                 "directed_fcose",
                 fcose_seeds,
-                package_gate=lambda package: n < 120
-                or _predicted_arm_budget_available(
-                    config,
-                    package.generation_dwu + package.reserved_score_dwu,
+                package_gate=lambda package: (
+                    n < 120
+                    or _predicted_arm_budget_available(
+                        config,
+                        package.generation_dwu + package.reserved_score_dwu,
+                    )
                 ),
             )
             if fcose_seeds:
