@@ -1,0 +1,65 @@
+# gitleaks false positives, reviewed 2026-09-18 during the dagua reconciliation merge.
+# Never bypass the pre-push hook with --no-verify; clear false positives here.
+#
+# 1. .secrets.baseline is a detect-secrets baseline (v1.5.0). By design it stores
+#    SHA-1 HASHES of candidate strings, not the strings themselves. gitleaks'
+#    generic-api-key rule matches any 40-char hex value, so every hashed entry in
+#    the baseline is reported. These are hashes of already-reviewed findings.
+#
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:140
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:147
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:154
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:161
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:168
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:175
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:182
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:189
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:196
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:203
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:210
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:217
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:224
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:231
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:238
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:245
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:259
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:266
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:273
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:280
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:287
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:294
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:301
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:308
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:315
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:322
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:329
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:336
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:343
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:350
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:357
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:364
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:371
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:378
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:385
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:392
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:399
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:406
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:413
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:420
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:427
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:434
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:441
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:448
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:457
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:464
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:471
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:478
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:485
+8c841ed7d7676009c38e346ccb1ea7b11cbf7edd:.secrets.baseline:generic-api-key:492
+#
+# 2. dagua/eval/ruler_v4/fit/access.py: W08_LEDGER_KEY is a ledger key NAME, a
+#    20-character hyphenated lowercase identifier in the same style as the
+#    adjacent H_JND_LEDGER_KEY = "test-h-jnd-branch". It is not a credential:
+#    not hex, not base64, and used nowhere except as a dictionary key.
+#
+063e851aa131d9122302c29434baaeaa938f5a02:dagua/eval/ruler_v4/fit/access.py:generic-api-key:18
