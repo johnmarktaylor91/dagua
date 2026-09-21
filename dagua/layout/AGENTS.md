@@ -132,4 +132,3 @@ pytest tests/ -m smoke -x --tb=short
 
 Layout tests check convergence properties, not exact coordinates -- optimization is stochastic.
 Pipeline fidelity tests check bit-identical output against archive reimplementations.
-

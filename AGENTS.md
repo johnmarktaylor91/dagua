@@ -373,4 +373,3 @@ Read `internal-notes/knowledge/scaling_principles.md` before any task at
 this scale. Key rules: budget peak memory (3-4x base), gate on topology
 sketch (N+E+depth+degree), measure before choosing GPU vs CPU, every fix
 creates a guardrail, test at 100K/1M/10M (not single smoke test).
-

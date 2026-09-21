@@ -56,4 +56,3 @@ pytest tests/test_render/ -x --tb=short
 
 Render tests check structural output (SVG element count, figure created),
 not pixel-perfect comparison.
-
