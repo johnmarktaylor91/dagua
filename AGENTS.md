@@ -1,4 +1,129 @@
-# Dagua — Implementation Guide
+# Dagua project instructions
+
+Roles are functional: the coordinator owns design and integration, implementers own scoped changes, and reviewers verify evidence. The same rules apply to every harness.
+
+## Project Overview
+
+Dagua is a GPU-accelerated, differentiable graph layout engine built on PyTorch. It replaces
+Graphviz's layout algorithms with continuous optimization: node positions are learnable
+parameters, layout aesthetics are loss functions, and the solver is `loss.backward();
+optimizer.step()`. Named after the Dagua River in Colombia — DAG + agua.
+
+## Architecture
+
+See `internal-notes/architecture.md` for the full map.
+
+Key entry points:
+- main: `dagua/__init__.py` (public API), `dagua/graph.py` (DaguaGraph), `dagua/cli.py` (CLI)
+- tests: `pytest tests/ -x --tb=short`
+- build: `uv pip install -e ".[dev]"` / `python -m build`
+
+## How to Read This Codebase
+
+- Start with `dagua/__init__.py` for the public API surface, then `dagua/graph.py` for DaguaGraph
+- Layout algorithms live in `dagua/layout/ops/` (268 registered ops) composed into pipelines
+  in `dagua/layout/ops/pipelines/` (23 algorithms). The engine in `dagua/layout/engine.py`
+  dispatches to these pipelines via `LayoutConfig(algorithm="fr")`.
+- Complexity lives in `dagua/layout/engine.py` (optimization loop + pipeline dispatch),
+  `dagua/layout/ops/` (composable primitives), and `dagua/eval/` (benchmark/comparison system)
+- Stable: graph data model, styles, config, render backends, composable ops, algorithm pipelines
+- In-flux: eval system, edge optimization, default algorithm tuning
+
+## Design Principles
+
+1. **PyTorch is the only required dependency** (matplotlib optional for rendering)
+2. **Constraints are composable loss functions** — users can write custom ones in 3 lines
+3. **Layout and rendering are separate** — `layout()` returns coordinates
+4. **Layout engine is headless** — takes tensors, not Graph objects
+5. **Domain knowledge enters as loss terms**, not algorithmic modifications
+6. **GPU acceleration is automatic** — same code on CPU or CUDA via `device=`
+7. **Steal Graphviz's aesthetic wisdom** (spacings, weight ratios) but not its architecture
+8. **Layout algorithms are composable op pipelines** -- 268 registered primitives, 23 algorithms
+   built purely by composing them. Monolithic reimplementations archived at `dagua/layout/_archive/`.
+
+## Key API Surface
+
+```python
+import dagua
+
+# Tier 0: Zero config
+dagua.draw(g)
+dagua.set_theme("dark")
+
+# Tier 1: Flat configure + flex
+dagua.configure(font_size=10, node_sep=40, background_color="#1A1E24")
+with dagua.defaults(theme="minimal"):
+    dagua.draw(g)
+
+# Flex: soft layout targets
+g.pin("input", x=0, y=0)
+g.align(["a", "b", "c"], axis="x")
+config = dagua.LayoutConfig(
+    flex=dagua.LayoutFlex(
+        node_sep=dagua.Flex.firm(40),
+    )
+)
+
+# Tier 1.5: Algorithm selection
+config = dagua.LayoutConfig(algorithm="fr")  # Fruchterman-Reingold
+config = dagua.LayoutConfig(algorithm="kk", algorithm_params={"spring_k": 1.5})
+# 24 algorithms: fr, kk, fa2, stress_sgd, sfdp, umap, tsnet, sugiyama, spectral, ...
+
+# Tier 2: Full control
+pos = dagua.layout(g, config)
+dagua.render(g, pos, config, output="graph.png")
+```
+
+## Relationship to TorchLens
+
+Dagua is standalone. TorchLens is a downstream consumer that provides domain-specific
+neural network constraints. The dependency is one-way: TorchLens depends on Dagua.
+
+## Dispatch Configuration
+
+### Branch Strategy
+Implementers work on feature branches: `task/<task-id>`
+Default: one branch at a time besides main. Don't spawn extras unless asked.
+
+### Task ID Convention
+Descriptive kebab-case: `fix-trace-module`, `add-sweep-dataclass`
+
+## What NOT to Dispatch
+
+- API design decisions (discuss with user first)
+- Changes to public interfaces without approval
+- CI/CD, deployment, release configs
+- AGENTS.md, internal-notes/*.md modifications
+
+## Documentation Maintenance
+
+Full checklist: `docs/MAINTENANCE_CHECKLIST.md`
+
+Generated docs (rebuild when their sources change):
+- Glossary: `scripts/build_glossary.py` (API/config/styles/losses/metrics/CLI)
+- Gallery: `scripts/build_gallery.py` (rendering defaults/example graphs)
+- Explainer: `scripts/build_how_dagua_works.py` (layout pipeline/routing)
+- Visual audit: `scripts/build_visual_audit.py`
+- Notebooks + `docs/LLM_TUTORIAL.md`: update when API shape or workflows change
+
+## Benchmark Iteration
+
+- **Data integrity:** `results.json` and `positions/` (per-run .pt files) MUST stay in sync.
+  `fidelity_analysis.py` aborts if >10 engines have results but missing positions.
+  Some scripts also support consolidated `positions.h5` (HDF5) format.
+  - Validate: `python scripts/validate_benchmark_integrity.py`
+  - Purge variants: `python scripts/safe_purge_variants.py <engines> --confirm`
+    (purges BOTH stores atomically -- never purge one manually)
+  - Post-analysis: `python scripts/validate_fidelity_output.py --data <dir> --previous <old_dir>`
+- Benchmark/report workflow is persistent and reuse-aware (non-Dagua competitors cached)
+- Long runs write `progress.json`; check with `dagua benchmark-status` or `dagua benchmark-watch`
+- Key report artifacts: `eval_output/report/benchmark_deltas.md`, `layout_similarity.md`,
+  `placement_summary.md`, `placement_tuning.md`
+- Placement iteration loop:
+  1. `dagua placement-tune --output-dir eval_output/report`
+  2. Inspect `placement_tuning.md`
+  3. Validate visually in `visual_review_session`
+  4. Rerun standard benchmark with cached competitors
 
 ## Build & Packaging
 
@@ -17,6 +142,7 @@ Types: `fix:` (patch), `feat:` (minor), `feat!:` (major), `chore:`, `docs:`, `ci
 `refactor:`, `test:`, `perf:`.
 
 ## Testing Tiers
+
 ```
 # Tier 1 — Fast (run on every change)
 pytest tests/ -x --tb=short -q -m "not slow and not benchmark and not rare"
@@ -28,7 +154,8 @@ pytest tests/ -x --tb=short
 ruff check . --fix && mypy --follow-imports=silent dagua/cli.py && pytest tests/ -v
 ```
 
-## Quality Gates (every Codex task must pass)
+## Quality Gates (every implementation task must pass)
+
 ```
 # Tier 1: Run FIRST during iteration (fast, targeted)
 ruff check . --fix
@@ -101,6 +228,7 @@ Key project facts for comment context:
 - Keep the strict CLI module passing; treat broader check as debt-reduction pressure
 
 ## PR Workflow
+
 ```bash
 # Create
 gh pr create --title "<title>" --body "<description>"
@@ -245,3 +373,4 @@ Read `internal-notes/knowledge/scaling_principles.md` before any task at
 this scale. Key rules: budget peak memory (3-4x base), gate on topology
 sketch (N+E+depth+degree), measure before choosing GPU vs CPU, every fix
 creates a guardrail, test at 100K/1M/10M (not single smoke test).
+
