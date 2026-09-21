@@ -1,4 +1,16 @@
-# Layout Subpackage -- Implementation Guide
+# Dagua dagua/layout instructions
+
+Roles are functional: the coordinator owns design and integration, implementers own scoped changes, and reviewers verify evidence. The same rules apply to every harness.
+
+Implementation details, dependency rules, gotchas, and test commands follow.
+
+Key design constraint: the layout engine is **headless** -- operates on tensors,
+not Graph objects. `Graph.layout()` extracts tensors, calls into this package,
+stores results back.
+
+Two layers: core engine (constraints + optimization) and composable ops (268
+primitives in `ops/`, composed into 23 algorithm pipelines in `ops/pipelines/`).
+`LayoutConfig(algorithm="fr")` dispatches to ops pipelines.
 
 ## Architecture Overview
 
@@ -120,3 +132,4 @@ pytest tests/ -m smoke -x --tb=short
 
 Layout tests check convergence properties, not exact coordinates -- optimization is stochastic.
 Pipeline fidelity tests check bit-identical output against archive reimplementations.
+

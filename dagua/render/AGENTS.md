@@ -1,4 +1,11 @@
-# Render Subpackage — Implementation Guide
+# Dagua dagua/render instructions
+
+Roles are functional: the coordinator owns design and integration, implementers own scoped changes, and reviewers verify evidence. The same rules apply to every harness.
+
+Implementation details, dependency rules, gotchas, and test commands follow.
+
+Key design constraint: renderers accept structured data, not Graph objects.
+Three independent backends (mpl, svg, graphviz), no shared state.
 
 ## Modules
 
@@ -49,3 +56,4 @@ pytest tests/test_render/ -x --tb=short
 
 Render tests check structural output (SVG element count, figure created),
 not pixel-perfect comparison.
+
