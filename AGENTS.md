@@ -132,7 +132,7 @@ Generated docs (rebuild when their sources change):
 - Install (test): `uv pip install -e ".[test]"`
 - CLI entry point: `dagua` → `dagua.cli:main`
 - Version: `pyproject.toml:project.version` + `dagua/__init__.py:__version__`
-- Release: semantic-release v9 on push to main, publishes to PyPI via OIDC
+- Release: semantic-release v9 on push to main publishes to PyPI via OIDC, so push to main only when JMT asks.
 
 ## Commit Convention
 
@@ -230,7 +230,7 @@ Key project facts for comment context:
 ## PR Workflow
 
 ```bash
-# Create
+# Create (only when JMT asks: a PR is outward in his name)
 gh pr create --title "<title>" --body "<description>"
 
 # After merge (user says "merged" or "clean up")
