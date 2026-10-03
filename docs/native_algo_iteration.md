@@ -31,7 +31,7 @@ python scripts/run_benchmark.py --engines originals --seeds 1 --seed-start 42 \
 WORKERS=4 bash scripts/run_quality_runtime_pipeline.sh \
     eval_output/originals_1seed_quality eval_output/originals_1seed_quality_report
 ```
-(The exact chained runner used: `~/agent-research/dagua/megasprint_completeness/run_originals_quality.sh`.)
+(The exact chained runner used: `~/private-notes/research/dagua/megasprint_completeness/run_originals_quality.sh`.)
 
 `--engines originals` selects only the external reference engines (tagged `original_for`), NOT dagua
 reimplementations (`classic_*`, `*_reimpl`) and NOT the native algo. `--engines reimpl` / `all` are
@@ -70,7 +70,7 @@ the other filters.
   `feedback_glados_sacred_holdout.md`.
 - **Positions must always be saved** (never `--no-positions`) so metrics are recomputable later.
 - **Honest ruler only.** Don't Goodhart the metric; the r83 ruler is frozen precisely to resist that.
-- Useful files go to durable locations (repo, `~/agent-research/`, `~/tools/`), never `/tmp`
+- Useful files go to durable locations (repo, `~/private-notes/research/`, `~/tools/`), never `/tmp`
   (48h purge). Reference sources: `~/tools/dagua-refs/` (+ `REFERENCE_SOURCES.md` manifest).
 
 ## Concurrent state at handoff (2026-07-14)
@@ -81,4 +81,4 @@ the other filters.
   `/mnt/locker/jt3295/dagua_closeout_benchmark`). Do not disturb it; it runs at low workers.
 - Both-sides benchmark pairing merged (every reimpl paired with its external original).
 - Reference sources being consolidated to `~/tools/dagua-refs/` with a `REFERENCE_SOURCES.md` manifest.
-- Sprint log / durable notes: `~/agent-research/dagua/megasprint_completeness/STATE.md`.
+- Sprint log / durable notes: `~/private-notes/research/dagua/megasprint_completeness/STATE.md`.

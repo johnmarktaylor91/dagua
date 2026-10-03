@@ -12,7 +12,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from scripts.visual_parity.io import read_coverage_matrix, read_ledger
 from scripts.visual_parity.ledger import assert_rebase_comparable
 
-RESEARCH_DIR = Path("internal-notes/research/sprint_visual_parity_v2")
+RESEARCH_DIR = Path("private-notes/research/sprint_visual_parity_v2")
 COVERAGE_PATH = RESEARCH_DIR / "coverage_matrix.json"
 LEDGER_PATH = RESEARCH_DIR / "ledger.json"
 DASHBOARD_DIR = Path("eval_output/visual_parity_v2/dashboard")

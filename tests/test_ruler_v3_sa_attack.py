@@ -59,7 +59,7 @@ FAMILY_SEEDS = {
     "ported": 53,
 }
 # Saved GG-3 attack payloads vendored from the megasprint campaign artifacts
-# (formerly ~/agent-research/dagua/megasprint/gg3_* and the gitignored
+# (formerly ~/private-notes/research/dagua/megasprint/gg3_* and the gitignored
 # tmp/sol_gg3_diag) so the suite is self-contained on any checkout.
 _GG3_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "gg3"
 SAVED_GG3_DIR = _GG3_FIXTURES / "gg3_fresh"

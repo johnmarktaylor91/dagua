@@ -10,7 +10,7 @@ BENCH=eval_output/benchmark_5seed_final
 REPORT=eval_output/fidelity_report_final
 SEND=$HOME/.claude/scripts/send-to-jmt.sh
 
-export LD_LIBRARY_PATH=~/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=$HOME/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
 # carry the speedup: heavy fidelity ports are single-threaded sequential
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 

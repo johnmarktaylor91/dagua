@@ -2,7 +2,7 @@
 # r71 final assembly: wait for gem rebench, then union re-analysis across all overlay
 # stores -> merged per_combo -> report v2. Zero-LLM; resumable.
 set -uo pipefail
-cd .
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 LOG(){ echo "[$(date '+%F %T')] $*"; }
 

@@ -3,7 +3,7 @@
 # Usage: ./scripts/clean-tasks.sh [days|all]
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)" 2>/dev/null || true
-TASK_DIR="internal-notes/tasks"
+TASK_DIR="private-notes/tasks"
 [ ! -d "$TASK_DIR" ] && echo "No tasks." && exit 0
 
 if [ "${1:-}" = "all" ]; then

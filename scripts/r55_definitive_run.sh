@@ -63,7 +63,7 @@ fi
 
 # Phase C
 echo "--- consolidate_positions_hdf5 $(date -Iseconds) ---"
-export LD_LIBRARY_PATH=~/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=$HOME/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
 
 python3 scripts/consolidate_positions_hdf5.py \
     --input "$BENCH_OUT" \

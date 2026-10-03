@@ -427,7 +427,7 @@ class OverlapProjectionGated(Op):
     Projection is a non-differentiable, potentially destructive constraint:
     on dense overlap cliques the projector can trade a full overlap cleanup
     for materially worse crossings or edge-length uniformity (see
-    ``internal-notes/research/r79_native/P3B2_STRESS_FORENSICS.md``, fix
+    ``private-notes/research/r79_native/P3B2_STRESS_FORENSICS.md``, fix
     item 5). This op computes a cheap proxy composite before and after
     projection using the real overlap/crossing/edge-length-CV metric
     formulas and keeps the projected result only if the proxy does not

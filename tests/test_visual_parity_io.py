@@ -10,7 +10,7 @@ import pytest
 
 from scripts.visual_parity import io
 
-RESEARCH_DIR = Path("internal-notes/research/sprint_visual_parity_v2")
+RESEARCH_DIR = Path("private-notes/research/sprint_visual_parity_v2")
 STORE_READERS: Dict[str, Callable[[Path], Dict[str, object]]] = {
     "coverage_matrix.json": io.read_coverage_matrix,
     "ledger.json": io.read_ledger,

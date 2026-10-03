@@ -4,9 +4,9 @@
 set -euo pipefail
 
 # Use conda py311 env explicitly -- cron's minimal PATH finds /usr/bin/python (2.7) otherwise
-export PATH="~/anaconda3/envs/py311/bin:$PATH"
+export PATH="$HOME/anaconda3/envs/py311/bin:$PATH"
 
-cd .
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 LOG="eval_output/post_benchmark_pipeline.log"
 exec > >(tee -a "$LOG") 2>&1
 

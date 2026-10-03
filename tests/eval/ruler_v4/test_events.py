@@ -21,7 +21,7 @@ def test_embedded_registry_is_complete() -> None:
 def test_external_frozen_registry_loads() -> None:
     """The production loader accepts the authoritative JSON schema."""
 
-    path = Path.home() / "agent-research/dagua/ruler_v4/p3/frozen/EVENT_REGISTRY.json"
+    path = Path.home() / "private-notes/research/dagua/ruler_v4/p3/frozen/EVENT_REGISTRY.json"
     registry = load_event_registry(path)
     assert registry.schema_version == "A5-event-registry-1.0"
     assert registry.by_facet("U17")[0].jump_bound.value == 0.0

@@ -12,8 +12,8 @@
 
 set -euo pipefail
 
-REPO="."
-PROMPT_DIR="$REPO/internal-notes/research/sprint_algo_fidelity"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROMPT_DIR="$REPO/private-notes/research/sprint_algo_fidelity"
 SPRINT_LOG_DIR="/tmp"
 DISPATCHER_LOG="/tmp/round_21_dispatcher.log"
 
@@ -21,13 +21,13 @@ echo "[$(date)] dispatcher starting" >> "$DISPATCHER_LOG"
 
 # Reference root mappings (general guidance for codex; actual ref location may need codex search)
 REF_HINTS="\
-For igraph_*: source at ../_references/igraph/src/layout/<algo>.c (or .cpp). \
-For ogdf_*: source at ../_references/ogdf/src/ogdf/<category>/<algo>.cpp + headers in ../_references/ogdf/include/ogdf/<category>/. \
-For nx_* (networkx): source at ~/anaconda3/envs/py311/lib/python3.11/site-packages/networkx/drawing/layout.py. \
-For fa2_*: ~/anaconda3/envs/py311/lib/python3.11/site-packages/fa2_modified/ (preferred) or fa2/. \
+For igraph_*: source at $HOME/projects/_references/igraph/src/layout/<algo>.c (or .cpp). \
+For ogdf_*: source at $HOME/projects/_references/ogdf/src/ogdf/<category>/<algo>.cpp + headers in $HOME/projects/_references/ogdf/include/ogdf/<category>/. \
+For nx_* (networkx): source at $HOME/anaconda3/envs/py311/lib/python3.11/site-packages/networkx/drawing/layout.py. \
+For fa2_*: $HOME/anaconda3/envs/py311/lib/python3.11/site-packages/fa2_modified/ (preferred) or fa2/. \
 For sgd2_*: search site-packages for sgd2 or its installed name. \
-For umap_*: ~/anaconda3/envs/py311/lib/python3.11/site-packages/umap/. \
-For tsne_*: ~/anaconda3/envs/py311/lib/python3.11/site-packages/sklearn/manifold/_t_sne.py."
+For umap_*: $HOME/anaconda3/envs/py311/lib/python3.11/site-packages/umap/. \
+For tsne_*: $HOME/anaconda3/envs/py311/lib/python3.11/site-packages/sklearn/manifold/_t_sne.py."
 
 # (dagua_engine, target_engine, ref_dir_or_file_hint, slug)
 # Each line is one algo. slug becomes filename suffix for diff doc.
@@ -59,7 +59,7 @@ generate_prompt() {
 
   cat > "$prompt_path" <<PROMPT_EOF
 <task>
-You are Codex on the dagua project. Repo: \`.\`. Branch: \`develop\`.
+You are Codex on the dagua project. Repo: \`$REPO\`. Branch: \`develop\`.
 
 Round 21 ADVERSARIAL DIFF for **${slug}** family (dagua \`${dagua_engine}\` vs reference \`${target_engine}\`).
 
@@ -84,13 +84,13 @@ may find something new.
 
 **Existing analysis to skim:**
 - \`eval_output/fidelity_report/report.md\` for the current verdict on ${slug}.
-- \`internal-notes/research/sprint_algo_fidelity/algo_fidelity_SUMMARY.md\` for sprint context.
+- \`private-notes/research/sprint_algo_fidelity/algo_fidelity_SUMMARY.md\` for sprint context.
 
 ## What to do
 
 **This is a DIAGNOSIS-ONLY round.** Do NOT edit any source files. No commits.
 
-Produce ONE document: \`internal-notes/research/sprint_algo_fidelity/ROUND_21_DIFF_${slug}.md\`
+Produce ONE document: \`private-notes/research/sprint_algo_fidelity/ROUND_21_DIFF_${slug}.md\`
 
 Sections (be brutally exhaustive):
 

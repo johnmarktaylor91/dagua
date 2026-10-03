@@ -14,11 +14,11 @@
 set -uo pipefail
 
 # Force conda py311 on PATH so we match the working interactive env.
-export PATH="~/anaconda3/envs/py311/bin:$PATH"
+export PATH="$HOME/anaconda3/envs/py311/bin:$PATH"
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-cd .
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 echo "=== [overnight] started at $(date -Iseconds) ==="
 
@@ -40,7 +40,7 @@ echo "=== [overnight] benchmark exited with $BENCH_EXIT at $(date -Iseconds) ===
 
 if [ $BENCH_EXIT -ne 0 ]; then
     echo "[overnight] Benchmark failed -- skipping post pipeline"
-    ~/.claude/scripts/send-to-jmt.sh "Dagua overnight FAILED: benchmark exit=$BENCH_EXIT. No post-pipeline run. See log at internal-notes/tasks/overnight-finish.log" || true
+    ~/.claude/scripts/send-to-jmt.sh "Dagua overnight FAILED: benchmark exit=$BENCH_EXIT. No post-pipeline run. See log at private-notes/tasks/overnight-finish.log" || true
     exit $BENCH_EXIT
 fi
 

@@ -198,7 +198,7 @@ dagua tour graph.yaml /tmp/residual-tour.mp4 \
 Launch:
 
 ```bash
-cd .
+cd path/to/dagua
 python -u scripts/bench_large.py 1b --device cuda
 ```
 

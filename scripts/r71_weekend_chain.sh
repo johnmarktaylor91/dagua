@@ -2,7 +2,7 @@
 # r71 unattended weekend chain (zero-LLM): when P1d completes, auto-run the P1e
 # re-analysis on the seeded-ref upgrades; summarize everything for the Tuesday resume.
 set -uo pipefail
-cd .
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 LOG() { echo "[$(date '+%F %T')] $*"; }
 
@@ -26,7 +26,7 @@ LOG "P1d COMPLETE"
 # 2. Build the seedable Mode-B combos file
 python3 - <<'PYEOF'
 import json
-fm = json.load(open('internal-notes/research/sprint_rng_matching/failing_map_final.json'))
+fm = json.load(open('private-notes/research/sprint_rng_matching/failing_map_final.json'))
 seedable = ("graphviz_neato","graphviz_sfdp","graphviz_fdp","ogdf_fmmm","ogdf_gem","ogdf_stress","igraph_mds")
 n = 0
 with open('/tmp/r71_p1e_combos.txt','w') as f:

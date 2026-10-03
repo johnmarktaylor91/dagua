@@ -215,7 +215,7 @@ class TestExactProjectorConvergence:
     The legacy `_project_exact` per-pass update uses advanced-index `+=`,
     which silently drops repeated node indices (last write wins), so dense
     overlap cliques never converge -- see
-    internal-notes/research/r79_native/P3B2_STRESS_FORENSICS.md (sbm_4x30
+    private-notes/research/r79_native/P3B2_STRESS_FORENSICS.md (sbm_4x30
     left 37+ overlaps after 50 iterations). ``convergent=True`` opts into
     the accumulate-then-damp projector that provably reaches zero overlaps
     on an adversarial 30-node clique where every node starts overlapping

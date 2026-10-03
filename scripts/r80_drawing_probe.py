@@ -13,7 +13,7 @@ BOTH variants:
 
 Usage:
   .venv/bin/python scripts/r80_drawing_probe.py \
-      [--output internal-notes/research/r79_native/P9_DRAWING_BASELINE.md]
+      [--output private-notes/research/r79_native/P9_DRAWING_BASELINE.md]
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ def main() -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("internal-notes/research/r79_native/P9_DRAWING_BASELINE.md"),
+        default=Path("private-notes/research/r79_native/P9_DRAWING_BASELINE.md"),
     )
     args = parser.parse_args()
 

@@ -13,13 +13,13 @@ from dagua.graph import DaguaGraph
 def test_default_salt_path_is_repo_anchored_not_cwd_relative() -> None:
     """The holdout salt path must resolve independently of the process CWD.
 
-    The old ``Path("internal-notes/...")`` value resolved against whatever
+    The old ``Path("private-notes/...")`` value resolved against whatever
     directory the process happened to run from, so ``make_holdout_suite()``
     raised FileNotFoundError from any CWD but the repo root (WP07-F10).
     """
     assert DEFAULT_SALT_PATH.is_absolute()
     repo_root = Path(dagua.__file__).resolve().parents[1]
-    assert DEFAULT_SALT_PATH == repo_root / ".project-context" / "private" / "holdout_salt"
+    assert DEFAULT_SALT_PATH == repo_root / "private-notes" / "private" / "holdout_salt"
 
 
 def test_topology_hash_is_ten_hex_chars() -> None:

@@ -9,7 +9,7 @@ from typing import Dict
 from scripts.visual_parity import ledger
 from scripts.visual_parity.io import read_ledger
 
-LEDGER_PATH = Path("internal-notes/research/sprint_visual_parity_v2/ledger.json")
+LEDGER_PATH = Path("private-notes/research/sprint_visual_parity_v2/ledger.json")
 
 
 def _locked_by_id() -> Dict[str, Dict[str, object]]:

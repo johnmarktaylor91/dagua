@@ -227,7 +227,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--corpus-positions",
         type=Path,
-        default=Path("eval_output/r81_regate2/positions"),
+        default=Path(__file__).resolve().parents[1] / "eval_output" / "r81_regate2" / "positions",
         help="Frozen r81 positions dir that defines the shared 108-graph corpus.",
     )
     parser.add_argument(

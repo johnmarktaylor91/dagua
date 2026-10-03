@@ -69,7 +69,7 @@ python3 scripts/consolidate_positions_hdf5.py \
 # Refresh fidelity report
 FIDELITY_OUT=eval_output/fidelity_report_100seed_r31
 echo "--- fidelity_analysis $(date -Iseconds) ---"
-export LD_LIBRARY_PATH=~/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=$HOME/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
 
 python3 scripts/fidelity_analysis.py \
     --input "$BENCH_OUT" \

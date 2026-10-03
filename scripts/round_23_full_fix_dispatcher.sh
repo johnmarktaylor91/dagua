@@ -8,8 +8,8 @@
 
 set -euo pipefail
 
-REPO="."
-PROMPT_DIR="$REPO/internal-notes/research/sprint_algo_fidelity"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROMPT_DIR="$REPO/private-notes/research/sprint_algo_fidelity"
 DISPATCHER_LOG="/tmp/round_23_dispatcher.log"
 
 echo "[$(date)] Round 23 exhaustive sweep dispatcher starting" >> "$DISPATCHER_LOG"
@@ -50,7 +50,7 @@ generate_prompt() {
 
   cat > "$prompt_path" <<PROMPT_EOF
 <task>
-You are Codex on the dagua project. Repo: \`.\`. Branch: \`develop\`.
+You are Codex on the dagua project. Repo: \`$REPO\`. Branch: \`develop\`.
 
 Round 23 EXHAUSTIVE SWEEP for **${slug}** family (\`${dagua_engine}\` vs \`${target_engine}\`).
 
@@ -62,7 +62,7 @@ ${r22_context}
 
 ## SPEC
 
-Primary: \`internal-notes/research/sprint_algo_fidelity/ROUND_21_DIFF_${slug}.md\` (full ranked fix list).
+Primary: \`private-notes/research/sprint_algo_fidelity/ROUND_21_DIFF_${slug}.md\` (full ranked fix list).
 Secondary: existing \`ROUND_22_*_${slug}.md\` reports for context.
 
 Apply EVERY remaining ranked-list item that is technically feasible.
@@ -89,8 +89,8 @@ Look for a build script under \`scripts/\` (e.g. \`build_ogdf_runner.sh\`)
 or a Makefile. If you can't find one, run:
 \`\`\`
 g++ -std=c++17 -O2 scripts/ogdf_runner.cpp \\
-    -I../_references/ogdf/include \\
-    -L../_references/ogdf/build/lib \\
+    -I$HOME/projects/_references/ogdf/include \\
+    -L$HOME/projects/_references/ogdf/build/lib \\
     -logdf -o scripts/ogdf_runner
 \`\`\`
 If the OGDF library isn't built, fall back: don't modify the runner
@@ -145,14 +145,14 @@ fix per commit".
 - \`dagua/eval/competitors/<family>_competitor.py\` IF diff doc explicitly recommends adapter changes
 - \`scripts/build_ogdf_runner.sh\` (NEW or update) for runner rebuilds
 - \`eval_output/algo_fidelity/round_23/${slug}/**\`
-- \`internal-notes/research/sprint_algo_fidelity/ROUND_23_*${slug}*.md\`
+- \`private-notes/research/sprint_algo_fidelity/ROUND_23_*${slug}*.md\`
 - \`tests/test_layout/test_*${slug}*.py\` for regressions
 
 **HARD do-not-touch**:
 - \`dagua/render/**\`, \`dagua/styles.py\`, \`scripts/graphviz_theme_comparison.py\`
 - \`tests/test_render/**\`
-- \`internal-notes/research/sprint_clusters/**\`
-- \`internal-notes/research/sprint_graphviz_parity/**\`
+- \`private-notes/research/sprint_clusters/**\`
+- \`private-notes/research/sprint_graphviz_parity/**\`
 - Other families' pipeline/ops files
 
 ## Verification

@@ -29,7 +29,7 @@ from r79_baseline import (  # noqa: E402
 )
 
 BASELINE_DIR = Path("eval_output/r79_baseline")
-EVIDENCE_PATH = Path("internal-notes/research/r79_native/P2_EVIDENCE.md")
+EVIDENCE_PATH = Path("private-notes/research/r79_native/P2_EVIDENCE.md")
 
 TARGET_EXACT_NAMES = {
     "small_world_100",

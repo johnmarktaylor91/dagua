@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 _DEFAULT_NODE_WIDTH = 120.0
 _DEFAULT_NODE_HEIGHT = 40.0
 _DURABLE_NODE_MODULES = Path.home() / "tools" / "dagua-refs" / "node_modules"
-_DAGRE_NODE_MODULES = Path("node_modules")
+_DAGRE_NODE_MODULES = Path(__file__).resolve().parents[3] / "node_modules"
 
 
 def _node_subprocess_env() -> Dict[str, str]:

@@ -41,7 +41,7 @@ from dagua.graph import DaguaGraph  # noqa: E402
 from scripts.fast_fidelity_report import procrustes_rmsd  # noqa: E402
 from scripts.rng_match.small_fixtures import small_fixtures  # noqa: E402
 
-STATUS_DIR = REPO_ROOT / ".project-context" / "research" / "sprint_rng_matching"
+STATUS_DIR = REPO_ROOT / "private-notes" / "research" / "sprint_rng_matching"
 STATUS_MD = STATUS_DIR / "STATUS.md"
 STATUS_JSON = STATUS_DIR / "status.json"
 BIT_EXACT_THRESHOLD = 1e-7

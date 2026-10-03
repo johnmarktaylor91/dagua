@@ -12,7 +12,7 @@ That is the core idea.
 
 ## The Pipeline
 
-![Pipeline overview](docs/how_dagua_works/figures/pipeline_overview.png)
+![Pipeline overview](how_dagua_works/figures/pipeline_overview.png)
 
 The broad pipeline is:
 
@@ -44,7 +44,7 @@ This makes the system unusually composable. A “visual preference” is often j
 
 ## Multilevel Layout
 
-![Multilevel hierarchy](docs/how_dagua_works/figures/multilevel_hierarchy.png)
+![Multilevel hierarchy](how_dagua_works/figures/multilevel_hierarchy.png)
 
 Large graphs are not optimized in full detail immediately.
 
@@ -65,7 +65,7 @@ Pins are a good example:
 - some nodes are fixed
 - the rest of the graph must settle around them
 
-![Pinning constraint animation](docs/how_dagua_works/figures/pinning_constraint.gif)
+![Pinning constraint animation](how_dagua_works/figures/pinning_constraint.gif)
 
 That same logic applies to alignment groups, spacing preferences, cluster containment, and routing aesthetics. The optimization animation is not just a gimmick; it exposes the actual mechanics.
 
@@ -73,7 +73,7 @@ That same logic applies to alignment groups, spacing preferences, cluster contai
 
 Node positions are only part of the story. After layout, Dagua routes edges into a visual language:
 
-![Routing comparison](docs/how_dagua_works/figures/routing_comparison.png)
+![Routing comparison](how_dagua_works/figures/routing_comparison.png)
 
 Different routing modes emphasize different qualities:
 - straight: direct and spare
@@ -96,13 +96,13 @@ Graphviz, ELK, and dagre are useful comparisons, but Dagua’s design center is 
 ## Where To Go Next
 
 If you want the full reference:
-- [docs/glossary/dagua_glossary.pdf](docs/glossary/dagua_glossary.pdf)
+- [docs/glossary/dagua_glossary.pdf](glossary/dagua_glossary.pdf)
 
 If you want hands-on usage:
-- [docs/tutorial_walkthrough.ipynb](docs/tutorial_walkthrough.ipynb)
+- [docs/tutorial_walkthrough.ipynb](tutorial_walkthrough.ipynb)
 
 If you want polished examples:
-- [docs/gallery/README.md](docs/gallery/README.md)
+- [docs/gallery/README.md](gallery/README.md)
 
 If you want the future video version:
-- [docs/video/README.md](docs/video/README.md)
+- [docs/video/README.md](video/README.md)

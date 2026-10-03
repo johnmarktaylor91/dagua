@@ -1304,11 +1304,11 @@ V2_DOMAINS: Tuple[str, ...] = (
     "other",
 )
 
-DEFAULT_V2_CARD_MANIFEST = "internal-notes/research/sprint_visual_parity_v2/card_manifest.json"
+DEFAULT_V2_CARD_MANIFEST = "private-notes/research/sprint_visual_parity_v2/card_manifest.json"
 DEFAULT_V2_COVERAGE_MATRIX = (
-    "internal-notes/research/sprint_visual_parity_v2/coverage_matrix.json"
+    "private-notes/research/sprint_visual_parity_v2/coverage_matrix.json"
 )
-DEFAULT_V2_LEDGER = "internal-notes/research/sprint_visual_parity_v2/ledger.json"
+DEFAULT_V2_LEDGER = "private-notes/research/sprint_visual_parity_v2/ledger.json"
 DEFAULT_V2_REFCACHE = "eval_output/visual_parity_v2/refcache"
 DEFAULT_V2_OUTPUT_DIR = "docs/visual_reference"
 DEFAULT_V2_MARKDOWN_INDEX = "docs/VISUAL_REFERENCE.md"

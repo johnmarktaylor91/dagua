@@ -85,7 +85,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 # Above this size the contest is skipped and the incumbent runs alone.
 # Documented cap: the Stage-1 probe only produced candidate data up to 500
-# nodes (see internal-notes/research/r79_native/P8_PORTFOLIO_PROBE.md);
+# nodes (see private-notes/research/r79_native/P8_PORTFOLIO_PROBE.md);
 # probe data for larger graphs would be needed before raising this.
 MAX_CONTEST_NODES = 1500
 # Deterministic replacement for the historical 25s wall-clock polish

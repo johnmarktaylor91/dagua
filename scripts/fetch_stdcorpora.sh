@@ -9,7 +9,7 @@
 set -euo pipefail
 
 OUT_DIR="${1:-eval_output/stdcorpora}"
-PYTHON="${PYTHON:-~/anaconda3/envs/py311/bin/python}"
+PYTHON="${PYTHON:-$HOME/anaconda3/envs/py311/bin/python}"
 MIN_FREE_KB=$((15 * 1024 * 1024))
 MAX_BYTES=$((1024 * 1024 * 1024))
 PER_CORPUS_TEXT=60

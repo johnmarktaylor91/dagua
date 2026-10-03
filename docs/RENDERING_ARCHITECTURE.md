@@ -4,7 +4,7 @@
 
 Dagua's matplotlib renderer treats graph geometry as filled shapes in data coordinates. Node fills, borders, edge ribbons, arrowheads, and all label text scale together under zoom because they are rendered from geometry, not display-space text primitives.
 
-The sole exception is the graph title in [`dagua/render/mpl.py`](dagua/render/mpl.py). It remains pixel-based via `ax.set_title()` because it is axes-relative UI chrome, participates in `tight_layout()`, and is not part of the graph's geometry.
+The sole exception is the graph title in [`dagua/render/mpl.py`](../dagua/render/mpl.py). It remains pixel-based via `ax.set_title()` because it is axes-relative UI chrome, participates in `tight_layout()`, and is not part of the graph's geometry.
 
 ## Module Map
 

@@ -19,7 +19,7 @@ from dagua.eval import competitors as comp_mod  # noqa: E402
 from dagua.eval.graphs import get_test_graphs  # noqa: E402
 
 FAILING_MAP = json.load(
-    open("internal-notes/research/sprint_rng_matching/failing_map_final.json")
+    open("private-notes/research/sprint_rng_matching/failing_map_final.json")
 )
 
 # reference base -> a variant whose failing map supplies probe graphs

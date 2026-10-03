@@ -7,8 +7,8 @@
 
 set -euo pipefail
 
-REPO="."
-PROMPT_DIR="$REPO/internal-notes/research/sprint_algo_fidelity"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROMPT_DIR="$REPO/private-notes/research/sprint_algo_fidelity"
 DISPATCHER_LOG="/tmp/round_22_dispatcher.log"
 
 echo "[$(date)] Round 22 fix dispatcher starting" >> "$DISPATCHER_LOG"
@@ -42,14 +42,14 @@ generate_prompt() {
 
   cat > "$prompt_path" <<PROMPT_EOF
 <task>
-You are Codex on the dagua project. Repo: \`.\`. Branch: \`develop\`.
+You are Codex on the dagua project. Repo: \`$REPO\`. Branch: \`develop\`.
 
 Round 22 ADVERSARIAL FIX for **${slug}** family (\`${dagua_engine}\` vs \`${target_engine}\`).
 
 ## SPEC
 
 Your spec is the diff document at:
-\`internal-notes/research/sprint_algo_fidelity/ROUND_21_DIFF_${slug}.md\`
+\`private-notes/research/sprint_algo_fidelity/ROUND_21_DIFF_${slug}.md\`
 
 Read it END-TO-END. The "Recommended Round 22+ Fix Scope" section
 contains the bundle for this round. The "Ranked Fix List" has details.
@@ -92,14 +92,14 @@ single bundle. Each fix should be small (1-50 lines net per fix; total
 - \`scripts/ogdf_runner.cpp\` IF the family is OGDF-targeted and the diff doc explicitly recommends runner-side changes
 - \`dagua/eval/competitors/<family>_competitor.py\` IF the diff doc explicitly recommends adapter changes (only for adapter-bug fixes)
 - \`eval_output/algo_fidelity/round_22/${slug}/**\`
-- \`internal-notes/research/sprint_algo_fidelity/ROUND_22_*${slug}*.md\`
+- \`private-notes/research/sprint_algo_fidelity/ROUND_22_*${slug}*.md\`
 - \`tests/test_layout/test_*${slug}*.py\` for regression tests + snapshot updates
 
 **HARD do-not-touch**:
 - \`dagua/render/**\`, \`dagua/styles.py\`, \`scripts/graphviz_theme_comparison.py\`
 - \`tests/test_render/**\`
-- \`internal-notes/research/sprint_clusters/**\`
-- \`internal-notes/research/sprint_graphviz_parity/**\`
+- \`private-notes/research/sprint_clusters/**\`
+- \`private-notes/research/sprint_graphviz_parity/**\`
 - Any other family's pipeline/ops files (you only own ${slug})
 
 ## Verification

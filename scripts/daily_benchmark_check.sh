@@ -6,7 +6,7 @@
 # Install: crontab -e, add:  0 7 * * * scripts/daily_benchmark_check.sh
 
 set -u
-cd .
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 SUPERVISOR_LOG=/tmp/benchmark_100seed_supervisor.log
 BENCH_OUT=eval_output/benchmark_100seed_final

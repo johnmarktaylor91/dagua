@@ -4,7 +4,7 @@
 # `<ref>__for__<variant>` engines from failing_map for the probe-SEEDABLE families
 # (+ fdp ensemble-eligible). Seeds 42-141 via --seed-refs (run-scoped override).
 set -uo pipefail
-cd .
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 OUT=eval_output/benchmark_100seed_seeded_refs
 SEEDABLE_BASES="graphviz_neato,graphviz_sfdp,graphviz_fdp,ogdf_fmmm,ogdf_gem,ogdf_stress,igraph_mds"
@@ -22,7 +22,7 @@ check_disk() {
 # Build per-engine work list (ref_synthetic<TAB>graphs_csv) from failing_map
 python3 - <<'PYEOF' > /tmp/r71_p1d_worklist.tsv
 import json
-fm = json.load(open('internal-notes/research/sprint_rng_matching/failing_map_final.json'))
+fm = json.load(open('private-notes/research/sprint_rng_matching/failing_map_final.json'))
 seedable = ("graphviz_neato","graphviz_sfdp","graphviz_fdp","ogdf_fmmm","ogdf_gem","ogdf_stress","igraph_mds")
 for variant, ent in sorted(fm.items()):
     ref = ent["ref"]

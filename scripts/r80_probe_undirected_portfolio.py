@@ -8,7 +8,7 @@ honest composite the baseline harness uses. Compare against the frozen
 current-dagua row and frozen best-external row for each graph.
 
 This script writes NO product code changes -- it is a standalone,
-reusable probe. See internal-notes/research/r79_native/briefs/
+reusable probe. See private-notes/research/r79_native/briefs/
 r80_s4_undirected_portfolio.md for the decision gate this feeds.
 
 Usage
@@ -31,9 +31,9 @@ from typing import Any, Dict, List, Optional
 import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MAIN_WORKTREE = Path("~/.claude/worktrees/dagua-native")
+MAIN_WORKTREE = Path("./local-data/dagua-native")
 FROZEN_RESULTS = MAIN_WORKTREE / "eval_output" / "r79_baseline" / "results.json"
-REPORT_PATH = REPO_ROOT / ".project-context" / "research" / "r79_native" / "P8_PORTFOLIO_PROBE.md"
+REPORT_PATH = REPO_ROOT / "private-notes" / "research" / "r79_native" / "P8_PORTFOLIO_PROBE.md"
 
 TIE_BAND = 0.5
 SEED = 42

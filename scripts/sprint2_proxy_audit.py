@@ -8,7 +8,7 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-RESEARCH_ROOT = Path.home() / "agent-research/dagua/sprint2_improve"
+RESEARCH_ROOT = Path.home() / "private-notes/research/dagua/sprint2_improve"
 DEFAULT_TELEMETRY_DIR = RESEARCH_ROOT / "measure/telemetry"
 DEFAULT_OUTPUT = RESEARCH_ROOT / "measure/PROXY_RANK_AUDIT.md"
 

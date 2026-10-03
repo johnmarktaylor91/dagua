@@ -27,9 +27,9 @@ from pathlib import Path
 P2_ROOT = Path(__file__).resolve().parents[1]
 NEW_RESULTS = P2_ROOT / "eval_output" / "r79_baseline" / "results.json"
 FROZEN_RESULTS = Path(
-    "~/.claude/worktrees/dagua-native/eval_output/r79_baseline/results.json"
+    "./local-data/dagua-native/eval_output/r79_baseline/results.json"
 )
-PROBE_REPORT = P2_ROOT / ".project-context" / "research" / "r79_native" / "P8_PORTFOLIO_PROBE.md"
+PROBE_REPORT = P2_ROOT / "private-notes" / "research" / "r79_native" / "P8_PORTFOLIO_PROBE.md"
 
 TOLERANCE = 0.05
 

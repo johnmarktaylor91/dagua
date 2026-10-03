@@ -3,7 +3,7 @@
 # Usage: ./scripts/check-tasks.sh [task-id]
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)" 2>/dev/null || true
-TASK_DIR="internal-notes/tasks"
+TASK_DIR="private-notes/tasks"
 
 if [ ! -d "$TASK_DIR" ]; then echo "No tasks directory."; exit 0; fi
 

@@ -26,16 +26,16 @@ from scripts.native_sprint_score import (  # noqa: E402
 )
 
 DEFAULT_BACKFILL = Path(
-    "~/agent-research/dagua/native_sprint/R8_EVENTA_RAW_SCORES_V2_BACKFILL.json"
+    "outputs/native_sprint/R8_EVENTA_RAW_SCORES_V2_BACKFILL.json"
 )
 DEFAULT_OLD_BASELINE = Path(
-    "~/agent-research/dagua/native_sprint/R8_EVENTA_OLD108_V2.json"
+    "outputs/native_sprint/R8_EVENTA_OLD108_V2.json"
 )
 DEFAULT_EXTENDED_BASELINE = Path(
-    "~/agent-research/dagua/native_sprint/R8_EVENTA_EXTENDED121_V2.json"
+    "outputs/native_sprint/R8_EVENTA_EXTENDED121_V2.json"
 )
 DEFAULT_CORPUS_POSITIONS = ROOT / "eval_output" / "r81_regate2" / "positions"
-DEFAULT_OUTPUT_DIR = Path("~/agent-research/dagua/megasprint/freeze_v3_rebaseline")
+DEFAULT_OUTPUT_DIR = Path("outputs/megasprint/freeze_v3_rebaseline")
 SEVERE_G6_FLOOR = 0.55
 DEGENERACY_CHAMPION_INELIGIBLE_FLAGS = frozenset(
     {"DEGENERATE_SCALE", "SPRAWL_COLLAPSE", "COINCIDENT_COLLAPSE"}

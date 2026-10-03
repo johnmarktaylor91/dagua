@@ -271,7 +271,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--out",
-        default="internal-notes/research/sprint_visual_parity_v2/card_manifest.json",
+        default="private-notes/research/sprint_visual_parity_v2/card_manifest.json",
         help="Destination card_manifest.json path.",
     )
     parser.add_argument(

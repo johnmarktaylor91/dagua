@@ -44,7 +44,7 @@ beta) line can represent both ends.
 ## Box
 
 - Date: 2026-07-21
-- Host: local development workstation for `.`
+- Host: local development workstation for the dagua repo
   (same box as C1), 20 cores, CUDA device visible; ~15 cores idle during
   harvest.
 - Python: `~/anaconda3/envs/py311/bin/python`
@@ -53,15 +53,15 @@ beta) line can represent both ends.
 
 ## Telemetry
 
-Harvested by `~/agent-research/dagua/megasprint/c2_measure_fcose.py`, which
+Harvested by `~/private-notes/research/dagua/megasprint/c2_measure_fcose.py`, which
 mirrors the marketplace seam call exactly
 (`layout_fcose_pipeline(quality="default", randomize=True)`,
 `FCOSE_REFERENCE_STEPS = 2500`):
 
-- `~/agent-research/dagua/megasprint/c2_fcose_telemetry_exact.jsonl`:
+- `~/private-notes/research/dagua/megasprint/c2_fcose_telemetry_exact.jsonl`:
   44 samples, N in {10..500} x {cuda, cpu}, full 2500 reference steps
   (plus one er_500 cpu 500-step sample), 2 seeds each.
-- `~/agent-research/dagua/megasprint/c2_fcose_telemetry_bh.jsonl`:
+- `~/private-notes/research/dagua/megasprint/c2_fcose_telemetry_bh.jsonl`:
   8 samples, sbm_8x100 (N=800) and r8_nested_scale_1k_budget (N=1000) at
   25/50 steps. Short-step samples extrapolate linearly in planned steps
   because the Barnes-Hut per-step cost is stationary; full 2500-step runs

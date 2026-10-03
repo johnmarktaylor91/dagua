@@ -37,7 +37,7 @@ if str(REPO_ROOT) not in sys.path:
 # Defects that MUST be caught; missing either is an automatic rejection.
 MANDATORY_DEFECT_PANEL_IDS: frozenset[str] = frozenset({"invisible_edge_stem", "truncated_label"})
 DEFAULT_MODEL_SELECTION_PATH = (
-    "internal-notes/research/sprint_visual_parity_v2/model_selection.json"
+    "private-notes/research/sprint_visual_parity_v2/model_selection.json"
 )
 
 

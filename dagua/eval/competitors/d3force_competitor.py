@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 _DEFAULT_TICKS = 300
 _DEFAULT_SEED = 1
 _DURABLE_NODE_MODULES = Path.home() / "tools" / "dagua-refs" / "node_modules"
-_D3FORCE_NODE_MODULES = Path("node_modules")
+_D3FORCE_NODE_MODULES = Path(__file__).resolve().parents[3] / "node_modules"
 
 
 def _node_subprocess_env() -> Dict[str, str]:

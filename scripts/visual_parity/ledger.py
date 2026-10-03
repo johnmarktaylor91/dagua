@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set
 from scripts.visual_parity.io import read_coverage_matrix, read_ledger, write_ledger
 from scripts.visual_parity.types import LEDGER_SCHEMA_VERSION
 
-RESEARCH_DIR = Path("internal-notes/research/sprint_visual_parity_v2")
+RESEARCH_DIR = Path("private-notes/research/sprint_visual_parity_v2")
 COVERAGE_PATH = RESEARCH_DIR / "coverage_matrix.json"
 LEDGER_PATH = RESEARCH_DIR / "ledger.json"
 TRIPWIRE_STATUS_PATH = RESEARCH_DIR / "tripwire_status.json"
@@ -39,7 +39,7 @@ from scripts.visual_parity.io import read_ledger
 # Anchored to the repo root so the locks hold regardless of pytest's cwd.
 LEDGER_PATH = (
     Path(__file__).resolve().parents[1]
-    / "internal-notes/research/sprint_visual_parity_v2/ledger.json"
+    / "private-notes/research/sprint_visual_parity_v2/ledger.json"
 )
 
 

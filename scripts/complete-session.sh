@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # complete-session.sh -- Mandatory gate for autonomous session completion.
 #
-# Reads internal-notes/autonomous_gate.json, checks that ALL exit
+# Reads private-notes/autonomous_gate.json, checks that ALL exit
 # criteria have status "pass". Refuses completion if any are "fail"
 # or "untested".
 #
@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-GATE="internal-notes/autonomous_gate.json"
+GATE="private-notes/autonomous_gate.json"
 
 if [ ! -f "$GATE" ]; then
     echo "ERROR: No autonomous gate file at $GATE"

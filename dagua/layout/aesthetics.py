@@ -35,7 +35,7 @@ default-identity sweep is bit-identical, not merely "close."
 
 The public ``LayoutConfig`` surface (``prioritize`` / ``aesthetic_weights``)
 is intentionally thin and documented as provisional in
-``internal-notes/research/r79_native/P15_AESTHETIC_KNOB.md`` -- this
+``private-notes/research/r79_native/P15_AESTHETIC_KNOB.md`` -- this
 module is the stable seam; the field names are the part JMT signs off on.
 """
 

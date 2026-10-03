@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import native_sprint_score as nss  # noqa: E402
 
-G3_DIR = Path.home() / "agent-research/dagua/glados_prep/g3_retally_out"
+G3_DIR = Path.home() / "private-notes/research/dagua/glados_prep/g3_retally_out"
 G3_TALLY = {"strict": 104, "tied": 17, "behind": 0}
 
 

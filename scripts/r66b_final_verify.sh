@@ -11,7 +11,7 @@ FIDELITY_OUT=eval_output/fidelity_report_100seed_r66b
 SEND=$HOME/.claude/scripts/send-to-jmt.sh
 
 export PATH=/tmp/graphviz_instr/bin:$PATH
-export LD_LIBRARY_PATH=~/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=$HOME/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
 
 exec >> "$LOG" 2>&1
 echo ""

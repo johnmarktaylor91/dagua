@@ -3,7 +3,7 @@
 #
 # Prerequisites (RUN FIRST, separately, via codex):
 #   ~/.claude/scripts/codex-bg.sh /tmp/r68_variants.log /tmp/PROMPT_68_variant_fidelity_mode.md \
-#     --cd . --sandbox danger-full-access \
+#     --cd path/to/dagua --sandbox danger-full-access \
 #     -c model_reasoning_effort=high
 #
 # That codex patches dagua/eval/variants.py to add fidelity_mode to every
@@ -27,7 +27,7 @@ FIDELITY_OUT=eval_output/fidelity_report_r68
 SEND=$HOME/.claude/scripts/send-to-jmt.sh
 
 export PATH=/tmp/graphviz_instr/bin:$PATH
-export LD_LIBRARY_PATH=~/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=$HOME/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
 
 exec >> "$LOG" 2>&1
 echo ""

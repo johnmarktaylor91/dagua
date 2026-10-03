@@ -30,7 +30,7 @@ from dagua.styles import NODE_SHAPE_NAMES, ClusterStyle, EdgeStyle, GraphStyle, 
 from scripts.visual_parity.io import write_coverage_matrix
 from scripts.visual_parity.types import COVERAGE_MATRIX_SCHEMA_VERSION
 
-RESEARCH_DIR = Path("internal-notes/research/sprint_visual_parity_v2")
+RESEARCH_DIR = Path("private-notes/research/sprint_visual_parity_v2")
 REFERENCE_DIR = RESEARCH_DIR / "reference_specs"
 COVERAGE_PATH = RESEARCH_DIR / "coverage_matrix.json"
 TRIAGE_PATH = REFERENCE_DIR / "gv_attr_triage.json"

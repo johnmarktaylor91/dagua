@@ -7,14 +7,14 @@
 # already ran the post-pipeline, this script detects the "done" status and
 # exits quietly without doing anything.
 #
-# Coordinates via internal-notes/tasks/overnight-finish.status:
+# Coordinates via private-notes/tasks/overnight-finish.status:
 #   "running" -> benchmark or post-pipeline still active; intervene
 #   "done"    -> everything already complete; exit
 #   "failed"  -> treat like "running" for intervention safety
 set -u
 
-cd .
-export PATH="~/anaconda3/envs/py311/bin:$PATH"
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+export PATH="$HOME/anaconda3/envs/py311/bin:$PATH"
 export PYTHONUNBUFFERED=1
 
 TARGET="2026-04-17 05:30:00"
@@ -24,7 +24,7 @@ echo "=== [watchdog] started at $(date -Iseconds) ==="
 
 # --- Sleep until target time -------------------------------------------------
 while [ "$(date +%s)" -lt "$TARGET_TS" ]; do
-    STATUS="$(cat internal-notes/tasks/overnight-finish.status 2>/dev/null || echo unknown)"
+    STATUS="$(cat private-notes/tasks/overnight-finish.status 2>/dev/null || echo unknown)"
     if [ "$STATUS" = "done" ]; then
         echo "=== [watchdog] overnight-finish already 'done' at $(date -Iseconds); exiting ==="
         exit 0
@@ -35,7 +35,7 @@ done
 echo "=== [watchdog] TARGET TIME reached at $(date -Iseconds) ==="
 
 # --- Re-check: if overnight-finish is already done, exit quietly ------------
-STATUS="$(cat internal-notes/tasks/overnight-finish.status 2>/dev/null || echo unknown)"
+STATUS="$(cat private-notes/tasks/overnight-finish.status 2>/dev/null || echo unknown)"
 if [ "$STATUS" = "done" ]; then
     echo "=== [watchdog] overnight-finish already 'done'; exiting ==="
     exit 0

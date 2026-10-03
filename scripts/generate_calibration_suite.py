@@ -19,7 +19,7 @@ python scripts/generate_calibration_suite.py
 python scripts/generate_calibration_suite.py --category edge_options
 python scripts/generate_calibration_suite.py --refresh-refs
 python scripts/generate_calibration_suite.py --two-panel --manifest \\
-    internal-notes/research/sprint_visual_parity_v2/card_manifest.json \\
+    private-notes/research/sprint_visual_parity_v2/card_manifest.json \\
     --category edge_options --output-dir /tmp/vp2_cards
 """
 

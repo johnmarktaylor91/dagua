@@ -9,7 +9,7 @@ from typing import Dict
 from scripts.visual_parity import coverage
 from scripts.visual_parity.io import read_coverage_matrix
 
-COVERAGE_PATH = Path("internal-notes/research/sprint_visual_parity_v2/coverage_matrix.json")
+COVERAGE_PATH = Path("private-notes/research/sprint_visual_parity_v2/coverage_matrix.json")
 
 
 def _cells_by_id() -> Dict[str, Dict[str, object]]:

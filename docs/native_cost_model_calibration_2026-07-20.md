@@ -9,7 +9,7 @@ joint design form `alpha * volume + beta`.
 ## Box
 
 - Date: 2026-07-20
-- Host: local development workstation for `.`
+- Host: local development workstation for the dagua repo
 - Python: `~/anaconda3/envs/py311/bin/python`
 - Branch: `codex/r0-determinism` at base `d801ca98`
 - Device policy: CPU constants are authoritative for the harvested directed
@@ -18,7 +18,7 @@ joint design form `alpha * volume + beta`.
 
 ## Sources
 
-- `~/agent-research/dagua/megasprint/m1_out/idle_run1..3`: M1 scale-row
+- `~/private-notes/research/dagua/megasprint/m1_out/idle_run1..3`: M1 scale-row
   telemetry. These runs preserve the scale_1k fCoSE skip / Arm-S admit anchor.
 - `eval_output/fidelity_definitive/per_combo_r79_*.jsonl`
 - `eval_output/fidelity_definitive/per_combo_r78_merged.jsonl`

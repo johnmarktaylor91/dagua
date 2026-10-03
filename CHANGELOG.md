@@ -835,7 +835,7 @@ Co-Authored-By: Happy <yesreply@happy.engineering>
   ([`bb12ea3`](https://github.com/johnmarktaylor91/dagua/commit/bb12ea3a009a3e37026e9d6bb46dd9dc5fb31b68))
 
 The remaining gem architectural residual closed via deep OGDF port. R32 codex read
-  ../_references/ogdf/src/ogdf/energybased/ GEMLayout.cpp end-to-end and ported:
+  ~/projects/_references/ogdf/src/ogdf/energybased/ GEMLayout.cpp end-to-end and ported:
   - std::minstd_rand C++ LCG (seed=42 -> bit-exact draws) - OGDF node permutation order
   (Fisher-Yates with C++ uniform_int dist) - Zero-disturbance RNG consumption (OGDF advances state
   even for no-op moves) - Per-component solve + TileToRows packing - Non-normalized OGDF final
@@ -1332,7 +1332,7 @@ Empty marker file dropped by the codex CLI in cwd. No reason to track.
 - Relocate SPRINT_FIDELITY_SGD2_RESULT.md into research/ convention
   ([`66f3085`](https://github.com/johnmarktaylor91/dagua/commit/66f3085b2381bb98dd171c696cd9ff59724d7de9))
 
-Move from repo root to internal-notes/research/sprint_fidelity_sgd2/ to match every other
+Move from repo root to private-notes/research/sprint_fidelity_sgd2/ to match every other
   sprint_fidelity_*/ dir.
 
 - Remove 13 stale archived-code test modules (live pipeline coverage retained); sweep r69/r71 run
@@ -1354,7 +1354,7 @@ Added to gotchas.md, global lessons.md, and new retro files.
 Incident log (14 incidents), bug documentation, 12 operational principles with adversarial
   refinement by Claude + Codex critics. Key lessons added to gotchas.md (where they'll be read),
   global lessons.md, and project memory. Full retro at
-  internal-notes/knowledge/retro_20260320_*.md
+  private-notes/knowledge/retro_20260320_*.md
 
 - Tidy todo list -- remove stale items, organize roadmap, update completed
   ([`853736c`](https://github.com/johnmarktaylor91/dagua/commit/853736c21d67dae3171aa5b87d6353778ace7d6d))
@@ -3363,7 +3363,7 @@ Meta-fixes: - cluster_handling: Sugiyama + dagua_native cluster support (deferre
 Per-engine SUMMARYs at eval_output/algo_fidelity/round_4{0,1}/<engine>/SUMMARY.md with before/after
   smoke RMSDs.
 
-Postmortem at internal-notes/research/sprint_algo_fidelity/POSTMORTEM_too_many_rounds.md documents
+Postmortem at private-notes/research/sprint_algo_fidelity/POSTMORTEM_too_many_rounds.md documents
   why the dispatch took 4 user escalations across 9 rounds before the complete salvo went out
   (anchoring, sequential planning bias, implicit permission-seeking).
 
@@ -4467,7 +4467,7 @@ Output is consumed by future parity rounds as a scalar loss instead of natural-l
   catastrophic 0% on font_size, font_family, arrow_length, arrow_width, all cluster features.
 
 Also includes: audit + prompt + report archive from rounds 1-18, and the visual-tuning postmortem at
-  internal-notes/knowledge/visual_tuning_workflow.md with general lessons for future similar work.
+  private-notes/knowledge/visual_tuning_workflow.md with general lessons for future similar work.
 
 - **scripts**: Add SSIM perceptual metric to per_card_pixel_diff
   ([`4b5a951`](https://github.com/johnmarktaylor91/dagua/commit/4b5a951bc176c7a1f8b6abe3c991f969a1711ebd))
@@ -4873,7 +4873,7 @@ The graphviz (improved) theme is now the default for all dagua output. Updated: 
   ([`225fefd`](https://github.com/johnmarktaylor91/dagua/commit/225fefd18e26779a1f6abdfe448cb2a2de5af1ef))
 
 Closes the three HIGH regressions identified in
-  internal-notes/research/sprint_graphviz_parity/AUDIT_round_10_OPUS.md.
+  private-notes/research/sprint_graphviz_parity/AUDIT_round_10_OPUS.md.
 
 F1 (R11-A) Puffy nodes -- ellipse silhouettes were ~33% larger than dot's because the round-9 12pt
   -> 16pt cap-height bump widened text bbox while padding/min-size floors and shape-specific
@@ -4913,7 +4913,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 
 Round 11 (commit 225fefd) traded the round-9 puffy-node regression for a new family of opposing
   regressions documented in the round-12 audit
-  (internal-notes/research/sprint_graphviz_parity/AUDIT_round_12_OPUS.md). Round 13 walks back the
+  (private-notes/research/sprint_graphviz_parity/AUDIT_round_12_OPUS.md). Round 13 walks back the
   over-corrections without re-introducing the puffiness round 11 was solving for.
 
 F1 (node size): pull min_width/min_height back from round-11's 41/27 toward the audit-recommended
@@ -4966,7 +4966,7 @@ Residuals (acceptable / out of scope): - Star is still slightly smaller than dot
   curve factor, arrow chunk, edge label tighten
   ([`ba929d1`](https://github.com/johnmarktaylor91/dagua/commit/ba929d16206eb6c78d8e2d18e0200a3dd3f43e84))
 
-Round 14 audit (internal-notes/research/sprint_graphviz_parity/ AUDIT_round_14_OPUS.md) flagged 1
+Round 14 audit (private-notes/research/sprint_graphviz_parity/ AUDIT_round_14_OPUS.md) flagged 1
   PASS / 4 PARTIAL / 1 FAIL on round 13. The FAIL was a new gray-pen regression on stars; the four
   PARTIALs were small-percentage misses on node height, ellipse curve factor, arrow chunk size, and
   edge-label font size. Round 15 lands all five fixes.
@@ -5656,7 +5656,7 @@ Replace symlink mirroring convention with distinct files: - CLAUDE.md = architec
   (design, rationale, how modules connect) - AGENTS.md = implementation-level context (commands,
   conventions, gotchas)
 
-Populate internal-notes/ with architecture map, conventions, decisions, and gotchas. Add
+Populate private-notes/ with architecture map, conventions, decisions, and gotchas. Add
   dispatch/check/clean scripts for task orchestration.
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>

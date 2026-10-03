@@ -26,7 +26,7 @@ from pathlib import Path
 import torch
 
 P2_ROOT = Path(__file__).resolve().parents[1]
-MAIN_WORKTREE = Path("~/.claude/worktrees/dagua-native")
+MAIN_WORKTREE = Path("./local-data/dagua-native")
 
 DIRECTED_GATE_GRAPHS = [
     "transformer_layer",

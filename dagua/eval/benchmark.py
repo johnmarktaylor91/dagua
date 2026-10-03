@@ -2241,7 +2241,7 @@ def main() -> None:
         "--salt-path",
         default=None,
         help="Override salt path for rolling/holdout modes. "
-        "Default: internal-notes/private/holdout_salt (gitignored).",
+        "Default: private-notes/private/holdout_salt (gitignored).",
     )
     args = parser.parse_args()
 

@@ -102,18 +102,18 @@ node_modules/
 aesthetic_review/
 
 # Architect-Worker system: ephemeral task state
-internal-notes/tasks/
+private-notes/tasks/
 
-# Claude Code: local settings are personal, commands + settings.json are shared
-.claude/settings.local.json
-internal-notes/plans/native_placement_algo/reviews/
+# Claude Code: all local agent config stays out of the public tree
+.claude/
+private-notes/plans/native_placement_algo/reviews/
 
 # Sprint 0.5: secret salts for opaque held-out / rolling graph suites
-internal-notes/private/
+private-notes/private/
 
 # Codex CLI tooling marker (empty file dropped by codex exec)
 .codex
-internal-notes/research/sprint_rng_matching/status.json
+private-notes/research/sprint_rng_matching/status.json
 scripts/ogdf_runner
 
 # --- secrets (managed block, keep in every repo) ---
@@ -146,5 +146,5 @@ config.env
 # --- end secrets block ---
 
 # internal notes: local only, never public
-internal-notes/
+private-notes/
 .research/

@@ -25,7 +25,7 @@ from scripts.glados_holdout_run import (  # noqa: E402
 )
 from scripts.native_sprint_score import score_position, scoring_signature  # noqa: E402
 
-RESEARCH_ROOT = Path.home() / "agent-research/dagua/sprint2_improve"
+RESEARCH_ROOT = Path.home() / "private-notes/research/dagua/sprint2_improve"
 MAIN_EVAL_ROOT = Path.home() / "projects/dagua/eval_output"
 DEFAULT_TIED_ROWS = RESEARCH_ROOT / "DEV63_TIED_ROWS.txt"
 DEFAULT_DEV_DIR = MAIN_EVAL_ROOT / "sprint2_dev"

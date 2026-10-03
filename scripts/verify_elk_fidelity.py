@@ -44,7 +44,7 @@ def _ensure_elkjs_node_path() -> None:
     candidates = [
         Path.home() / "tools" / "dagua-refs" / "node_modules",
         ROOT / "node_modules",
-        Path("node_modules"),
+        ROOT / "node_modules",
         Path.home() / ".nvm/versions/node/v24.18.0/lib/node_modules",
         Path.home() / ".nvm/versions/node/v22.22.2/lib/node_modules",
         Path.home() / ".nvm/versions/node/v20.20.1/lib/node_modules",

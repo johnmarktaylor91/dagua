@@ -13,7 +13,7 @@ BENCH_OUT=eval_output/benchmark_5seed_fidelity
 FIDELITY_OUT=eval_output/fidelity_report_r69/stage1
 SEND=$HOME/.claude/scripts/send-to-jmt.sh
 
-export LD_LIBRARY_PATH=~/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=$HOME/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
 # R69 P2 speedup (2026-06-01): heavy fidelity ports are single-threaded sequential
 # Python loops -- torch intra-op threads do nothing for them but cost cores. Pin each
 # worker to 1 thread and run more workers so the timeout-bound tail clears faster.

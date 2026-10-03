@@ -20,7 +20,7 @@ from PIL import Image
 
 MAX_AUDIT_IMAGE_SIDE_PX = 2000
 AUDIT_PACKAGE_SCHEMA_VERSION = 1
-DEFAULT_PROMPT_PATH = "internal-notes/research/sprint_visual_parity_v2/prompts/audit_v2.md"
+DEFAULT_PROMPT_PATH = "private-notes/research/sprint_visual_parity_v2/prompts/audit_v2.md"
 DEFAULT_OUTPUT_DIR = "eval_output/visual_parity_v2/audit_package"
 
 

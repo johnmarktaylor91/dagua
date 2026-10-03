@@ -18,7 +18,7 @@ from dagua.eval.graphs import TestGraph, get_test_graphs, is_semantically_direct
 from dagua.eval.size_policy import set_size_aware_externals
 from dagua.metrics import composite_auto, evaluate
 
-DEFAULT_POSITION_ROOT = Path("eval_output")
+DEFAULT_POSITION_ROOT = Path(__file__).resolve().parents[1] / "eval_output"
 DEFAULT_REFERENCE_POSITIONS = DEFAULT_POSITION_ROOT / "r81_regate2" / "positions"
 DEFAULT_OUTPUT = Path("eval_output/r83_rescore/results.json")
 TIE_BAND = 0.5

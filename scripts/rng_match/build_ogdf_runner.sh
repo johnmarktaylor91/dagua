@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OGDF_TAG="${OGDF_TAG:-foxglove-202510}"
-TOOLS_ROOT="${TOOLS_ROOT:-~/tools}"
+TOOLS_ROOT="${TOOLS_ROOT:-$HOME/tools}"
 OGDF_SRC="${OGDF_SRC:-${TOOLS_ROOT}/ogdf-src}"
 OGDF_BUILD="${OGDF_BUILD:-${TOOLS_ROOT}/ogdf-build}"
 OGDF_PREFIX="${OGDF_PREFIX:-${TOOLS_ROOT}/ogdf}"
@@ -40,7 +40,7 @@ g++ -std=c++17 -O2 "${REPO_ROOT}/scripts/ogdf_runner.cpp" \
 
 "${REPO_ROOT}/scripts/ogdf_runner" --help >/dev/null
 
-export LD_LIBRARY_PATH="~/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$HOME/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}"
 python "${REPO_ROOT}/scripts/rng_match/check_engine.py" classic_gem_iters100
 python "${REPO_ROOT}/scripts/rng_match/check_engine.py" classic_gem_iters500
 python "${REPO_ROOT}/scripts/rng_match/check_engine.py" classic_fmmm_steps100

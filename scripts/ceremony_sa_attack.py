@@ -74,15 +74,15 @@ HIGH_FACET_FLOOR = 0.8
 FOOLED_FACET_MAX_DROP = 0.05
 OBJECTIVE_PENALTY = 10.0
 MIN_BASELINE_SCORE = 1.0e-12
-DEFAULT_DIAGNOSTICS_DIR = Path.home() / "agent-research/dagua/megasprint/gg3_diagnostics"
+DEFAULT_DIAGNOSTICS_DIR = Path.home() / "private-notes/research/dagua/megasprint/gg3_diagnostics"
 DEFAULT_ATTACK_THE_FIX_RESULTS_PATH = (
-    Path.home() / "agent-research/dagua/megasprint/fresh_attack_results.md"
+    Path.home() / "private-notes/research/dagua/megasprint/fresh_attack_results.md"
 )
 DEFAULT_ATTACK_THE_FIX_ARTIFACT_DIR = (
-    Path.home() / "agent-research/dagua/megasprint/fresh_attack_artifacts"
+    Path.home() / "private-notes/research/dagua/megasprint/fresh_attack_artifacts"
 )
 PHASE1_CLEAN_ROWS_STORE = (
-    Path.home() / "agent-research/dagua/megasprint/PHASE1_CLEAN_REAL_ROWS_V3.json"
+    Path.home() / "private-notes/research/dagua/megasprint/PHASE1_CLEAN_REAL_ROWS_V3.json"
 )
 MARGIN_AUDIT_FALLBACK = 12.2
 MARGIN_AUDIT_FAMILIES = ("tree", "dag", "clustered", "generic_force", "weighted", "ported")

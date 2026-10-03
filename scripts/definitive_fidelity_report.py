@@ -30,7 +30,7 @@ from dagua.eval.variants import get_variant, original_variant_name
 SPEC_VERSION = "r70-v6"
 DEFAULT_PER_COMBO = Path("eval_output/fidelity_definitive/per_combo.jsonl")
 DEFAULT_OUTPUT_DIR = Path("eval_output/fidelity_definitive")
-DEFAULT_FAILING_MAP = Path("internal-notes/research/sprint_rng_matching/failing_map_final.json")
+DEFAULT_FAILING_MAP = Path("private-notes/research/sprint_rng_matching/failing_map_final.json")
 DEFAULT_TRIAGE = Path("eval_output/fidelity_report_final/triage_final.md")
 DEFAULT_FIVE_SEED = Path("eval_output/benchmark_5seed_final/results.json")
 DEFAULT_DATA_DIR = Path("eval_output/benchmark_100seed_escalation_final")

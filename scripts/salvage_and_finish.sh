@@ -12,11 +12,11 @@
 # Uses workers=4 and MAX_INFLIGHT_GROUPS=32 (set in run_benchmark.py).
 set -uo pipefail
 
-export PATH="~/anaconda3/envs/py311/bin:$PATH"
+export PATH="$HOME/anaconda3/envs/py311/bin:$PATH"
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-cd .
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 echo "=== [salvage] started at $(date -Iseconds) ==="
 

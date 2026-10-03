@@ -4,7 +4,7 @@
 # 2. Deterministic refresh: the 8 DETERMINISTIC_DIFFERENT engines + refs, all graphs, 5 seeds.
 # 3. Sugiyama rung-0 reverify: 6 sugiyama variants + refs, all graphs, 5 seeds (same dir as 2).
 set -uo pipefail
-cd .
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 CTL_GRAPHS="center_port_backedge_hub,clustered_medium_5x20,heavy_tail_weights_50,planar_60,real_lesmis_77,sbm_5x50,sparse_pair_50,weighted_clusters_3x10"
 CTL_ENGINES="classic_fa2_default,fa2_ref__for__classic_fa2_default,classic_graphopt_default,igraph_graphopt__for__classic_graphopt_default,classic_lgl_default,igraph_lgl__for__classic_lgl_default,classic_tsnet_default,tsne_graph__for__classic_tsnet_default,classic_linlog_default,linlog__for__classic_linlog_default"

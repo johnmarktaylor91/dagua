@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 
 # Use instrumented graphviz so the report compares apples to apples
 export PATH=/tmp/graphviz_instr/bin:$PATH
-export LD_LIBRARY_PATH=~/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=$HOME/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
 
 SCRATCH_DIR=eval_output/algo_fidelity/round_56/scratch
 RESULTS_JSON="$SCRATCH_DIR/results.json"

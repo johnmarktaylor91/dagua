@@ -23,7 +23,7 @@ from dagua.metrics import composite_large, quick
 
 _GRAPH_TYPES = ("sparse_er", "scale_free_ba", "grid_2d")
 _RUNGS = (20_000, 100_000, 1_000_000)
-_DEFAULT_OUTPUT = Path("internal-notes/research/r79_native/r79_scale_ladder.json")
+_DEFAULT_OUTPUT = Path("private-notes/research/r79_native/r79_scale_ladder.json")
 
 
 def _path_from_arg(raw: str) -> Path:

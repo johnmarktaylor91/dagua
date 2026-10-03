@@ -1,6 +1,6 @@
 """Salt-derived graph suite generator for Sprint 0.5+ opacity.
 
-Given a secret salt (committed out-of-repo at ``internal-notes/private/
+Given a secret salt (committed out-of-repo at ``private-notes/private/
 holdout_salt``) and a public sprint tag, produces a deterministic list of
 test graphs covering the priority families in 03_test_matrix.md. Per-graph
 seeds are derived as ``sha256(salt || tag || family || index)[:8]``, so
@@ -50,7 +50,7 @@ from dagua.eval.graphs import (
 # process CWD, so make_holdout_suite() works from any working directory
 # (WP07-F10; the old CWD-relative path raised FileNotFoundError elsewhere).
 DEFAULT_SALT_PATH = (
-    Path(__file__).resolve().parents[2] / ".project-context" / "private" / "holdout_salt"
+    Path(__file__).resolve().parents[2] / "private-notes" / "private" / "holdout_salt"
 )
 
 
@@ -168,7 +168,7 @@ def _load_salt(salt_path: Optional[Path]) -> bytes:
     if not p.exists():
         raise FileNotFoundError(
             f"Secret salt not found at {p}. Sprint 0.5 requires "
-            f"internal-notes/private/holdout_salt (gitignored). Run "
+            f"private-notes/private/holdout_salt (gitignored). Run "
             f'`python -c \'import secrets; open({p!r}, "wb").write('
             f"secrets.token_bytes(32))'` to create one."
         )

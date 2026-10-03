@@ -6,7 +6,7 @@ cd "$(git rev-parse --show-toplevel)" 2>/dev/null || true
 
 TASK_ID="${1:?Usage: dispatch.sh <task-id> <command> [args...]}"
 shift
-TASK_DIR="internal-notes/tasks"
+TASK_DIR="private-notes/tasks"
 
 mkdir -p "$TASK_DIR"
 rm -f "$TASK_DIR/$TASK_ID".{status,result,log,diff}

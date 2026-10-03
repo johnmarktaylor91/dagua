@@ -390,7 +390,7 @@ class LayoutConfig:
     algorithm_params: dict[str, Any] = field(default_factory=dict)
 
     # r80-S8 aesthetic-priority knob (PROVISIONAL API -- pending JMT sign-off,
-    # see internal-notes/research/r79_native/P15_AESTHETIC_KNOB.md). Steers
+    # see private-notes/research/r79_native/P15_AESTHETIC_KNOB.md). Steers
     # BOTH the native undirected-portfolio candidate-selection composite and
     # the differentiable loss weights toward a user's aesthetic priorities.
     # Default None/None is the true identity path: unset means dagua's

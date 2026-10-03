@@ -49,10 +49,10 @@ from dagua.metrics import (
 )
 
 V2_FIELD_PATH = Path(
-    "~/agent-research/dagua/native_sprint/R8_EVENTA_RAW_SCORES_V2_BACKFILL.json"
+    "outputs/native_sprint/R8_EVENTA_RAW_SCORES_V2_BACKFILL.json"
 )
-DEFAULT_BASELINE_DIR = Path("~/agent-research/dagua/megasprint/s1_out")
-ROUNDLOOP_DIR = Path("~/agent-research/dagua/megasprint/roundloop")
+DEFAULT_BASELINE_DIR = Path("outputs/megasprint/s1_out")
+ROUNDLOOP_DIR = Path("outputs/megasprint/roundloop")
 DEFAULT_CACHE_PATH = ROUNDLOOP_DIR / "scores_cache.json"
 DEFAULT_LOCKS_PATH = ROUNDLOOP_DIR / "regression_locks.json"
 

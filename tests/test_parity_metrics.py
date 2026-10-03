@@ -19,7 +19,7 @@ from scripts import parity_metrics as pmetrics
 from scripts.visual_parity.io import read_ledger
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LEDGER_PATH = REPO_ROOT / "internal-notes/research/sprint_visual_parity_v2/ledger.json"
+LEDGER_PATH = REPO_ROOT / "private-notes/research/sprint_visual_parity_v2/ledger.json"
 DEFAULT_GLOBAL_FLOOR_PCT = 85.0
 
 

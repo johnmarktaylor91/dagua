@@ -11,7 +11,7 @@ optimizer.step()`. Named after the Dagua River in Colombia — DAG + agua.
 
 ## Architecture
 
-See `internal-notes/architecture.md` for the full map.
+See `private-notes/architecture.md` for the full map.
 
 Key entry points:
 - main: `dagua/__init__.py` (public API), `dagua/graph.py` (DaguaGraph), `dagua/cli.py` (CLI)
@@ -93,7 +93,7 @@ Descriptive kebab-case: `fix-trace-module`, `add-sweep-dataclass`
 - API design decisions (discuss with user first)
 - Changes to public interfaces without approval
 - CI/CD, deployment, release configs
-- AGENTS.md, internal-notes/*.md modifications
+- AGENTS.md, private-notes/*.md modifications
 
 ## Documentation Maintenance
 
@@ -369,7 +369,7 @@ make artifact-index      # rebuild report artifact index
 
 ## Scale Work (100M+ nodes)
 
-Read `internal-notes/knowledge/scaling_principles.md` before any task at
+Read `private-notes/knowledge/scaling_principles.md` before any task at
 this scale. Key rules: budget peak memory (3-4x base), gate on topology
 sketch (N+E+depth+degree), measure before choosing GPU vs CPU, every fix
 creates a guardrail, test at 100K/1M/10M (not single smoke test).

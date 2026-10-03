@@ -20,7 +20,7 @@ optimization problem. For each test panel exposed by
 
 The output is consumed by future graphviz-parity rounds as a scalar loss
 instead of natural-language audit verdicts. See
-``internal-notes/knowledge/visual_tuning_workflow.md`` for the full
+``private-notes/knowledge/visual_tuning_workflow.md`` for the full
 postmortem driving the design.
 
 Usage
