@@ -24,7 +24,9 @@ OUT = "eval_output/benchmark_100seed_umap_rerun"
 SEND = os.path.expanduser("~/.claude/scripts/send-to-jmt.sh")
 
 env = dict(os.environ)
-env["LD_LIBRARY_PATH"] = os.path.expanduser("~/anaconda3/envs/py311/lib") + ":" + env.get("LD_LIBRARY_PATH", "")
+env["LD_LIBRARY_PATH"] = (
+    os.path.expanduser("~/anaconda3/envs/py311/lib") + ":" + env.get("LD_LIBRARY_PATH", "")
+)
 # single-threaded everything: numba is the umap culprit; OMP/MKL pinned too
 for k in (
     "OMP_NUM_THREADS",

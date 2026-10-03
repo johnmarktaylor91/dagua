@@ -25,9 +25,7 @@ from typing import Any, Dict, Optional
 
 P2_ROOT = Path(__file__).resolve().parents[1]
 NEW_RESULTS = P2_ROOT / "eval_output" / "r79_baseline" / "results.json"
-FROZEN_RESULTS = Path(
-    "./local-data/dagua-native/eval_output/r79_baseline/results.json"
-)
+FROZEN_RESULTS = Path("./local-data/dagua-native/eval_output/r79_baseline/results.json")
 REPORT_PATH = P2_ROOT / "private-notes" / "research" / "r79_native" / "P8_SWEEP_DELTAS.md"
 
 TIE_BAND = 0.5

@@ -1018,7 +1018,9 @@ def test_test_holdout_refuses_empty_partition_before_spending(
 def test_holdout_default_ledger_root_is_frozen_campaign_config() -> None:
     """Checkout location cannot mint an independent sealed-role budget."""
 
-    expected = Path("outputs/ruler_v4/p3/gate/ACCESS_LEDGER")
+    expected = (
+        Path.home() / ".local" / "state" / "dagua" / "ruler_v4" / "p3" / "gate" / "ACCESS_LEDGER"
+    )
 
     assert access_module._ACCESS_LEDGER_ROOT == expected
     assert HoldoutGuard()._ledger_root == expected

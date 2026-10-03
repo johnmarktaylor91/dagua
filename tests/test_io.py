@@ -726,7 +726,9 @@ edges:
             os.unlink(path)
 
     def test_annotated_yaml_example_file(self):
-        path = str(Path(__file__).resolve().parents[1] / "examples" / "formats" / "annotated_graph.yaml")
+        path = str(
+            Path(__file__).resolve().parents[1] / "examples" / "formats" / "annotated_graph.yaml"
+        )
         g = load(path)
         assert g.num_nodes == 6
         assert "core_system" in g.clusters
@@ -885,7 +887,9 @@ class TestUnifiedLoadSave:
             os.unlink(path)
 
     def test_annotated_json_example_file(self):
-        path = str(Path(__file__).resolve().parents[1] / "examples" / "formats" / "annotated_graph.json")
+        path = str(
+            Path(__file__).resolve().parents[1] / "examples" / "formats" / "annotated_graph.json"
+        )
         g = load(path)
         assert g.num_nodes == 6
         assert "core_system" in g.clusters

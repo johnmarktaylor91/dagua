@@ -25,15 +25,9 @@ from scripts.native_sprint_score import (  # noqa: E402
     selected_names,
 )
 
-DEFAULT_BACKFILL = Path(
-    "outputs/native_sprint/R8_EVENTA_RAW_SCORES_V2_BACKFILL.json"
-)
-DEFAULT_OLD_BASELINE = Path(
-    "outputs/native_sprint/R8_EVENTA_OLD108_V2.json"
-)
-DEFAULT_EXTENDED_BASELINE = Path(
-    "outputs/native_sprint/R8_EVENTA_EXTENDED121_V2.json"
-)
+DEFAULT_BACKFILL = Path("outputs/native_sprint/R8_EVENTA_RAW_SCORES_V2_BACKFILL.json")
+DEFAULT_OLD_BASELINE = Path("outputs/native_sprint/R8_EVENTA_OLD108_V2.json")
+DEFAULT_EXTENDED_BASELINE = Path("outputs/native_sprint/R8_EVENTA_EXTENDED121_V2.json")
 DEFAULT_CORPUS_POSITIONS = ROOT / "eval_output" / "r81_regate2" / "positions"
 DEFAULT_OUTPUT_DIR = Path("outputs/megasprint/freeze_v3_rebaseline")
 SEVERE_G6_FLOOR = 0.55

@@ -48,9 +48,7 @@ from dagua.metrics import (
     composite_auto,
 )
 
-V2_FIELD_PATH = Path(
-    "outputs/native_sprint/R8_EVENTA_RAW_SCORES_V2_BACKFILL.json"
-)
+V2_FIELD_PATH = Path("outputs/native_sprint/R8_EVENTA_RAW_SCORES_V2_BACKFILL.json")
 DEFAULT_BASELINE_DIR = Path("outputs/megasprint/s1_out")
 ROUNDLOOP_DIR = Path("outputs/megasprint/roundloop")
 DEFAULT_CACHE_PATH = ROUNDLOOP_DIR / "scores_cache.json"

@@ -15,7 +15,9 @@ from typing import Iterable, Mapping, Optional, Tuple
 
 from dagua.eval.ruler_v4.fit.bank import _FROZEN_A15_ROLE_HASH
 
-_ACCESS_LEDGER_ROOT = Path("outputs/ruler_v4/p3/gate/ACCESS_LEDGER")
+_ACCESS_LEDGER_ROOT = (
+    Path.home() / ".local" / "state" / "dagua" / "ruler_v4" / "p3" / "gate" / "ACCESS_LEDGER"
+)
 _LOOK_OCCASIONS = ("post-M1", "post-M2", "post-M3", "stopping")
 _CALIBRATION_KEYS = frozenset({"within-family-calibration", "cross-family-calibration"})
 W08_LEDGER_KEY = "w08-off-distribution"

@@ -29,7 +29,9 @@ SEND = os.path.expanduser("~/.claude/scripts/send-to-jmt.sh")
 DISK_FLOOR_GB = 15  # stop gracefully if free space drops below this (protect a 3-day run)
 
 env = dict(os.environ)
-env["LD_LIBRARY_PATH"] = os.path.expanduser("~/anaconda3/envs/py311/lib") + ":" + env.get("LD_LIBRARY_PATH", "")
+env["LD_LIBRARY_PATH"] = (
+    os.path.expanduser("~/anaconda3/envs/py311/lib") + ":" + env.get("LD_LIBRARY_PATH", "")
+)
 for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
     env[k] = "1"
 
