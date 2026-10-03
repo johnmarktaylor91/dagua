@@ -18,9 +18,7 @@ from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Seque
 from scripts.visual_parity import extractors
 from scripts.visual_parity.types import TargetKind, TripwireResult, TripwireSpec
 
-CANONICAL_STATUS_PATH = Path(
-    "internal-notes/research/sprint_visual_parity_v2/tripwire_status.json"
-)
+CANONICAL_STATUS_PATH = Path("internal-notes/research/sprint_visual_parity_v2/tripwire_status.json")
 
 Panel = Dict[str, Any]
 MetricFn = Callable[[Panel], float | str | bool]

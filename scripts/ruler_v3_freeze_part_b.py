@@ -26,12 +26,8 @@ from scripts.native_sprint_score import (  # noqa: E402
     scoring_signature,
 )
 
-BACKFILL_PATH = Path(
-    "~/agent-research/dagua/native_sprint/R8_EVENTA_RAW_SCORES_V2_BACKFILL.json"
-)
-DEFAULT_REPORT_PATH = Path(
-    "~/agent-research/dagua/megasprint/FREEZE_PART_B_BOUND_REPORT.md"
-)
+BACKFILL_PATH = Path("~/agent-research/dagua/native_sprint/R8_EVENTA_RAW_SCORES_V2_BACKFILL.json")
+DEFAULT_REPORT_PATH = Path("~/agent-research/dagua/megasprint/FREEZE_PART_B_BOUND_REPORT.md")
 HIGH_CORRELATION_THRESHOLD = 0.85
 RANDOM_LAYOUTS_PER_GRAPH = 3
 DEFAULT_MAX_REAL_ROWS = 1800
