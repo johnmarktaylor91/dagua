@@ -16,7 +16,7 @@ BENCH_OUT=eval_output/benchmark_100seed_escalation
 STAGE1=eval_output/fidelity_report_r69/stage1
 TOST_OUT=eval_output/fidelity_report_r69/tost
 REPORT=eval_output/fidelity_report_r69/report.md
-SEND=$HOME/.claude/scripts/send-to-jmt.sh
+SEND=${DAGUA_NOTIFY:-echo}
 
 export LD_LIBRARY_PATH=$HOME/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
 # carry the P2 speedup: heavy fidelity ports are single-threaded; pin threads, more workers

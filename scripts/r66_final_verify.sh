@@ -10,7 +10,7 @@ LOG=/tmp/r66_final_verify.log
 BENCH_OUT=eval_output/benchmark_100seed_final
 FIDELITY_OUT=eval_output/fidelity_report_100seed_r66
 QR_OUT=eval_output/quality_runtime_report_100seed_r66
-SEND=$HOME/.claude/scripts/send-to-jmt.sh
+SEND=${DAGUA_NOTIFY:-echo}
 
 # Use instrumented graphviz
 export PATH=/tmp/graphviz_instr/bin:$PATH

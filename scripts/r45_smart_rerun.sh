@@ -13,7 +13,7 @@ LOG=/tmp/r45_smart_rerun.log
 BENCH_OUT=eval_output/benchmark_100seed_final
 FIDELITY_OUT=eval_output/fidelity_report_100seed_r45
 QR_OUT=eval_output/quality_runtime_report_100seed_r45
-SEND=$HOME/.claude/scripts/send-to-jmt.sh
+SEND=${DAGUA_NOTIFY:-echo}
 
 exec >> "$LOG" 2>&1
 echo ""

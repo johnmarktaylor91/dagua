@@ -25,7 +25,7 @@ os.chdir(ROOT)
 
 FAILMAP = ROOT / "private-notes/research/sprint_rng_matching/failing_map_final.json"
 BENCH = "eval_output/benchmark_100seed_escalation_final"
-SEND = os.path.expanduser("~/.claude/scripts/send-to-jmt.sh")
+SEND = os.environ.get("DAGUA_NOTIFY", "echo")
 DISK_FLOOR_GB = 15  # stop gracefully if free space drops below this (protect a 3-day run)
 
 env = dict(os.environ)

@@ -15,7 +15,7 @@ exec >> "$LOG" 2>&1
 echo ""
 echo "=== rerun_fidelity_pipeline started $(date -Iseconds) ==="
 
-~/.claude/scripts/send-to-jmt.sh "Re-running fidelity + quality_runtime pipelines (the post-benchmark crashed on llvmlite/numba load -- now resolved). Output: $FIDELITY_OUT/report.md and $QR_OUT/report.md" || true
+${DAGUA_NOTIFY:-echo} "Re-running fidelity + quality_runtime pipelines (the post-benchmark crashed on llvmlite/numba load -- now resolved). Output: $FIDELITY_OUT/report.md and $QR_OUT/report.md" || true
 
 # Phase 1: Fidelity pipeline
 echo "--- fidelity_analysis $(date -Iseconds) ---"
@@ -27,7 +27,7 @@ if python3 scripts/fidelity_analysis.py \
     echo "  fidelity_analysis OK"
 else
     echo "  fidelity_analysis FAILED"
-    ~/.claude/scripts/send-to-jmt.sh "fidelity_analysis FAILED again. See $LOG" || true
+    ${DAGUA_NOTIFY:-echo} "fidelity_analysis FAILED again. See $LOG" || true
     exit 1
 fi
 
@@ -41,7 +41,7 @@ python3 scripts/generate_fidelity_report.py \
 
 if [ -s "$FIDELITY_OUT/report.md" ]; then
     echo "  fidelity report: $FIDELITY_OUT/report.md ($(wc -l < "$FIDELITY_OUT/report.md") lines)"
-    ~/.claude/scripts/send-to-jmt.sh "Fidelity report ready: $FIDELITY_OUT/report.md ($(wc -l < "$FIDELITY_OUT/report.md") lines). Now running quality/runtime pipeline." || true
+    ${DAGUA_NOTIFY:-echo} "Fidelity report ready: $FIDELITY_OUT/report.md ($(wc -l < "$FIDELITY_OUT/report.md") lines). Now running quality/runtime pipeline." || true
 fi
 
 # Phase 2: Quality/Runtime pipeline
@@ -53,4 +53,4 @@ else
 fi
 
 echo "=== rerun_fidelity_pipeline done $(date -Iseconds) ==="
-~/.claude/scripts/send-to-jmt.sh "Post-benchmark pipeline COMPLETE. Reports: $FIDELITY_OUT/report.md , $QR_OUT/report.md" || true
+${DAGUA_NOTIFY:-echo} "Post-benchmark pipeline COMPLETE. Reports: $FIDELITY_OUT/report.md , $QR_OUT/report.md" || true

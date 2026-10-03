@@ -88,7 +88,7 @@ echo "=== [watchdog] flipping running rows to skipped ==="
 python3 scripts/flip_running_to_skipped.py --reason overnight_time_limit_5am
 FLIP_EXIT=$?
 if [ $FLIP_EXIT -ne 0 ]; then
-    ~/.claude/scripts/send-to-jmt.sh "Dagua watchdog FAILED to flip running rows (exit=$FLIP_EXIT). Check eval_output/variant_bench_full/results.json manually." || true
+    ${DAGUA_NOTIFY:-echo} "Dagua watchdog FAILED to flip running rows (exit=$FLIP_EXIT). Check eval_output/variant_bench_full/results.json manually." || true
     exit $FLIP_EXIT
 fi
 
@@ -107,9 +107,9 @@ print(f\"ok={c.get('ok',0):,} err={c.get('error',0):,} skip={c.get('skipped',0):
 " 2>/dev/null || echo "summary unavailable")
 
 if [ $POST_EXIT -eq 0 ]; then
-    ~/.claude/scripts/send-to-jmt.sh "Dagua overnight FORCE-COMPLETE at 5:30am. $SUMMARY. Reports in eval_output/report/. Remaining 'running' rows (mostly slow neulay retries) flipped to skipped." || true
+    ${DAGUA_NOTIFY:-echo} "Dagua overnight FORCE-COMPLETE at 5:30am. $SUMMARY. Reports in eval_output/report/. Remaining 'running' rows (mostly slow neulay retries) flipped to skipped." || true
 else
-    ~/.claude/scripts/send-to-jmt.sh "Dagua overnight PARTIAL: watchdog at 5:30am, post-pipeline exit=$POST_EXIT. $SUMMARY. See eval_output/post_benchmark_pipeline.log" || true
+    ${DAGUA_NOTIFY:-echo} "Dagua overnight PARTIAL: watchdog at 5:30am, post-pipeline exit=$POST_EXIT. $SUMMARY. See eval_output/post_benchmark_pipeline.log" || true
 fi
 
 echo "=== [watchdog] done at $(date -Iseconds) post_exit=$POST_EXIT ==="

@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 LOG=/tmp/r67_gem_drl_100seed.log
 BENCH_OUT=eval_output/benchmark_100seed_final
 FIDELITY_OUT=eval_output/fidelity_report_100seed_r67
-SEND=$HOME/.claude/scripts/send-to-jmt.sh
+SEND=${DAGUA_NOTIFY:-echo}
 
 export PATH=/tmp/graphviz_instr/bin:$PATH
 export LD_LIBRARY_PATH=$HOME/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}

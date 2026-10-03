@@ -22,7 +22,7 @@ BENCH = "eval_output/benchmark_100seed_escalation"
 STAGE1 = "eval_output/fidelity_report_r69/stage1"
 TOST_OUT = "eval_output/fidelity_report_r69/tost"
 REPORT = "eval_output/fidelity_report_r69/report.md"
-SEND = os.path.expanduser("~/.claude/scripts/send-to-jmt.sh")
+SEND = os.environ.get("DAGUA_NOTIFY", "echo")
 
 env = dict(os.environ)
 env["LD_LIBRARY_PATH"] = (

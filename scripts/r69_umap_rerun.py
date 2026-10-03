@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 os.chdir(ROOT)
 FAILMAP = ROOT / "private-notes/research/sprint_rng_matching/failing_map_final.json"
 OUT = "eval_output/benchmark_100seed_umap_rerun"
-SEND = os.path.expanduser("~/.claude/scripts/send-to-jmt.sh")
+SEND = os.environ.get("DAGUA_NOTIFY", "echo")
 
 env = dict(os.environ)
 env["LD_LIBRARY_PATH"] = (

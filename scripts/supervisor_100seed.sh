@@ -22,7 +22,7 @@ echo ""
 echo "=== Supervisor started $(date -Iseconds) PID=$$ ==="
 
 # iMessage start
-~/.claude/scripts/send-to-jmt.sh "100-seed benchmark supervisor starting (PID $$). Output: $BENCH_OUT. ETA 4-5 days. Will iMessage on completion." >/dev/null 2>&1 || true
+${DAGUA_NOTIFY:-echo} "100-seed benchmark supervisor starting (PID $$). Output: $BENCH_OUT. ETA 4-5 days. Will iMessage on completion." >/dev/null 2>&1 || true
 
 # Benchmark phase: run with auto-restart on crash
 MAX_RETRIES=20
@@ -47,19 +47,19 @@ while [ $ATTEMPT -lt $MAX_RETRIES ]; do
     EXIT_CODE=$?
     echo "=== Benchmark exited with code $EXIT_CODE on attempt $ATTEMPT, retrying in 60s ==="
     if [ $((ATTEMPT % 3)) -eq 0 ]; then
-      ~/.claude/scripts/send-to-jmt.sh "100-seed benchmark crashed attempt $ATTEMPT (exit $EXIT_CODE). Auto-retrying with --resume..." >/dev/null 2>&1 || true
+      ${DAGUA_NOTIFY:-echo} "100-seed benchmark crashed attempt $ATTEMPT (exit $EXIT_CODE). Auto-retrying with --resume..." >/dev/null 2>&1 || true
     fi
     sleep 60
   fi
 done
 
 if [ $SUCCESS -eq 0 ]; then
-  ~/.claude/scripts/send-to-jmt.sh "100-seed benchmark FAILED after $MAX_RETRIES attempts. See $BENCH_LOG. Manual intervention needed." >/dev/null 2>&1 || true
+  ${DAGUA_NOTIFY:-echo} "100-seed benchmark FAILED after $MAX_RETRIES attempts. See $BENCH_LOG. Manual intervention needed." >/dev/null 2>&1 || true
   echo "=== Supervisor giving up $(date -Iseconds) ==="
   exit 1
 fi
 
-~/.claude/scripts/send-to-jmt.sh "100-seed benchmark DONE. Running post-pipeline (HDF5 consolidate -> fidelity analysis -> quality/runtime). ETA ~30min." >/dev/null 2>&1 || true
+${DAGUA_NOTIFY:-echo} "100-seed benchmark DONE. Running post-pipeline (HDF5 consolidate -> fidelity analysis -> quality/runtime). ETA ~30min." >/dev/null 2>&1 || true
 
 echo "=== Post-pipeline phase starting $(date -Iseconds) ==="
 
@@ -76,7 +76,7 @@ echo "--- fidelity_analysis $(date -Iseconds) ---"
 python3 scripts/fidelity_analysis.py \
     --input "$BENCH_OUT" \
     --output "$FIDELITY_OUT/data" >> "$PIPELINE_LOG" 2>&1 || \
-    { echo "fidelity_analysis failed"; ~/.claude/scripts/send-to-jmt.sh "fidelity_analysis FAILED. See $PIPELINE_LOG"; }
+    { echo "fidelity_analysis failed"; ${DAGUA_NOTIFY:-echo} "fidelity_analysis FAILED. See $PIPELINE_LOG"; }
 
 echo "--- validate_fidelity_output $(date -Iseconds) ---"
 python3 scripts/validate_fidelity_output.py \
@@ -87,7 +87,7 @@ python3 scripts/generate_fidelity_report.py \
     --input "$FIDELITY_OUT/data" \
     --output "$FIDELITY_OUT/report.md" >> "$PIPELINE_LOG" 2>&1 || true
 
-~/.claude/scripts/send-to-jmt.sh "Fidelity report generated: $FIDELITY_OUT/report.md. Now running quality/runtime pipeline." >/dev/null 2>&1 || true
+${DAGUA_NOTIFY:-echo} "Fidelity report generated: $FIDELITY_OUT/report.md. Now running quality/runtime pipeline." >/dev/null 2>&1 || true
 
 # Phase 3: Quality/runtime pipeline
 QR_OUT="eval_output/quality_runtime_report_100seed_final"
@@ -108,6 +108,6 @@ if os.path.exists(results_path):
     print(f'total={n_total} ok={n_ok} err={n_err} skip={n_skip}')
 " 2>/dev/null)"
 
-~/.claude/scripts/send-to-jmt.sh "100-seed run COMPLETE. Benchmark: $SUMMARY. Reports: $FIDELITY_OUT/report.md, $QR_OUT/report.md" >/dev/null 2>&1 || true
+${DAGUA_NOTIFY:-echo} "100-seed run COMPLETE. Benchmark: $SUMMARY. Reports: $FIDELITY_OUT/report.md, $QR_OUT/report.md" >/dev/null 2>&1 || true
 
 echo "=== Supervisor done $(date -Iseconds) ==="

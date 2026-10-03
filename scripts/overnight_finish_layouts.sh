@@ -40,7 +40,7 @@ echo "=== [overnight] benchmark exited with $BENCH_EXIT at $(date -Iseconds) ===
 
 if [ $BENCH_EXIT -ne 0 ]; then
     echo "[overnight] Benchmark failed -- skipping post pipeline"
-    ~/.claude/scripts/send-to-jmt.sh "Dagua overnight FAILED: benchmark exit=$BENCH_EXIT. No post-pipeline run. See log at private-notes/tasks/overnight-finish.log" || true
+    ${DAGUA_NOTIFY:-echo} "Dagua overnight FAILED: benchmark exit=$BENCH_EXIT. No post-pipeline run. See log at private-notes/tasks/overnight-finish.log" || true
     exit $BENCH_EXIT
 fi
 
@@ -53,7 +53,7 @@ print(sum(1 for v in r.values() if v.get('status') == 'running'))
 echo "=== [overnight] post-benchmark status: running=$REMAIN ==="
 if [ "$REMAIN" -ne 0 ]; then
     echo "[overnight] Warning: $REMAIN rows still 'running'. Post-pipeline will abort."
-    ~/.claude/scripts/send-to-jmt.sh "Dagua overnight WARN: benchmark finished but $REMAIN rows still 'running'. Post-pipeline blocked. Check log." || true
+    ${DAGUA_NOTIFY:-echo} "Dagua overnight WARN: benchmark finished but $REMAIN rows still 'running'. Post-pipeline blocked. Check log." || true
     exit 1
 fi
 
@@ -73,9 +73,9 @@ c = Counter(v.get('status','') for v in r.values())
 ok = c.get('ok', 0); err = c.get('error', 0); to = c.get('timeout', 0); sk = c.get('skipped', 0)
 print(f'ok={ok:,} err={err:,} timeout={to:,} skipped={sk:,}')
 " 2>/dev/null || echo "summary unavailable")
-    ~/.claude/scripts/send-to-jmt.sh "Dagua overnight DONE. $SUMMARY. Reports in eval_output/report/. Benchmark + HDF5 + fidelity + QR all complete." || true
+    ${DAGUA_NOTIFY:-echo} "Dagua overnight DONE. $SUMMARY. Reports in eval_output/report/. Benchmark + HDF5 + fidelity + QR all complete." || true
 else
-    ~/.claude/scripts/send-to-jmt.sh "Dagua overnight PARTIAL: benchmark ok but post-pipeline exit=$POST_EXIT. See eval_output/post_benchmark_pipeline.log" || true
+    ${DAGUA_NOTIFY:-echo} "Dagua overnight PARTIAL: benchmark ok but post-pipeline exit=$POST_EXIT. See eval_output/post_benchmark_pipeline.log" || true
 fi
 
 echo "=== [overnight] finished at $(date -Iseconds) (post_exit=$POST_EXIT) ==="

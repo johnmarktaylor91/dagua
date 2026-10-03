@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 LOG=/tmp/r69_p2_5seed.log
 BENCH_OUT=eval_output/benchmark_5seed_fidelity
 FIDELITY_OUT=eval_output/fidelity_report_r69/stage1
-SEND=$HOME/.claude/scripts/send-to-jmt.sh
+SEND=${DAGUA_NOTIFY:-echo}
 
 export LD_LIBRARY_PATH=$HOME/anaconda3/envs/py311/lib:${LD_LIBRARY_PATH:-}
 # R69 P2 speedup (2026-06-01): heavy fidelity ports are single-threaded sequential

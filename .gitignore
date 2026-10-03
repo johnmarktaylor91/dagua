@@ -147,4 +147,5 @@ config.env
 
 # internal notes: local only, never public
 private-notes/
+/.project-context
 .research/

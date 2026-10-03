@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 
 LOG=/tmp/r31_focal_rerun.log
 BENCH_OUT=eval_output/benchmark_100seed_final
-SEND=$HOME/.claude/scripts/send-to-jmt.sh
+SEND=${DAGUA_NOTIFY:-echo}
 
 # All affected engines (classic side + their R31 paired originals)
 ENGINES="classic_umap_default,classic_umap_mindist001,classic_umap_mindist05,classic_umap_nn30,classic_umap_nn5,classic_umap_spread2,classic_lgl_cool1,classic_lgl_cool2,classic_lgl_default,classic_lgl_iter300,classic_lgl_iter50,classic_graphopt_default,classic_graphopt_charge_high,classic_graphopt_charge_low,classic_graphopt_mass_high,classic_graphopt_mass_low,classic_graphopt_spring2,classic_neulay_default,classic_neulay_lr001,classic_neulay_lr05,classic_neulay_no_gcn,classic_neulay_radius02,classic_neulay_radius08,classic_sgd2_multi_default,classic_sgd2_multi_batch8,classic_sgd2_multi_batch128,classic_sgd2_multi_lr001,classic_sgd2_multi_lr01,classic_sgd2_multi_stress_only,classic_sgd2_multi_with_aspect,classic_sgd2_multi_with_crossing,classic_davidson_harel_rounds50,classic_davidson_harel_rounds100,classic_davidson_harel_rounds200"

@@ -11,7 +11,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 SUPERVISOR_LOG=/tmp/benchmark_100seed_supervisor.log
 BENCH_OUT=eval_output/benchmark_100seed_final
 RESULTS=$BENCH_OUT/results.json
-SEND=$HOME/.claude/scripts/send-to-jmt.sh
+SEND=${DAGUA_NOTIFY:-echo}
 DAILY_LOG=/tmp/daily_benchmark_check.log
 
 exec >> "$DAILY_LOG" 2>&1

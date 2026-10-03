@@ -10,7 +10,7 @@ LOG=/tmp/r42_comprehensive_rerun.log
 BENCH_OUT=eval_output/benchmark_100seed_final
 FIDELITY_OUT=eval_output/fidelity_report_100seed_r42
 QR_OUT=eval_output/quality_runtime_report_100seed_r42
-SEND=$HOME/.claude/scripts/send-to-jmt.sh
+SEND=${DAGUA_NOTIFY:-echo}
 
 exec >> "$LOG" 2>&1
 echo ""

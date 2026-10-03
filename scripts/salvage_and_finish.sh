@@ -51,7 +51,7 @@ if [ "$REMAIN" -ne 0 ]; then
 fi
 
 if [ $BENCH_EXIT -ne 0 ]; then
-    ~/.claude/scripts/send-to-jmt.sh "Dagua salvage: benchmark exit=$BENCH_EXIT. Will still run post-pipeline on what was saved." || true
+    ${DAGUA_NOTIFY:-echo} "Dagua salvage: benchmark exit=$BENCH_EXIT. Will still run post-pipeline on what was saved." || true
 fi
 
 # --- Step 2: post-benchmark pipeline ----------------------------------------
@@ -70,9 +70,9 @@ print(f\"ok={c.get('ok',0):,} err={c.get('error',0):,} skip={c.get('skipped',0):
 " 2>/dev/null || echo "summary unavailable")
 
 if [ $POST_EXIT -eq 0 ]; then
-    ~/.claude/scripts/send-to-jmt.sh "Dagua salvage DONE: $SUMMARY. Reports in eval_output/report/. Final scope complete -- benchmark bench_exit=$BENCH_EXIT." || true
+    ${DAGUA_NOTIFY:-echo} "Dagua salvage DONE: $SUMMARY. Reports in eval_output/report/. Final scope complete -- benchmark bench_exit=$BENCH_EXIT." || true
 else
-    ~/.claude/scripts/send-to-jmt.sh "Dagua salvage PARTIAL: post-pipeline exit=$POST_EXIT. $SUMMARY." || true
+    ${DAGUA_NOTIFY:-echo} "Dagua salvage PARTIAL: post-pipeline exit=$POST_EXIT. $SUMMARY." || true
 fi
 
 echo "=== [salvage] finished at $(date -Iseconds) post_exit=$POST_EXIT ==="
