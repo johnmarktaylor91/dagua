@@ -330,3 +330,5 @@ e2b59776a9ef6545100bb9b119fe9051b4e7707f:.secrets.baseline:generic-api-key:146
 e2b59776a9ef6545100bb9b119fe9051b4e7707f:.secrets.baseline:generic-api-key:153
 73a2790bdb3f00e92df379f1317c993fe9b36fa7:.secrets.baseline:generic-api-key:140
 73a2790bdb3f00e92df379f1317c993fe9b36fa7:.secrets.baseline:generic-api-key:147
+# Tree-scan fingerprint (run-on snapshot push, 2026-10-06): a 17-char identifier in release notes.
+CHANGELOG.md:generic-api-key:2316

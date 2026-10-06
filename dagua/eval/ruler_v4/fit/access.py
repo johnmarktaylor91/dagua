@@ -18,7 +18,7 @@ from dagua.eval.ruler_v4.fit.bank import _FROZEN_A15_ROLE_HASH
 _ACCESS_LEDGER_ROOT = Path("outputs/ruler_v4/p3/gate/ACCESS_LEDGER")
 _LOOK_OCCASIONS = ("post-M1", "post-M2", "post-M3", "stopping")
 _CALIBRATION_KEYS = frozenset({"within-family-calibration", "cross-family-calibration"})
-W08_LEDGER_KEY = "w08-off-distribution"
+W08_LEDGER_KEY = "w08-off-distribution"  # gitleaks:allow (ledger category label, not a credential)
 H_JND_LEDGER_KEY = "test-h-jnd-branch"
 _PLANNED_PRESENTATIONS = 8520
 _Z_ALPHA_OVER_TWO = NormalDist().inv_cdf(0.975)
