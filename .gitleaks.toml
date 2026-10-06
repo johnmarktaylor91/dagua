@@ -3,5 +3,6 @@
 useDefault = true
 
 [allowlist]
-description = "detect-secrets baseline: stores only SHA-1 hashes of candidate strings, never values"
+description = "detect-secrets baseline stores only SHA-1 hashes; graph names in release notes are not keys"
 paths = ['''^\.secrets\.baseline$''']
+stopwords = ['''sugiyama/petersen''']
