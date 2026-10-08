@@ -1,5 +1,9 @@
 # Dagua TODO — Post-Sprint 2 Debrief
 
+> Historical list from March 2026, kept for its roadmap and ADRs. It has not been triaged since. For the
+> current state of the project (paused since 2026-09-01; next effort not chosen) read `docs/STATUS.md`, and
+> for active unresolved work read `docs/OPEN_ISSUES.md`.
+
 ## Runtime Scaling Results
 
 Dagua vs Graphviz (dot engine), 50 optimization steps, CPU:

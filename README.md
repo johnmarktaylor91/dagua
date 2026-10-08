@@ -10,7 +10,7 @@ Graphviz has dominated graph visualization for 30 years but has hard scaling lim
 
 ## Status
 
-Pre-alpha. Under active development.
+Pre-alpha. Development is paused since 2026-09-01; see [docs/STATUS.md](docs/STATUS.md) for the current state.
 
 Fast status references:
 - [docs/STATUS.md](docs/STATUS.md)
