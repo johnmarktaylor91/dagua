@@ -6257,7 +6257,6 @@ def _terminal_w5_polish(
 
         incumbent_score_pair, incumbent_axes = honest_score_payload(final_pos)
         cluster_tightening_telemetry: list[dict[str, Any]] = []
-        cluster_selected = False
         cluster_seed_positions: list[tuple[str, torch.Tensor]] = []
         tallied_axis = (
             "directed" if is_semantically_directed and declared_hierarchical else "undirected"
@@ -6367,7 +6366,6 @@ def _terminal_w5_polish(
                 incumbent_axes,
             ) = selected_cluster_candidate
             final_pos = selected_cluster_pos.to(device=final_pos.device, dtype=final_pos.dtype)
-            cluster_selected = True
             for record in cluster_tightening_telemetry:
                 if record["name"] == selected_cluster_name:
                     record["selected"] = True
@@ -6428,185 +6426,227 @@ def _terminal_w5_polish(
             )
             return final_pos
 
-        seed_bank = [
-            W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
-            for seed_name, seed_pos in list(
-                getattr(config, "_dagua_native_terminal_w5_seed_bank", [])
-            )
-        ]
-        from dagua.layout.ops.sprawl_repair import (
-            radial_winsorize_positions,
-            sprawl_repair_gate,
-        )
+        def run_terminal_chain(
+            chain_pos: torch.Tensor,
+            chain_pair: W5ScorePair,
+            chain_axes: W5HonestAxes,
+            *,
+            register: bool,
+        ) -> tuple[torch.Tensor, W5ScorePair]:
+            """Run the deterministic terminal chain from one champion track.
 
-        if sprawl_repair_gate(
-            final_pos,
-            c5_whitespace_ratio=incumbent_score_pair.c5_whitespace_ratio,
-        ):
-            repair_seed = radial_winsorize_positions(final_pos)
-            if not torch.equal(repair_seed, final_pos):
-                # The raw holder remains ``incumbent_pos``; this only gives
-                # the existing finisher a second, outlier-repaired basin.
-                seed_bank.append(W5Seed("sprawl_repaired", repair_seed))
-        seed_bank.append(W5Seed("terminal_final", final_pos))
-        for seed_name, seed_pos in cluster_seed_positions:
-            seed_bank.append(
-                W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
-            )
-        if extra_seeds is not None:
-            seed_bank.extend(
-                W5Seed(seed_name, seed_pos.to(device=final_pos.device, dtype=final_pos.dtype))
-                for seed_name, seed_pos in extra_seeds
-            )
+            Parameters
+            ----------
+            chain_pos : torch.Tensor
+                Track incumbent positions with shape ``[N, 2]``.
+            chain_pair : W5ScorePair
+                Frozen-ruler score pair for ``chain_pos``.
+            chain_axes : W5HonestAxes
+                Honest routing axes for ``chain_pos``.
+            register : bool
+                Whether accepted checkpoints feed the anytime-best register.
 
-        w5_kwargs: dict[str, Any] = {
-            "incumbent_pos": final_pos,
-            "incumbent_score_pair": incumbent_score_pair,
-            "seeds": seed_bank,
-            "edge_index": edge_index,
-            "node_sizes": cpu_node_sizes.to(device=edge_index.device),
-            "shape_geometry": shape_geometry,
-            "score_fn": honest_score,
-            "is_semantically_directed": is_semantically_directed,
-            "declared_hierarchical": declared_hierarchical,
-            "direction_is_declared": direction_is_declared,
-            "config": config,
-            "incumbent_axes": incumbent_axes,
-        }
-        if referee_key_fn is not None:
-            w5_kwargs["referee_key_fn"] = referee_key_fn
-        w5_result = run_w5_finisher(**w5_kwargs)
-        log_w5_telemetry(w5_result, config)
-        # W5 runs once, sentinel-owned, on the true final tensor, monotone,
-        # fidelity no-op. Weighted inputs add the severe-G6 prefix before the
-        # unchanged dual-ruler comparison.
-        terminal_winner_pos = final_pos
-        terminal_winner_pair = incumbent_score_pair
-        terminal_winner_reason: Optional[str] = None
-        if w5_result.accepted and w5_dominates(
-            w5_result.winner_score_pair,
-            incumbent_score_pair,
-            0.05,
-            candidate_referee_key=(
-                referee_key_fn(w5_result.winner_pos) if referee_key_fn is not None else (1, -0.0)
-            ),
-            incumbent_referee_key=(
-                referee_key_fn(final_pos) if referee_key_fn is not None else (1, -0.0)
-            ),
-            tallied_axis=(
-                "directed" if is_semantically_directed and declared_hierarchical else "undirected"
-            ),
-        ):
-            terminal_winner_pos = w5_result.winner_pos
-            terminal_winner_pair = w5_result.winner_score_pair
-            terminal_winner_reason = "terminal_w5_accept"
-        sprawl_repair = run_w5_sprawl_repair_candidate(
-            incumbent_pos=terminal_winner_pos,
-            incumbent_score_pair=terminal_winner_pair,
-            score_fn=honest_score,
-            referee_key_fn=referee_key_fn,
-            config=config,
-            is_semantically_directed=is_semantically_directed,
-            declared_hierarchical=declared_hierarchical,
-            direction_is_declared=direction_is_declared,
-        )
-        if sprawl_repair.selected:
-            terminal_winner_pos = sprawl_repair.winner_pos.to(
-                device=final_pos.device,
-                dtype=final_pos.dtype,
-            )
-            terminal_winner_pair = sprawl_repair.winner_score_pair
-            terminal_winner_reason = "sprawl_repaired"
-        scale_sweep = run_w5_terminal_global_scale_sweep(
-            incumbent_pos=terminal_winner_pos,
-            incumbent_score_pair=terminal_winner_pair,
-            score_fn=honest_score,
-            referee_key_fn=referee_key_fn,
-            config=config,
-            is_semantically_directed=is_semantically_directed,
-            declared_hierarchical=declared_hierarchical,
-            direction_is_declared=direction_is_declared,
-        )
-        if scale_sweep.selected:
-            terminal_winner_pos = scale_sweep.winner_pos.to(
-                device=final_pos.device,
-                dtype=final_pos.dtype,
-            )
-            terminal_winner_pair = scale_sweep.winner_score_pair
-            if abs(scale_sweep.winner_scale_x - scale_sweep.winner_scale_y) <= 1.0e-12:
-                terminal_winner_reason = f"terminal_scale_sweep_x{scale_sweep.winner_scale:g}"
-            else:
-                terminal_winner_reason = (
-                    "terminal_scale_sweep_"
-                    f"sx{scale_sweep.winner_scale_x:g}_sy{scale_sweep.winner_scale_y:g}"
+            Returns
+            -------
+            tuple[torch.Tensor, W5ScorePair]
+                Final track positions and their score pair after the W5
+                finisher, sprawl-repair candidate, global scale sweep,
+                SMACOF stress polish, continuous facet polish, and small-N
+                anneal.
+            """
+            seed_bank = [
+                W5Seed(seed_name, seed_pos.to(device=chain_pos.device, dtype=chain_pos.dtype))
+                for seed_name, seed_pos in list(
+                    getattr(config, "_dagua_native_terminal_w5_seed_bank", [])
                 )
-        smacof_stress = run_w5_terminal_smacof_stress_polish(
-            incumbent_pos=terminal_winner_pos,
-            incumbent_score_pair=terminal_winner_pair,
-            edge_index=edge_index,
-            node_sizes=cpu_node_sizes.to(device=edge_index.device),
-            all_pairs_dist=all_pairs_dist,
-            score_fn=honest_score,
-            referee_key_fn=referee_key_fn,
-            config=config,
-            is_semantically_directed=is_semantically_directed,
-            declared_hierarchical=declared_hierarchical,
-            direction_is_declared=direction_is_declared,
-        )
-        if smacof_stress.selected:
-            terminal_winner_pos = smacof_stress.winner_pos.to(
-                device=final_pos.device,
-                dtype=final_pos.dtype,
+            ]
+            from dagua.layout.ops.sprawl_repair import (
+                radial_winsorize_positions,
+                sprawl_repair_gate,
             )
-            terminal_winner_pair = smacof_stress.winner_score_pair
-            terminal_winner_reason = "terminal_smacof_stress_polish"
-        continuous_facet_polish = run_w5_terminal_continuous_facet_polish(
-            incumbent_pos=terminal_winner_pos,
-            incumbent_score_pair=terminal_winner_pair,
-            edge_index=edge_index,
-            node_sizes=cpu_node_sizes.to(device=edge_index.device),
-            score_fn=honest_score,
-            structure=terminal_structure,
-            clusters=clusters,
-            cluster_parents=cluster_parents,
-            referee_key_fn=referee_key_fn,
-            config=config,
-            has_weights=edge_weights is not None,
-            is_semantically_directed=is_semantically_directed,
-            declared_hierarchical=declared_hierarchical,
-            direction_is_declared=direction_is_declared,
-        )
-        if continuous_facet_polish.selected:
-            terminal_winner_pos = continuous_facet_polish.winner_pos.to(
-                device=final_pos.device,
-                dtype=final_pos.dtype,
+
+            if sprawl_repair_gate(
+                chain_pos,
+                c5_whitespace_ratio=chain_pair.c5_whitespace_ratio,
+            ):
+                repair_seed = radial_winsorize_positions(chain_pos)
+                if not torch.equal(repair_seed, chain_pos):
+                    # The raw holder remains ``incumbent_pos``; this only gives
+                    # the existing finisher a second, outlier-repaired basin.
+                    seed_bank.append(W5Seed("sprawl_repaired", repair_seed))
+            seed_bank.append(W5Seed("terminal_final", chain_pos))
+            for seed_name, seed_pos in cluster_seed_positions:
+                seed_bank.append(
+                    W5Seed(seed_name, seed_pos.to(device=chain_pos.device, dtype=chain_pos.dtype))
+                )
+            if extra_seeds is not None:
+                seed_bank.extend(
+                    W5Seed(seed_name, seed_pos.to(device=chain_pos.device, dtype=chain_pos.dtype))
+                    for seed_name, seed_pos in extra_seeds
+                )
+
+            w5_kwargs: dict[str, Any] = {
+                "incumbent_pos": chain_pos,
+                "incumbent_score_pair": chain_pair,
+                "seeds": seed_bank,
+                "edge_index": edge_index,
+                "node_sizes": cpu_node_sizes.to(device=edge_index.device),
+                "shape_geometry": shape_geometry,
+                "score_fn": honest_score,
+                "is_semantically_directed": is_semantically_directed,
+                "declared_hierarchical": declared_hierarchical,
+                "direction_is_declared": direction_is_declared,
+                "config": config,
+                "incumbent_axes": chain_axes,
+            }
+            if referee_key_fn is not None:
+                w5_kwargs["referee_key_fn"] = referee_key_fn
+            w5_result = run_w5_finisher(**w5_kwargs)
+            log_w5_telemetry(w5_result, config)
+            # W5 runs once per track, sentinel-owned, on the true final
+            # tensor, monotone, fidelity no-op. Weighted inputs add the
+            # severe-G6 prefix before the unchanged dual-ruler comparison.
+            terminal_winner_pos = chain_pos
+            terminal_winner_pair = chain_pair
+            terminal_winner_reason: Optional[str] = None
+            if w5_result.accepted and w5_dominates(
+                w5_result.winner_score_pair,
+                chain_pair,
+                0.05,
+                candidate_referee_key=(
+                    referee_key_fn(w5_result.winner_pos)
+                    if referee_key_fn is not None
+                    else (1, -0.0)
+                ),
+                incumbent_referee_key=(
+                    referee_key_fn(chain_pos) if referee_key_fn is not None else (1, -0.0)
+                ),
+                tallied_axis=(
+                    "directed"
+                    if is_semantically_directed and declared_hierarchical
+                    else "undirected"
+                ),
+            ):
+                terminal_winner_pos = w5_result.winner_pos
+                terminal_winner_pair = w5_result.winner_score_pair
+                terminal_winner_reason = "terminal_w5_accept"
+            sprawl_repair = run_w5_sprawl_repair_candidate(
+                incumbent_pos=terminal_winner_pos,
+                incumbent_score_pair=terminal_winner_pair,
+                score_fn=honest_score,
+                referee_key_fn=referee_key_fn,
+                config=config,
+                is_semantically_directed=is_semantically_directed,
+                declared_hierarchical=declared_hierarchical,
+                direction_is_declared=direction_is_declared,
             )
-            terminal_winner_pair = continuous_facet_polish.winner_score_pair
-            terminal_winner_reason = "terminal_continuous_facet_polish"
-        small_n_anneal = run_w5_terminal_small_n_anneal(
-            incumbent_pos=terminal_winner_pos,
-            incumbent_score_pair=terminal_winner_pair,
-            edge_index=edge_index,
-            node_sizes=cpu_node_sizes.to(device=edge_index.device),
-            score_fn=honest_score,
-            referee_key_fn=referee_key_fn,
-            config=config,
-            has_clusters=bool(clusters),
-            has_weights=edge_weights is not None,
-            is_semantically_directed=is_semantically_directed,
-            declared_hierarchical=declared_hierarchical,
-            direction_is_declared=direction_is_declared,
+            if sprawl_repair.selected:
+                terminal_winner_pos = sprawl_repair.winner_pos.to(
+                    device=chain_pos.device,
+                    dtype=chain_pos.dtype,
+                )
+                terminal_winner_pair = sprawl_repair.winner_score_pair
+                terminal_winner_reason = "sprawl_repaired"
+            scale_sweep = run_w5_terminal_global_scale_sweep(
+                incumbent_pos=terminal_winner_pos,
+                incumbent_score_pair=terminal_winner_pair,
+                score_fn=honest_score,
+                referee_key_fn=referee_key_fn,
+                config=config,
+                is_semantically_directed=is_semantically_directed,
+                declared_hierarchical=declared_hierarchical,
+                direction_is_declared=direction_is_declared,
+            )
+            if scale_sweep.selected:
+                terminal_winner_pos = scale_sweep.winner_pos.to(
+                    device=chain_pos.device,
+                    dtype=chain_pos.dtype,
+                )
+                terminal_winner_pair = scale_sweep.winner_score_pair
+                if abs(scale_sweep.winner_scale_x - scale_sweep.winner_scale_y) <= 1.0e-12:
+                    terminal_winner_reason = f"terminal_scale_sweep_x{scale_sweep.winner_scale:g}"
+                else:
+                    terminal_winner_reason = (
+                        "terminal_scale_sweep_"
+                        f"sx{scale_sweep.winner_scale_x:g}_sy{scale_sweep.winner_scale_y:g}"
+                    )
+            smacof_stress = run_w5_terminal_smacof_stress_polish(
+                incumbent_pos=terminal_winner_pos,
+                incumbent_score_pair=terminal_winner_pair,
+                edge_index=edge_index,
+                node_sizes=cpu_node_sizes.to(device=edge_index.device),
+                all_pairs_dist=all_pairs_dist,
+                score_fn=honest_score,
+                referee_key_fn=referee_key_fn,
+                config=config,
+                is_semantically_directed=is_semantically_directed,
+                declared_hierarchical=declared_hierarchical,
+                direction_is_declared=direction_is_declared,
+            )
+            if smacof_stress.selected:
+                terminal_winner_pos = smacof_stress.winner_pos.to(
+                    device=chain_pos.device,
+                    dtype=chain_pos.dtype,
+                )
+                terminal_winner_pair = smacof_stress.winner_score_pair
+                terminal_winner_reason = "terminal_smacof_stress_polish"
+            continuous_facet_polish = run_w5_terminal_continuous_facet_polish(
+                incumbent_pos=terminal_winner_pos,
+                incumbent_score_pair=terminal_winner_pair,
+                edge_index=edge_index,
+                node_sizes=cpu_node_sizes.to(device=edge_index.device),
+                score_fn=honest_score,
+                structure=terminal_structure,
+                clusters=clusters,
+                cluster_parents=cluster_parents,
+                referee_key_fn=referee_key_fn,
+                config=config,
+                has_weights=edge_weights is not None,
+                is_semantically_directed=is_semantically_directed,
+                declared_hierarchical=declared_hierarchical,
+                direction_is_declared=direction_is_declared,
+            )
+            if continuous_facet_polish.selected:
+                terminal_winner_pos = continuous_facet_polish.winner_pos.to(
+                    device=chain_pos.device,
+                    dtype=chain_pos.dtype,
+                )
+                terminal_winner_pair = continuous_facet_polish.winner_score_pair
+                terminal_winner_reason = "terminal_continuous_facet_polish"
+            small_n_anneal = run_w5_terminal_small_n_anneal(
+                incumbent_pos=terminal_winner_pos,
+                incumbent_score_pair=terminal_winner_pair,
+                edge_index=edge_index,
+                node_sizes=cpu_node_sizes.to(device=edge_index.device),
+                score_fn=honest_score,
+                referee_key_fn=referee_key_fn,
+                config=config,
+                has_clusters=bool(clusters),
+                has_weights=edge_weights is not None,
+                is_semantically_directed=is_semantically_directed,
+                declared_hierarchical=declared_hierarchical,
+                direction_is_declared=direction_is_declared,
+            )
+            if small_n_anneal.selected:
+                if register and register_anytime_best is not None:
+                    register_anytime_best(small_n_anneal.winner_pos, "terminal_small_n_anneal")
+                return (
+                    small_n_anneal.winner_pos.to(device=chain_pos.device, dtype=chain_pos.dtype),
+                    small_n_anneal.winner_score_pair,
+                )
+            if terminal_winner_reason is not None:
+                if register and register_anytime_best is not None:
+                    register_anytime_best(terminal_winner_pos, terminal_winner_reason)
+                return terminal_winner_pos, terminal_winner_pair
+            return chain_pos, chain_pair
+
+        primary_final_pos, _primary_final_pair = run_terminal_chain(
+            final_pos,
+            incumbent_score_pair,
+            incumbent_axes,
+            register=True,
         )
-        if small_n_anneal.selected:
-            if register_anytime_best is not None:
-                register_anytime_best(small_n_anneal.winner_pos, "terminal_small_n_anneal")
-            return small_n_anneal.winner_pos.to(device=final_pos.device, dtype=final_pos.dtype)
-        if terminal_winner_reason is not None:
-            if register_anytime_best is not None:
-                register_anytime_best(terminal_winner_pos, terminal_winner_reason)
-            return terminal_winner_pos
-        if cluster_selected:
-            return final_pos
+        return primary_final_pos
     except Exception as exc:  # noqa: BLE001 -- terminal W5 cannot sink the returned layout
         if is_worker_timeout_like_exception(exc):
             raise
@@ -6729,7 +6769,40 @@ def _apply_public_direction_frame(pos: torch.Tensor, direction: str) -> torch.Te
     return result
 
 
-def layout_dagua_native_pipeline(
+def _undo_public_direction_frame(pos: torch.Tensor, direction: str) -> torch.Tensor:
+    """Transform public-direction coordinates back into the canonical TB frame.
+
+    Exact inverse of :func:`_apply_public_direction_frame`, used by the
+    shadow-champion final contest so both terminal drawings are scored in the
+    same canonical frame the honest ruler expects.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Public-frame position tensor with shape ``[N, 2]``.
+    direction : str
+        Public layout direction, one of ``TB``, ``BT``, ``LR``, or ``RL``.
+
+    Returns
+    -------
+    torch.Tensor
+        Canonical TB position tensor. ``TB`` is returned unchanged.
+    """
+    if direction == "TB":
+        return pos
+    result = pos.clone()
+    if direction == "BT":
+        result[:, 1] = -pos[:, 1]
+    elif direction == "LR":
+        result[:, 0] = pos[:, 1]
+        result[:, 1] = pos[:, 0]
+    elif direction == "RL":
+        result[:, 0] = pos[:, 1]
+        result[:, 1] = -pos[:, 0]
+    return result
+
+
+def _layout_dagua_native_single_track(
     edge_index: torch.Tensor,
     num_nodes: int,
     node_sizes: torch.Tensor,
@@ -7655,6 +7728,390 @@ def layout_dagua_native_pipeline(
             anytime_best = getattr(prepared_config, "_dagua_native_anytime_best", None)
             if anytime_best is not None:
                 return public_pos(anytime_best.pos.to(device=target_device, dtype=torch.float32))
+        raise
+
+
+def _shadow_contest_final_keys(
+    track_positions: Sequence[torch.Tensor],
+    *,
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    edge_weights: Optional[torch.Tensor],
+    clusters: Optional[dict[str, Any]],
+    cluster_parents: Optional[dict[str, Optional[str]]],
+    structure: Optional[GraphStructure],
+    config: Optional[LayoutConfig],
+) -> list[tuple[tuple[int, float], float]]:
+    """Score final track drawings with the runtime referee for one contest.
+
+    The key matches the terminal-contest semantics the frozen benchmark seam
+    ranks by: the severe-G6 eligibility prefix followed by the runtime
+    restricted-V3 tiered headline score, computed on canonical TB tensors.
+
+    Parameters
+    ----------
+    track_positions : Sequence[torch.Tensor]
+        Canonical-frame final drawings, each with shape ``[N, 2]``.
+    edge_index : torch.Tensor
+        Edge tensor with shape ``[2, E]``.
+    num_nodes : int
+        Number of nodes in each track drawing.
+    node_sizes : torch.Tensor
+        Node-size tensor with shape ``[N, 2]``.
+    edge_weights : torch.Tensor, optional
+        Declared edge weights with shape ``[E]``.
+    clusters : dict[str, Any], optional
+        Cluster membership metadata.
+    cluster_parents : dict[str, str | None], optional
+        Nested-cluster parent metadata.
+    structure : GraphStructure, optional
+        Pre-classified topology; classified on demand when absent.
+    config : LayoutConfig, optional
+        Configuration whose deterministic ledger is charged for the referee
+        evaluations (the legacy-track shadow ledger).
+
+    Returns
+    -------
+    list[tuple[tuple[int, float], float]]
+        One referee key per track drawing, in input order.
+    """
+    from dagua.eval.ruler_v3 import referee_eligibility_key
+    from dagua.layout.ops.pipelines.native_v3_referee import score_v3_runtime_result
+    from dagua.metrics import _all_pairs_unweighted, _build_csr
+
+    cpu_edge_index = edge_index.detach().to(device="cpu", dtype=torch.long)
+    cpu_node_sizes = node_sizes.detach().to(device="cpu", dtype=torch.float32)
+    final_structure = structure or classify_graph(cpu_edge_index, int(num_nodes))
+    v3_problem = LayoutProblem(
+        edge_index=cpu_edge_index,
+        num_nodes=int(num_nodes),
+        node_sizes=cpu_node_sizes,
+        direction="TB",
+        clusters=clusters,
+        cluster_parents=cluster_parents,
+        structure=final_structure,  # type: ignore[arg-type]
+        edge_weights=None if edge_weights is None else edge_weights.detach().to(device="cpu"),
+    )
+    offsets, targets = _build_csr(cpu_edge_index, int(num_nodes))
+    all_pairs_dist = _all_pairs_unweighted(
+        offsets,
+        targets,
+        int(num_nodes),
+        max_dist=int(num_nodes),
+    )
+    keys: list[tuple[tuple[int, float], float]] = []
+    for pos in track_positions:
+        cpu_pos = pos.detach().to(device="cpu", dtype=torch.float32)
+        result = score_v3_runtime_result(cpu_pos, v3_problem, all_pairs_dist=all_pairs_dist)
+        _charge_runtime_v3_referee_score(v3_problem, config, "shadow_champion_final_referee")
+        keys.append((referee_eligibility_key(result), float(result.scores["tiered"])))
+    return keys
+
+
+def layout_dagua_native_pipeline(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+    node_sizes: torch.Tensor,
+    config: Optional[LayoutConfig] = None,
+    device: Optional[str] = None,
+    optimizer_type: str = "adam",
+    init_pos: Optional[torch.Tensor] = None,
+    clusters: Optional[dict[str, Any]] = None,
+    cluster_parents: Optional[dict[str, Optional[str]]] = None,
+    cluster_labels: Optional[dict[str, str]] = None,
+    label_positions: Optional[Any] = None,
+    edge_labels: Optional[Any] = None,
+    node_shapes: Optional[list[str]] = None,
+    edge_label_boxes: Optional[torch.Tensor] = None,
+    cluster_label_boxes: Optional[dict[str, Any]] = None,
+    layer_assignments: Optional[torch.Tensor] = None,
+    prebuilt_layer_index: Optional[Any] = None,
+    graph_structure: Optional[GraphStructure] = None,
+    skip_classification: bool = False,
+    seed: Optional[int] = None,
+    edge_weights: Optional[torch.Tensor] = None,
+    fidelity_mode: Optional[Any] = None,
+    fidelity_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Run the native pipeline with the shadow-champion legacy-track contest.
+
+    The outermost invocation runs the full topology-dispatched solve (see
+    :func:`_layout_dagua_native_single_track` for the entry contracts). When
+    any marketplace contest inside the solve was won by a new-arm family
+    (W2-4a / C10: contest-stage rank is not monotone in final rank), the
+    ENTIRE pipeline is re-run once with every new-arm generation site
+    gate-closed -- the byte-identical legacy track, on an isolated fresh
+    deterministic DWU ledger carrying the entry budget plan and no wall-clock
+    deadline -- and the runtime referee picks between the two FINAL drawings,
+    ties to the legacy track. The legacy-track re-run is unconditional on
+    displacement rows: it never bids against the primary run's remaining
+    budget and no wall-clock or load condition can veto it, so the emission
+    can never fall below what the no-new-arm pipeline would have produced.
+    Rows where no new arm won any contest never reach the shadow branch
+    (byte-inert). Re-entrant invocations (multi-start candidates, the
+    legacy-monolith sub-arm) and the frozen scale anytime wrapper bypass the
+    orchestration entirely.
+
+    Parameters
+    ----------
+    edge_index : torch.Tensor
+        Graph connectivity with shape ``[2, E]``.
+    num_nodes : int
+        Number of graph nodes.
+    node_sizes : torch.Tensor
+        Node sizes with shape ``[N, 2]``.
+    config : LayoutConfig, optional
+        Layout configuration.
+    device : str, optional
+        Target execution device.
+    optimizer_type : str, default="adam"
+        Optimizer implementation for gradient sub-pipelines.
+    init_pos : torch.Tensor, optional
+        Optional initial positions with shape ``[N, 2]``.
+    clusters : dict[str, Any], optional
+        Cluster membership metadata.
+    cluster_parents : dict[str, str], optional
+        Nested-cluster parent metadata.
+    cluster_labels : dict[str, str], optional
+        Cluster-label text keyed by cluster name.
+    label_positions : Any, optional
+        Edge-label anchors aligned to ``edge_index``.
+    edge_labels : Any, optional
+        Edge-label text aligned to ``edge_index``.
+    node_shapes : list[str], optional
+        Node-shape metadata aligned to graph nodes.
+    edge_label_boxes : torch.Tensor, optional
+        Edge-label geometry boxes with shape ``[E, 2]``.
+    cluster_label_boxes : dict[str, Any], optional
+        Cluster-label geometry payload keyed by cluster name.
+    layer_assignments : torch.Tensor, optional
+        Optional layer assignments with shape ``[N]``.
+    prebuilt_layer_index : Any, optional
+        Optional pre-built layer index.
+    graph_structure : GraphStructure, optional
+        Optional pre-classified topology.
+    skip_classification : bool, default=False
+        Whether to skip classification during config preparation.
+    seed : int, optional
+        RNG seed override.
+    edge_weights : torch.Tensor, optional
+        Optional edge weights with shape ``[E]``.
+    fidelity_mode : Any, optional
+        Fidelity selector; fidelity rows bypass the shadow orchestration.
+    fidelity_dtype : torch.dtype, default=torch.float32
+        Fidelity-mode internal dtype stored on the effective config.
+
+    Returns
+    -------
+    torch.Tensor
+        Detached position tensor with shape ``[N, 2]``.
+    """
+    from dagua.layout.ops.pipelines.native_budget import charge, release_tail_reservation
+    from dagua.layout.ops.pipelines.native_shadow_champion import (
+        DISABLE_NEW_ARMS_ATTR,
+        NEW_ARM_DISPLACEMENTS_ATTR,
+        SHADOW_CONTEST_TELEMETRY_ATTR,
+        build_legacy_shadow_config,
+        install_shadow_reservation_state,
+        new_arms_disabled,
+        price_shadow_package,
+        snapshot_ledger_plan,
+    )
+
+    def run_single_track(track_config: Optional[LayoutConfig]) -> torch.Tensor:
+        """Run one full single-track solve with the given configuration.
+
+        Parameters
+        ----------
+        track_config : LayoutConfig, optional
+            Track configuration (primary or legacy-shadow).
+
+        Returns
+        -------
+        torch.Tensor
+            Public-frame final positions with shape ``[N, 2]``.
+        """
+        return _layout_dagua_native_single_track(
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            node_sizes=node_sizes,
+            config=track_config,
+            device=device,
+            optimizer_type=optimizer_type,
+            init_pos=init_pos,
+            clusters=clusters,
+            cluster_parents=cluster_parents,
+            cluster_labels=cluster_labels,
+            label_positions=label_positions,
+            edge_labels=edge_labels,
+            node_shapes=node_shapes,
+            edge_label_boxes=edge_label_boxes,
+            cluster_label_boxes=cluster_label_boxes,
+            layer_assignments=layer_assignments,
+            prebuilt_layer_index=prebuilt_layer_index,
+            graph_structure=graph_structure,
+            skip_classification=skip_classification,
+            seed=seed,
+            edge_weights=edge_weights,
+            fidelity_mode=fidelity_mode,
+            fidelity_dtype=fidelity_dtype,
+        )
+
+    is_owner_invocation = config is None or not bool(
+        getattr(config, "_dagua_native_terminal_w5_owner", False)
+    )
+    orchestrate = (
+        is_owner_invocation
+        and num_nodes >= 2
+        and not new_arms_disabled(config)
+        and not bool(getattr(config, "_dagua_scale_anytime_native", False))
+        and fidelity_mode is None
+        and getattr(config, "fidelity_mode", None) is None
+    )
+    if not orchestrate:
+        if (
+            is_owner_invocation
+            and not new_arms_disabled(config)
+            and bool(getattr(config, "_dagua_scale_anytime_native", False))
+        ):
+            # The scale-anytime caller runs under a hard wall deadline and
+            # cannot afford a legacy-track shadow re-run, so it must never
+            # see a new-arm contest win either: fail-closed to the legacy
+            # track by gate-closing every new-arm generation site (F1).
+            anytime_config = copy.copy(config)
+            setattr(anytime_config, DISABLE_NEW_ARMS_ATTR, True)
+            return run_single_track(anytime_config)
+        return run_single_track(config)
+
+    # The displacement log is a shared mutable list: shallow config copies
+    # inside the solve (per-component problems, contest seams) alias it, so a
+    # new-arm contest win recorded anywhere in the solve reaches this seam.
+    displacements: list[dict[str, Any]] = []
+    # Snapshot the entry budget plan and price the complete shadow package
+    # BEFORE the primary solve spends from the shared ledger. A new arm may
+    # win a contest only if this package reserves all-or-nothing on the entry
+    # ledger at that argmax (try_reserve_shadow_package); otherwise the
+    # contest fails closed to the legacy champion. Primary and shadow
+    # therefore always fit the one entry budget together (F1).
+    ledger_plan = snapshot_ledger_plan(config)
+    edge_count = int(edge_index.shape[1]) if edge_index.numel() else 0
+    shadow_plan = price_shadow_package(
+        config,
+        num_nodes=int(num_nodes),
+        num_edges=edge_count,
+        has_clusters=bool(clusters),
+        has_weights=edge_weights is not None,
+    )
+    primary_config = copy.copy(config) if config is not None else LayoutConfig()
+    setattr(primary_config, NEW_ARM_DISPLACEMENTS_ATTR, displacements)
+    reservation_state = install_shadow_reservation_state(primary_config, shadow_plan)
+    primary_pos = run_single_track(primary_config)
+    if not displacements:
+        if bool(reservation_state.get("reserved")) and shadow_plan is not None:
+            release_tail_reservation(
+                primary_config,
+                shadow_plan.package_dwu,
+                "shadow_champion_no_displacement",
+            )
+        if reservation_state["vetoes"] and config is not None:
+            # Fail-closed rows: a new arm would have won at least one contest
+            # but the shadow package was unaffordable, so the legacy champion
+            # was emitted instead (forensics + regression coverage).
+            setattr(
+                config,
+                SHADOW_CONTEST_TELEMETRY_ATTR,
+                {
+                    "displacements": [],
+                    "emitted": "primary",
+                    "reservation_vetoes": list(reservation_state["vetoes"]),
+                },
+            )
+        return primary_pos
+
+    public_direction = str(getattr(config, "direction", "TB")) if config is not None else "TB"
+    if public_direction not in {"TB", "BT", "LR", "RL"}:
+        public_direction = "TB"
+    if shadow_plan is not None:
+        # Fund the shadow track from the held reservation: the released
+        # package becomes the shadow's fresh ledger plus the final referee
+        # charge, so the two tracks together never exceed the entry plan.
+        release_tail_reservation(
+            primary_config,
+            shadow_plan.package_dwu,
+            "shadow_champion_fund_shadow_track",
+        )
+        charge(primary_config, shadow_plan.referee_dwu, "shadow_champion_final_referee")
+    try:
+        shadow_config = build_legacy_shadow_config(config, ledger_plan, shadow_plan)
+        shadow_pos = run_single_track(shadow_config)
+        if int(shadow_pos.shape[0]) != int(primary_pos.shape[0]) or not bool(
+            torch.isfinite(shadow_pos).all().item()
+        ):
+            raise RuntimeError(
+                "legacy-track shadow re-run returned an incompatible tensor "
+                f"(shadow shape {tuple(shadow_pos.shape)}, "
+                f"primary shape {tuple(primary_pos.shape)})"
+            )
+        primary_key, shadow_key = _shadow_contest_final_keys(
+            [
+                _undo_public_direction_frame(primary_pos, public_direction),
+                _undo_public_direction_frame(shadow_pos, public_direction),
+            ],
+            edge_index=edge_index,
+            num_nodes=int(primary_pos.shape[0]),
+            node_sizes=node_sizes,
+            edge_weights=edge_weights,
+            clusters=clusters,
+            cluster_parents=cluster_parents,
+            structure=graph_structure,
+            config=shadow_config,
+        )
+        emit_shadow = shadow_key >= primary_key
+        _LOGGER.info(
+            "Shadow-champion final contest displacements=%s primary_key=%s "
+            "shadow_key=%s emitted=%s",
+            displacements,
+            primary_key,
+            shadow_key,
+            "shadow" if emit_shadow else "primary",
+        )
+        if config is not None:
+            setattr(
+                config,
+                SHADOW_CONTEST_TELEMETRY_ATTR,
+                {
+                    "displacements": list(displacements),
+                    "primary_key": primary_key,
+                    "shadow_key": shadow_key,
+                    "emitted": "shadow" if emit_shadow else "primary",
+                    "primary_pos": primary_pos.detach().to(device="cpu"),
+                    "shadow_pos": shadow_pos.detach().to(device="cpu"),
+                    "shadow_plan": shadow_plan,
+                },
+            )
+        if emit_shadow:
+            return shadow_pos.to(device=primary_pos.device, dtype=primary_pos.dtype)
+        return primary_pos
+    except Exception as exc:
+        # After a displacement the primary is never silently emitted: an
+        # ordinary shadow failure means the monotonicity contract cannot be
+        # certified for this solve, so it propagates to the caller (F1).
+        _LOGGER.error(
+            "shadow-champion legacy-track re-run failed after a displacement; "
+            "propagating (the displaced primary is never emitted unverified)",
+            exc_info=True,
+        )
+        if config is not None:
+            setattr(
+                config,
+                SHADOW_CONTEST_TELEMETRY_ATTR,
+                {
+                    "displacements": list(displacements),
+                    "emitted": "error",
+                    "error": repr(exc),
+                },
+            )
         raise
 
 

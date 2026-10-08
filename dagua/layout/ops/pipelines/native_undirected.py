@@ -76,6 +76,10 @@ from dagua.layout.ops.pipelines.native_cost_model import (
     estimate_native_work_cost,
     estimate_v3_referee_cost,
 )
+from dagua.layout.ops.pipelines.native_shadow_champion import (
+    new_arms_disabled,
+    resolve_contest_winner,
+)
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 from dagua.layout.projection import project_overlaps
@@ -2957,8 +2961,9 @@ def _router_v2_large_mini_contest(
     # repulsion family this fast path historically lacked. Clustered rows are
     # structurally unreachable here (_use_large_prism_shortlist excludes them).
     # Admission is DWU-ledger-only (never wall/process-time -- review F2), so
-    # the admitted gamma set is identical under any machine load.
-    if "tfdp_sparse" in shortlist.candidates:
+    # the admitted gamma set is identical under any machine load. The t-FDP
+    # family is a new arm: the legacy-track shadow re-run gate-closes it.
+    if "tfdp_sparse" in shortlist.candidates and not new_arms_disabled(config):
         tfdp_started = time.perf_counter()
         try:
             from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
@@ -3016,7 +3021,21 @@ def _router_v2_large_mini_contest(
         scores[name] = score
         if score_telemetry is not None:
             cluster_score_telemetry[name] = score_telemetry
+    mini_incumbent_name = best_name
     best_name = _select_undirected_winner(scores, cluster_score_telemetry, best_name)
+    # Shadow-champion legacy-track contest (W2-4a / C10, review F1): a
+    # new-arm win in the large fast-path mini-contest is admitted only when
+    # the shadow package reserves; a veto fails closed to the legacy champion.
+    best_name = resolve_contest_winner(
+        config,
+        route="undirected_large_mini",
+        best_name=best_name,
+        scores=scores,
+        telemetry=cluster_score_telemetry,
+        select_winner=lambda legacy_scores, legacy_telemetry: _select_undirected_winner(
+            legacy_scores, legacy_telemetry, mini_incumbent_name
+        ),
+    )
     try:
         projected_winner = _project_candidate_prism(positions[best_name], problem)
     except Exception as exc:  # noqa: BLE001 -- the terminal W5 seed is optional
@@ -3152,7 +3171,13 @@ def layout_native_undirected_portfolio(
         # a bounded band mini-contest instead of the unrefereed early return.
         # MAX_CONTEST_NODES itself stays 1500 -- this is a new bounded code
         # path; an explicit caller deadline still returns the incumbent bare.
-        if n > MAX_CONTEST_NODES and getattr(config, "time_budget_s", None) is None:
+        # The band's t-FDP candidates are a new arm: the legacy-track shadow
+        # re-run gate-closes the whole band path (pre-W1-A early return).
+        if (
+            n > MAX_CONTEST_NODES
+            and getattr(config, "time_budget_s", None) is None
+            and not new_arms_disabled(config)
+        ):
             try:
                 from dagua.layout.ops.pipelines.native_sparse_infrastructure import (
                     sparse_band_contest_eligible,
@@ -3979,8 +4004,13 @@ def layout_native_undirected_portfolio(
     # into the normal contest (reference-default gamma; the band and the
     # large fast path carry the full gamma sweep). Clustered rows stay with
     # the cluster-aware families. Admission is DWU-ledger-only (never
-    # wall/process-time -- review F2).
-    if "tfdp_sparse" in shortlist.candidates and not problem.clusters:
+    # wall/process-time -- review F2). The t-FDP family is a new arm: the
+    # legacy-track shadow re-run gate-closes it.
+    if (
+        "tfdp_sparse" in shortlist.candidates
+        and not problem.clusters
+        and not new_arms_disabled(config)
+    ):
         tfdp_started = time.perf_counter()
         try:
             from dagua.layout.ops.pipelines.native_seed_replication import frozen_seed_bank
@@ -4166,7 +4196,11 @@ def layout_native_undirected_portfolio(
         planar_candidate_requires_certificate,
     )
 
-    if planar_arm_admitted(problem) and _portfolio_has_budget(config):
+    if (
+        planar_arm_admitted(problem)
+        and not new_arms_disabled(config)
+        and _portfolio_has_budget(config)
+    ):
         planar_started = time.perf_counter()
         try:
             planar_cost = estimate_native_work_cost(
@@ -4518,6 +4552,18 @@ def layout_native_undirected_portfolio(
 
     # Argmax selection; strict inequality means ties go to the incumbent.
     best_name = _select_undirected_winner(scores, cluster_score_telemetry)
+    # Shadow-champion legacy-track contest (W2-4a / C10, review F1): a
+    # new-arm winner is admitted only when the complete legacy-track shadow
+    # package reserves all-or-nothing on the entry ledger; on a veto the
+    # contest fails closed to the legacy-family champion and no shadow runs.
+    best_name = resolve_contest_winner(
+        config,
+        route="undirected",
+        best_name=best_name,
+        scores=scores,
+        telemetry=cluster_score_telemetry,
+        select_winner=_select_undirected_winner,
+    )
     _log_marketplace_telemetry(
         route="undirected",
         structural_gate=(

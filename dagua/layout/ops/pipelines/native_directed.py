@@ -22,6 +22,10 @@ from dagua.layout.ops.pipelines.native_cost_model import (
     estimate_native_work_cost,
     estimate_v3_referee_cost,
 )
+from dagua.layout.ops.pipelines.native_shadow_champion import (
+    new_arms_disabled,
+    resolve_contest_winner,
+)
 from dagua.layout.ops.state import LayoutProblem, RuntimeContext, SolveState
 from dagua.layout.ops.taxonomy import OpCategory, register_op
 
@@ -5956,7 +5960,11 @@ def layout_native_directed_portfolio(
     # Zero-crossing-certified candidate names (planar arm); checked again on
     # the exact emitted tensor before the contest returns (W1B-1).
     planar_certified_names: set = set()
-    if planar_arm_admitted(problem) and _portfolio_has_budget(config, min_remaining_s=2.0):
+    if (
+        planar_arm_admitted(problem)
+        and not new_arms_disabled(config)
+        and _portfolio_has_budget(config, min_remaining_s=2.0)
+    ):
         try:
             planar_cost = _directed_opaque_arm_cost(problem, config, PLANAR_ARM_PRIOR_S)
             planar_cost_s = planar_cost.generation_dwu + planar_cost.reserved_score_dwu
@@ -6161,6 +6169,21 @@ def layout_native_directed_portfolio(
         if score_telemetry is not None:
             cluster_score_telemetry[name] = score_telemetry
     best_name = _select_directed_winner(scores, cluster_score_telemetry)
+    # Shadow-champion legacy-track contest (W2-4a / C10, review F1): a
+    # new-arm winner (whose displacement arms the outermost invocation to
+    # re-run the ENTIRE solve with new arms disabled -- including the
+    # dominance-gated tail arms below and the directed terminal seams) is
+    # admitted only when the complete legacy-track shadow package reserves
+    # all-or-nothing on the entry ledger; on a veto the contest fails closed
+    # to the legacy-family champion and no shadow runs.
+    best_name = resolve_contest_winner(
+        config,
+        route="directed",
+        best_name=best_name,
+        scores=scores,
+        telemetry=cluster_score_telemetry,
+        select_winner=_select_directed_winner,
+    )
     best_position = positions[best_name]
     if best_name != "incumbent" and _portfolio_has_budget(config, min_remaining_s=2.0):
         edge_count = int(problem.edge_index.shape[1]) if problem.edge_index.numel() else 0
