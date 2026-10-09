@@ -66,10 +66,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--layouts", type=Path, nargs="+", required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--seed", type=int, default=20261008)
+    ap.add_argument("--alt-graphs", type=Path, nargs="*", default=[],
+                    help="TAG=path graphs.json of other branches; variants need identical topology")
     args = ap.parse_args(argv)
     rng = random.Random(args.seed)
     graphs = json.loads(args.graphs.read_text())
     rows = load(args.layouts)
+    alt = {}
+    for spec in args.alt_graphs:
+        tag, path = str(spec).split("=", 1)
+        alt[tag] = json.loads(Path(path).read_text())
     by_graph = defaultdict(dict)
     for (g, lay), row in rows.items():
         by_graph[g][lay] = row
@@ -87,7 +93,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             rec = {"graph": g, "x": "dagua@main", "y": lay, "delta": delta,
                    "xs": d["score"], "ys": row["score"], "votes": term_votes(d, row)}
             if eng == "dagua" and tag != "main":
-                if d["pos"] != row["pos"]:
+                other = alt.get(tag, {}).get(g)
+                same_topology = other is not None and other["edges"] == graphs[g]["edges"] \
+                    and other["node_sizes"] == graphs[g]["node_sizes"]
+                if same_topology and d["pos"] != row["pos"]:
                     cands["dagua_branch_variant"].append(rec)
                 continue
             if eng == "dagua":
