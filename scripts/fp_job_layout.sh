@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Job wrapper for the fresh-pairs layout sweep. Usage: fp_job_layout.sh TAG [ENGINES] [WORKERS]
 set -u
-TAG=${1:-main}; ENGINES=${2:-}; WORKERS=${3:-3}
+TAG=${1:-main}; ENGINES=${2:-}; WORKERS=${3:-3}; REV=${4:-}
+OUTTAG=$TAG${REV:+_rev}
 export PYTHONPATH=$PWD
 export CUDA_VISIBLE_DEVICES=
 export NODE_PATH=$HOME/data/dagua/refs/node_modules
@@ -26,9 +27,9 @@ r.main(["--graphs", "smoke/graphs.json", "--layouts", "smoke/layouts-main.jsonl"
 PY
 fi
 cp -r smoke out/smoke
-$PY scripts/fp_layout.py --out out --tag "$TAG" --workers "$WORKERS" "${EXTRA[@]}" > out/layout.log 2>&1
+$PY scripts/fp_layout.py --out out --tag "$OUTTAG" --workers "$WORKERS" ${REV:+--reverse} "${EXTRA[@]}" > out/layout.log 2>&1
 rc=$?
-D=$HOME/scratch/dagua-freshpairs/$TAG
-mkdir -p "$D" && cp out/graphs.json out/layouts-"$TAG".jsonl out/layout.log "$D"/
+D=$HOME/scratch/dagua-freshpairs/$OUTTAG
+mkdir -p "$D" && cp out/graphs.json out/layouts-"$OUTTAG".jsonl out/layout.log "$D"/
 echo "layout rc=$rc"
 exit $rc

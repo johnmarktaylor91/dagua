@@ -171,6 +171,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--engines", default=",".join(ENGINES))
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit", type=int, default=0, help="first N graphs only (probe)")
+    ap.add_argument("--reverse", action="store_true", help="process graphs last to first (shard)")
     args = ap.parse_args(argv)
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")  # CPU only: forked workers, repeatable
     args.out.mkdir(parents=True, exist_ok=True)
@@ -194,7 +195,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         }
     (args.out / "graphs.json").write_text(json.dumps(graphs_meta))
     engines = [e for e in args.engines.split(",") if e]
-    tasks = [(row[0], eng) for row in corpus for eng in engines]
+    ordered = list(reversed(corpus)) if args.reverse else corpus
+    tasks = [(row[0], eng) for row in ordered for eng in engines]
     print(f"{len(corpus)} graphs x {len(engines)} engines = {len(tasks)} tasks", flush=True)
     ctx = mp.get_context("fork")
     done = 0
