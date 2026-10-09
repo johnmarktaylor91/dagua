@@ -154,7 +154,8 @@ def draw_drawing(
         ls = min((iw - 6) / max(lx1 - lx0, 1e-6), (iw - 6) / max(ly1 - ly0, 1e-6))
         def lp(x: float, y: float) -> Tuple[float, float]:
             return bx0 + 3 + (x - lx0) * ls, by0 + iw - 3 - (y - ly0) * ls
-        od.rectangle([*lp(x0, y0), *lp(x1, y1)], outline=INK, width=1)
+        (wx0, wy0), (wx1, wy1) = lp(x0, y0), lp(x1, y1)
+        od.rectangle([min(wx0, wx1), min(wy0, wy1), max(wx0, wx1), max(wy0, wy1)], outline=INK, width=1)
         for i, p in enumerate(pos):
             qx, qy = lp(p[0], p[1])
             od.rectangle([qx - 1, qy - 1, qx + 1, qy + 1], fill=INK)
