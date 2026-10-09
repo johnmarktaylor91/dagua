@@ -2,6 +2,8 @@
 # Job wrapper for the fresh-pairs layout sweep. Usage: fp_job_layout.sh TAG [ENGINES] [WORKERS]
 set -u
 TAG=${1:-main}; ENGINES=${2:-}; WORKERS=${3:-3}
+export PYTHONPATH=$PWD
+export CUDA_VISIBLE_DEVICES=
 export NODE_PATH=$HOME/data/dagua/refs/node_modules
 PY=$HOME/anaconda3/envs/py311/bin/python
 mkdir -p out smoke
