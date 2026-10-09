@@ -6,7 +6,7 @@ export NODE_PATH=$HOME/data/dagua/refs/node_modules
 PY=$HOME/anaconda3/envs/py311/bin/python
 mkdir -p out smoke
 EXTRA=()
-[ -n "$ENGINES" ] && EXTRA=(--engines "$ENGINES")
+[ -n "$ENGINES" ] && [ "$ENGINES" != all ] && EXTRA=(--engines "$ENGINES")
 $PY scripts/fp_layout.py --out smoke --tag "$TAG" --limit 2 --workers 2 "${EXTRA[@]}" > smoke/log.txt 2>&1 || { echo smoke-failed; cp -r smoke out/; exit 3; }
 if [ "$TAG" = main ]; then
   $PY - <<'PY' > smoke/render.log 2>&1 || { echo render-smoke-failed; cp -r smoke out/; exit 4; }
